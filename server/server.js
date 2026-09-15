@@ -18,7 +18,11 @@ dotenv.config({ path: path.join(__dirname, '.env') });
 const app = express();
 const PORT = process.env.PORT || 5000;
 const ML_SERVICE_URL = process.env.ML_SERVICE_URL || 'http://localhost:8000';
-const JWT_SECRET = process.env.JWT_SECRET || 'supersecret_capstone_key_2026';
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  console.error('FATAL: JWT_SECRET environment variable is not set. Refusing to start.');
+  process.exit(1);
+}
 
 app.use(cors({ origin: 'http://localhost:5173', credentials: true }));
 app.use(express.json());
