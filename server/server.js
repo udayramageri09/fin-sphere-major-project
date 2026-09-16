@@ -44,8 +44,14 @@ app.use(cors({ origin: 'http://localhost:5173', credentials: true }));
 app.use(express.json());
 app.use(cookieParser());
 
-// Set up multer for file uploads using memory storage for zero-footprint
-const upload = multer({ storage: multer.memoryStorage() });
+// Set up multer for file uploads using memory storage for zero-footprint.
+// Limit: 5 MB — generous upper bound for any real-world bank statement
+// (typical PDF/Excel statements are 50–500 KB). Blocks pathological uploads
+// before they consume server memory or reach the parsing logic.
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 } // 5 MB
+});
 
 // Prepopulated transactions list in memory (resets on server restart for simplicity, 
 // but we can persist it to a local JSON file to make it real and persistent!)
@@ -194,7 +200,23 @@ app.delete('/api/transactions/:id', authenticate, (req, res) => {
 
 // 4. POST /api/transactions/parse-statement
 // Supports both pasted text (req.body.text) and file upload (req.file)
-app.post('/api/transactions/parse-statement', authenticate, upload.single('statementFile'), async (req, res) => {
+// upload.single() is called programmatically (not as inline middleware) so that
+// Multer's LIMIT_FILE_SIZE error can be caught here and returned as a clean
+// 413 JSON response before any parsing logic executes.
+app.post('/api/transactions/parse-statement', authenticate, (req, res, next) => {
+  upload.single('statementFile')(req, res, (err) => {
+    if (err) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({
+          error: 'File too large. Maximum allowed size is 5 MB.'
+        });
+      }
+      // Unexpected multer error — pass to Express error handler
+      return next(err);
+    }
+    next();
+  });
+}, async (req, res) => {
   let statementText = '';
   let isExcel = false;
 
