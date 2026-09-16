@@ -22,7 +22,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API_URL}/transactions`);
+      const res = await fetch(`${API_URL}/transactions`, { credentials: 'include' });
       if (!res.ok) throw new Error('Failed to fetch transactions');
       const data = await res.json();
       setTransactions(data);
@@ -44,6 +44,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     try {
       const res = await fetch(`${API_URL}/transactions`, {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(txn)
       });
@@ -62,7 +63,8 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     setError(null);
     try {
       const res = await fetch(`${API_URL}/transactions/${id}`, {
-        method: 'DELETE'
+        method: 'DELETE',
+        credentials: 'include'
       });
       if (!res.ok) throw new Error('Failed to delete transaction');
       setTransactions(prev => prev.filter(t => t.id !== id));
@@ -84,11 +86,13 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
         formData.append('statementFile', input);
         res = await fetch(`${API_URL}/transactions/parse-statement`, {
           method: 'POST',
+          credentials: 'include',
           body: formData
         });
       } else {
         res = await fetch(`${API_URL}/transactions/parse-statement`, {
           method: 'POST',
+          credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text: input })
         });
@@ -115,6 +119,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     try {
       const res = await fetch(`${API_URL}/chat`, {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages })
       });
