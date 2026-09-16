@@ -192,6 +192,7 @@ export default function Plans() {
 
       const res = await fetch(`${API}/plan-chat`, {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages: history, mlContext })
       });
@@ -215,7 +216,7 @@ export default function Plans() {
     setIsLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API}/ml/analyze`);
+      const res = await fetch(`${API}/ml/analyze`, { credentials: 'include' });
       if (!res.ok) {
         const errData = await res.json();
         throw new Error(errData.detail || errData.error || 'ML service error');

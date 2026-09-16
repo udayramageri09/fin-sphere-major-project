@@ -24,6 +24,22 @@ if (!JWT_SECRET) {
   process.exit(1);
 }
 
+// ── Authentication Middleware ──────────────────────────────────────────────────
+// Reads the JWT from the httpOnly cookie set at login, verifies it, and attaches
+// the decoded identity to req.user.  Returns 401 for missing / invalid / expired tokens.
+function authenticate(req, res, next) {
+  const token = req.cookies.token;
+  if (!token) return res.status(401).json({ error: 'Authentication required' });
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = { id: decoded.id, email: decoded.email };
+    next();
+  } catch {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+}
+// ───────────────────────────────────────────────────────────────────────────────
+
 app.use(cors({ origin: 'http://localhost:5173', credentials: true }));
 app.use(express.json());
 app.use(cookieParser());
@@ -131,12 +147,15 @@ app.get('/api/auth/verify', (req, res) => {
 // ----------------------
 
 // 1. GET /api/transactions
-app.get('/api/transactions', (req, res) => {
-  res.json(transactions);
+app.get('/api/transactions', authenticate, (req, res) => {
+  // Return only the authenticated user's transactions.
+  // Orphaned transactions (no userId) are intentionally excluded.
+  const userTransactions = transactions.filter(t => t.userId === req.user.id);
+  res.json(userTransactions);
 });
 
 // 2. POST /api/transactions (Manual Entry)
-app.post('/api/transactions', (req, res) => {
+app.post('/api/transactions', authenticate, (req, res) => {
   const { title, amount, date, type, category } = req.body;
   if (!title || amount === undefined || !date || !type) {
     return res.status(400).json({ error: 'Title, amount, date, and type are required' });
@@ -144,6 +163,7 @@ app.post('/api/transactions', (req, res) => {
 
   const newTransaction = {
     id: Date.now(),
+    userId: req.user.id, // ownership stamp — always from verified JWT, never from req.body
     title,
     amount: parseFloat(amount),
     date,
@@ -157,22 +177,24 @@ app.post('/api/transactions', (req, res) => {
 });
 
 // 3. DELETE /api/transactions/:id
-app.delete('/api/transactions/:id', (req, res) => {
+app.delete('/api/transactions/:id', authenticate, (req, res) => {
   const id = parseInt(req.params.id);
-  const initialLength = transactions.length;
-  transactions = transactions.filter(t => t.id !== id);
-  
-  if (transactions.length === initialLength) {
+  const target = transactions.find(t => t.id === id);
+
+  // Return 404 for both non-existent and non-owned transactions.
+  // This avoids revealing the existence of another user's record.
+  if (!target || target.userId !== req.user.id) {
     return res.status(404).json({ error: 'Transaction not found' });
   }
-  
+
+  transactions = transactions.filter(t => t.id !== id);
   saveTransactions();
   res.json({ message: 'Transaction deleted successfully' });
 });
 
 // 4. POST /api/transactions/parse-statement
 // Supports both pasted text (req.body.text) and file upload (req.file)
-app.post('/api/transactions/parse-statement', upload.single('statementFile'), async (req, res) => {
+app.post('/api/transactions/parse-statement', authenticate, upload.single('statementFile'), async (req, res) => {
   let statementText = '';
   let isExcel = false;
 
@@ -291,6 +313,7 @@ app.post('/api/transactions/parse-statement', upload.single('statementFile'), as
 
           parsedTxns.push({
             id: Date.now() + i,
+            userId: req.user.id, // ownership stamp for Excel-parsed transactions
             title: title || 'Bank Transaction',
             amount,
             date: dateStr,
@@ -379,6 +402,7 @@ Return only the valid JSON array, like: [{"title": "Salary", "amount": 50000, "d
         if (Array.isArray(parsed)) {
           const newTxns = parsed.map((txn, index) => ({
             id: Date.now() + index,
+            userId: req.user.id, // ownership stamp for AI-parsed transactions
             title: txn.title || 'Unlabeled Transaction',
             amount: parseFloat(txn.amount) || 0,
             date: txn.date || new Date().toISOString().split('T')[0],
@@ -447,6 +471,7 @@ Return only the valid JSON array, like: [{"title": "Salary", "amount": 50000, "d
 
         parsedTxns.push({
           id: Date.now() + i,
+          userId: req.user.id, // ownership stamp for rule-based-parsed transactions
           title,
           amount,
           date,
@@ -475,15 +500,19 @@ Return only the valid JSON array, like: [{"title": "Salary", "amount": 50000, "d
 });
 
 // 5. POST /api/chat
-app.post('/api/chat', async (req, res) => {
+app.post('/api/chat', authenticate, async (req, res) => {
   const { messages } = req.body;
   if (!messages || !Array.isArray(messages)) {
     return res.status(400).json({ error: 'Messages array is required' });
   }
 
+  // Scope financial context to the authenticated user only.
+  // The global transactions array is never sent to the AI.
+  const userTransactions = transactions.filter(t => t.userId === req.user.id);
+
   // Calculate current metrics to provide as context
-  const totalIncome = transactions.filter(t => t.amount > 0).reduce((sum, t) => sum + t.amount, 0);
-  const totalExpenses = transactions.filter(t => t.amount < 0).reduce((sum, t) => sum + Math.abs(t.amount), 0);
+  const totalIncome = userTransactions.filter(t => t.amount > 0).reduce((sum, t) => sum + t.amount, 0);
+  const totalExpenses = userTransactions.filter(t => t.amount < 0).reduce((sum, t) => sum + Math.abs(t.amount), 0);
   const netWorth = 4500000 + (totalIncome - totalExpenses); // base ₹45,50,000 + delta
   const liabilities = 2450000;
 
@@ -492,8 +521,8 @@ app.post('/api/chat', async (req, res) => {
     monthlyIncome: totalIncome,
     monthlyExpenses: totalExpenses,
     liabilities,
-    transactionCount: transactions.length,
-    recentTransactions: transactions.slice(0, 10)
+    transactionCount: userTransactions.length,
+    recentTransactions: userTransactions.slice(0, 10)
   };
 
   const systemMessage = {
@@ -577,8 +606,8 @@ Keep responses under 3-4 sentences if possible, unless a detailed breakdown is r
   } else if (userMessage.includes('statement') || userMessage.includes('upload') || userMessage.includes('parse')) {
     reply = `You can easily parse bank statements by going to the 'All Transactions' tab, pasting your bank statement logs, or uploading a statement text file! I'll auto-extract all of them. 📂`;
   } else {
-    // Pick a random recent transaction to talk about
-    const randomTx = transactions[Math.floor(Math.random() * transactions.length)];
+    // Pick a random recent transaction to talk about (scoped to the authenticated user)
+    const randomTx = userTransactions[Math.floor(Math.random() * userTransactions.length)];
     const txDetail = randomTx ? `For example, I see a recent transaction for "${randomTx.title}" of ₹${Math.abs(randomTx.amount).toLocaleString('en-IN')}.` : '';
     reply = `I can help you review your finances! ${txDetail} Ask me about your net worth, recent expenses, or how to import statements! 💡`;
   }
@@ -587,11 +616,12 @@ Keep responses under 3-4 sentences if possible, unless a detailed breakdown is r
 });
 
 // 6. GET /api/ml/analyze — proxies full ML analysis to Python microservice
-app.get('/api/ml/analyze', async (req, res) => {
+app.get('/api/ml/analyze', authenticate, async (req, res) => {
   try {
-    // Fetch current transactions
+    // Scope ML analysis to the authenticated user's transactions only.
+    const userTransactions = transactions.filter(t => t.userId === req.user.id);
     const payload = {
-      transactions: transactions,
+      transactions: userTransactions,
       liabilities: 2450000,
       base_net_worth: 4500000,
       emergency_fund: 300000,
@@ -623,7 +653,10 @@ app.get('/api/ml/analyze', async (req, res) => {
 });
 
 // 7. POST /api/plan-chat — LLM narrates ML results only (strict narrate-only prompt)
-app.post('/api/plan-chat', async (req, res) => {
+// Authentication is enforced. mlContext is client-provided state derived from /api/ml/analyze
+// (which is now scoped to the authenticated user). Full server-side re-validation of mlContext
+// is a follow-up task (tracked separately; a redesign of the plan-chat architecture is required).
+app.post('/api/plan-chat', authenticate, async (req, res) => {
   const { messages, mlContext } = req.body;
   if (!messages || !Array.isArray(messages)) {
     return res.status(400).json({ error: 'Messages array is required' });
