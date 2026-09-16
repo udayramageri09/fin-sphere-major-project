@@ -10,6 +10,7 @@ import { fileURLToPath } from 'url';
 import jwt from 'jsonwebtoken';
 import cookieParser from 'cookie-parser';
 import bcrypt from 'bcrypt';
+import rateLimit from 'express-rate-limit';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -95,6 +96,21 @@ function isGroqConfigured() {
   return process.env.GROQ_API_KEY && process.env.GROQ_API_KEY !== 'your_groq_api_key_here';
 }
 
+// ── Auth Rate Limiter ──────────────────────────────────────────────────────────
+// Applies to POST /api/auth/register and POST /api/auth/login only.
+// 15 requests per 15 minutes per IP — generous enough for genuine users who
+// mistype their password. Helps reduce brute-force and registration-spam
+// attempts. Uses in-memory store (resets on restart); a
+// production deployment should use a Redis-backed store instead.
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 15,
+  standardHeaders: true,  // Return RateLimit-* headers (RFC 6585 draft)
+  legacyHeaders: false,   // Disable deprecated X-RateLimit-* headers
+  message: { error: 'Too many attempts. Please try again in 15 minutes.' }
+});
+// ───────────────────────────────────────────────────────────────────────────────
+
 // --- AUTHENTICATION ---
 const USERS_FILE = './server_users.json';
 let users = [];
@@ -113,9 +129,20 @@ function saveUsers() {
 }
 loadUsers();
 
-app.post('/api/auth/register', async (req, res) => {
+app.post('/api/auth/register', authLimiter, async (req, res) => {
   const { email, password } = req.body;
+  // 1. Presence check (must come first, guards against null/undefined below)
   if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+  // 2. Type check — reject non-string values that passed the truthiness check above
+  if (typeof email !== 'string' || typeof password !== 'string') {
+    return res.status(400).json({ error: 'Email and password must be strings' });
+  }
+  // 3. Email format check
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) return res.status(400).json({ error: 'Invalid email format' });
+  // 4. Password minimum length
+  if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
+  // 5. Duplicate-user check (only after input is known-clean)
   if (users.find(u => u.email === email)) return res.status(400).json({ error: 'User already exists' });
   const hashedPassword = await bcrypt.hash(password, 10);
   const newUser = { id: Date.now(), email, password: hashedPassword };
@@ -124,7 +151,7 @@ app.post('/api/auth/register', async (req, res) => {
   res.json({ message: 'User registered successfully' });
 });
 
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', authLimiter, async (req, res) => {
   const { email, password } = req.body;
   const user = users.find(u => u.email === email);
   if (!user || !(await bcrypt.compare(password, user.password))) {
