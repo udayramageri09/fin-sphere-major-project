@@ -24,6 +24,12 @@ if (!JWT_SECRET) {
   console.error('FATAL: JWT_SECRET environment variable is not set. Refusing to start.');
   process.exit(1);
 }
+if (JWT_SECRET.length < 32) {
+  console.error('FATAL: JWT_SECRET must be at least 32 characters long. Refusing to start.');
+  process.exit(1);
+}
+
+const isProd = process.env.NODE_ENV === 'production';
 
 // ── Authentication Middleware ──────────────────────────────────────────────────
 // Reads the JWT from the httpOnly cookie set at login, verifies it, and attaches
@@ -158,12 +164,12 @@ app.post('/api/auth/login', authLimiter, async (req, res) => {
     return res.status(401).json({ error: 'Invalid credentials' });
   }
   const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '1h' });
-  res.cookie('token', token, { httpOnly: true, secure: false, sameSite: 'lax' });
+  res.cookie('token', token, { httpOnly: true, secure: isProd, sameSite: isProd ? 'strict' : 'lax', maxAge: 60 * 60 * 1000 });
   res.json({ message: 'Logged in successfully', user: { id: user.id, email: user.email } });
 });
 
 app.post('/api/auth/logout', (req, res) => {
-  res.clearCookie('token');
+  res.clearCookie('token', { httpOnly: true, secure: isProd, sameSite: isProd ? 'strict' : 'lax' });
   res.json({ message: 'Logged out successfully' });
 });
 
@@ -410,6 +416,7 @@ app.post('/api/transactions/parse-statement', authenticate, (req, res, next) => 
     try {
       const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
+        signal: AbortSignal.timeout(30_000),
         headers: {
           'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
           'Content-Type': 'application/json'
@@ -606,6 +613,7 @@ Keep responses under 3-4 sentences if possible, unless a detailed breakdown is r
     try {
       const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
+        signal: AbortSignal.timeout(30_000),
         headers: {
           'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
           'Content-Type': 'application/json'
@@ -680,6 +688,7 @@ app.get('/api/ml/analyze', authenticate, async (req, res) => {
 
     const mlRes = await fetch(`${ML_SERVICE_URL}/ml/full-analysis`, {
       method: 'POST',
+      signal: AbortSignal.timeout(60_000),
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     });
@@ -780,6 +789,7 @@ Guidelines:
     try {
       const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
+        signal: AbortSignal.timeout(30_000),
         headers: {
           'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
           'Content-Type': 'application/json'

@@ -32,10 +32,13 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Allow CORS from the React frontend + Node backend
+# Allow CORS from the React frontend and Node backend only.
+# The wildcard "*" is intentionally omitted — it would allow any browser origin
+# to call the unauthenticated ML endpoints.  In production, replace these values
+# with the real deployed frontend and API origins.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:5000", "*"],
+    allow_origins=["http://localhost:5173", "http://localhost:5000"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
