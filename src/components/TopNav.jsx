@@ -31,7 +31,7 @@ function TopNav({ currentView, setCurrentView }) {
         </div>
 
         {/* Desktop Nav */}
-        <nav className="hidden xl:flex items-center gap-1 overflow-x-auto whitespace-nowrap px-2 scrollbar-hide">
+        <nav className="hidden xl:flex items-center gap-0.5 2xl:gap-1 overflow-x-auto whitespace-nowrap px-0 2xl:px-2 scrollbar-hide">
           {navItems.map((item) => {
             const Icon = item.icon;
             const isActive = currentView === item.id;
@@ -40,7 +40,7 @@ function TopNav({ currentView, setCurrentView }) {
                 key={item.id}
                 onClick={() => handleNav(item.id)}
                 style={isActive ? { backgroundColor: '#09090b', color: '#ffffff' } : {}}
-                className={`flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium transition-all duration-200
+                className={`flex items-center gap-1.5 2xl:gap-2 px-2.5 2xl:px-3 py-2 rounded-xl text-sm font-medium transition-all duration-200
                   ${isActive ? 'shadow-md' : 'text-gray-500 hover:bg-gray-100 hover:text-black'}
                 `}
               >
@@ -78,8 +78,8 @@ function TopNav({ currentView, setCurrentView }) {
 
       {/* Mobile/Tablet Drawer Backdrop */}
       {isOpen && (
-        <div 
-          className="xl:hidden fixed inset-0 bg-zinc-900/40 backdrop-blur-sm z-30 transition-opacity pt-16"
+        <div
+          className="xl:hidden fixed inset-0 bg-zinc-900/40 backdrop-blur-sm z-30 transition-opacity pt-16 overflow-y-auto overscroll-contain"
           onClick={() => setIsOpen(false)}
         >
            {/* Drawer Content */}

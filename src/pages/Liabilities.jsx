@@ -27,7 +27,7 @@ function Liabilities() {
     <div className="animate-fade-in">
       <h2 style={{ marginBottom: '2rem', fontSize: '2rem' }}>Active Liabilities</h2>
       
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '1.5rem', marginBottom: '3rem' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(300px, 100%), 1fr))', gap: '1.5rem', marginBottom: '3rem' }}>
         {liabilities.map((l) => {
           const Icon = l.icon;
           return (
