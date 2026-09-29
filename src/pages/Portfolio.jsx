@@ -29,17 +29,17 @@ function Portfolio() {
     <div className="animate-fade-in">
       <h2 style={{ marginBottom: '2rem', fontSize: '2rem' }}>Your Portfolio</h2>
       
-      <div className="glass-panel" style={{ padding: '2rem', marginBottom: '2rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+      <div className="glass-panel" style={{ padding: '2rem', marginBottom: '2rem', display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: '1rem' }}>
         <div>
           <span style={{ color: 'var(--text-secondary)', fontSize: '1.1rem' }}>Total Portfolio Value</span>
-          <h3 style={{ fontSize: '2.5rem', color: 'var(--text-primary)', marginTop: '0.5rem' }}>₹{total.toLocaleString('en-IN')}</h3>
+          <h3 style={{ fontSize: 'clamp(1.75rem, 9vw, 2.5rem)', color: 'var(--text-primary)', marginTop: '0.5rem' }}>₹{total.toLocaleString('en-IN')}</h3>
         </div>
         <div style={{ padding: '1rem', background: 'rgba(16, 185, 129, 0.2)', color: 'var(--success)', borderRadius: '50%' }}>
           <TrendingUp size={40} />
         </div>
       </div>
       
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(400px, 1fr))', gap: '2rem' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(400px, 100%), 1fr))', gap: '2rem' }}>
         
         {/* Asset Allocation Widget */}
         <div className="glass-panel widget-card">
@@ -48,12 +48,12 @@ function Portfolio() {
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem', marginTop: '1.5rem' }}>
             {assets.map((a) => (
-               <div key={a.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+               <div key={a.id} style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem 1rem' }}>
                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                    <div style={{ width: '12px', height: '12px', borderRadius: '50%', background: a.color }}></div>
                    <span style={{ fontSize: '1.1rem', color: 'var(--text-primary)' }}>{a.name}</span>
                  </div>
-                 <div style={{ display: 'flex', gap: '2rem', alignItems: 'center' }}>
+                 <div style={{ display: 'flex', gap: '2rem', alignItems: 'center', marginLeft: 'auto' }}>
                    <span style={{ fontWeight: '600', color: 'var(--text-primary)' }}>₹{a.value.toLocaleString('en-IN')}</span>
                    <span style={{ color: 'var(--text-secondary)', width: '40px', textAlign: 'right' }}>{a.allocation}%</span>
                  </div>

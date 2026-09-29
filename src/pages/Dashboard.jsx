@@ -58,13 +58,13 @@ function Dashboard() {
     >
       <motion.div 
         variants={itemVariants}
-        className="flex items-center gap-4 bg-zinc-100 border border-zinc-300 p-4 rounded-xl mb-2 text-zinc-800"
+        className="flex flex-wrap items-center gap-4 bg-zinc-100 border border-zinc-300 p-4 rounded-xl mb-2 text-zinc-800"
         data-avatar-target="balance-alert"
         onMouseEnter={handleAlertHover}
         onMouseLeave={handleAlertLeave}
       >
         <AlertTriangle size={24} className="text-zinc-900" />
-        <div className="flex-1">
+        <div className="flex-1 min-w-48">
           <h4 className="m-0 text-base font-bold text-zinc-900 tracking-tight">Low Balance Alert</h4>
           <p className="m-0 text-sm text-zinc-600">Your linked account balance (₹12,500) is insufficient for upcoming SIPs & bills due this week (₹25,649).</p>
         </div>
@@ -73,7 +73,7 @@ function Dashboard() {
         </button>
       </motion.div>
 
-      <motion.header variants={itemVariants} className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
+      <motion.header variants={itemVariants} className="flex flex-col md:flex-row md:flex-wrap justify-between items-start md:items-center gap-6">
         <div>
           <h1 className="text-3xl font-bold tracking-tight-display text-zinc-900 mb-1">Welcome back, Alex</h1>
           <p className="text-zinc-500">Here's your financial overview for today.</p>

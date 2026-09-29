@@ -27,7 +27,7 @@ function Subscriptions() {
       <h2 style={{ marginBottom: '2rem', fontSize: '2rem' }}>SIPs & Subscriptions</h2>
 
       <div className="glass-panel" style={{ padding: '1.5rem' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: '1.5rem' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(300px, 100%), 1fr))', gap: '1.5rem' }}>
           {subscriptions.map(sub => (
             <div 
               key={sub.id} 

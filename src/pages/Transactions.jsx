@@ -113,10 +113,10 @@ function Transactions() {
         </div>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem', alignItems: 'start' }}>
-        
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">
+
         {/* Left Column: Input Panel & AI Parser */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
+        <div className="min-w-0" style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
           
           {/* Manual Entry Form */}
           <div className="glass-panel" style={{ padding: '1.5rem' }}>
@@ -126,7 +126,7 @@ function Transactions() {
             </h3>
             
             <form onSubmit={handleManualSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
                   <label style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Transaction Type</label>
                   <select 
@@ -170,7 +170,7 @@ function Transactions() {
                 />
               </div>
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
                   <label style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Amount (₹)</label>
                   <input 
@@ -229,26 +229,29 @@ function Transactions() {
             
             {/* Tabs */}
             <div style={{ display: 'flex', borderBottom: '1px solid var(--border-color)', marginBottom: '1.25rem' }}>
-              <button 
+              <button
                 onClick={() => setActiveTab('paste')}
-                style={{ 
-                  flex: 1, 
-                  padding: '0.6rem', 
-                  fontWeight: 600, 
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  padding: '0.6rem',
+                  fontWeight: 600,
                   color: activeTab === 'paste' ? 'var(--accent-secondary)' : 'var(--text-secondary)',
                   borderBottom: activeTab === 'paste' ? '2px solid var(--accent-secondary)' : 'none'
                 }}
               >
                 Paste Text Log
               </button>
-              <button 
+              <button
                 onClick={() => setActiveTab('upload')}
-                style={{ 
-                  flex: 1, 
-                  padding: '0.6rem', 
-                  fontWeight: 600, 
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  padding: '0.6rem',
+                  fontWeight: 600,
                   color: activeTab === 'upload' ? 'var(--accent-secondary)' : 'var(--text-secondary)',
-                  borderBottom: activeTab === 'upload' ? '2px solid var(--accent-secondary)' : 'none'
+                  borderBottom: activeTab === 'upload' ? '2px solid var(--accent-secondary)' : 'none',
+                  wordBreak: 'break-word'
                 }}
               >
                 Upload File (.txt/.csv/.xls/.xlsx)
@@ -307,7 +310,7 @@ function Transactions() {
                   position: 'relative'
                 }}>
                   <Upload size={32} color="var(--text-secondary)" />
-                  <span style={{ fontSize: '0.9rem', fontWeight: 600 }}>
+                  <span style={{ fontSize: '0.9rem', fontWeight: 600, overflowWrap: 'anywhere' }}>
                     {uploadFile ? uploadFile.name : 'Select statement file'}
                   </span>
                   <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
@@ -345,14 +348,14 @@ function Transactions() {
               </div>
             )}
 
-            {parseSuccess && <div style={{ color: 'var(--success)', fontSize: '0.9rem', textAlign: 'center', fontWeight: 'bold', marginTop: '1rem' }}>{parseSuccess}</div>}
-            {parseError && <div style={{ color: 'var(--danger)', fontSize: '0.9rem', textAlign: 'center', fontWeight: 'bold', marginTop: '1rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.3rem' }}><AlertCircle size={16} />{parseError}</div>}
+            {parseSuccess && <div style={{ color: 'var(--success)', fontSize: '0.9rem', textAlign: 'center', fontWeight: 'bold', marginTop: '1rem', overflowWrap: 'anywhere' }}>{parseSuccess}</div>}
+            {parseError && <div style={{ color: 'var(--danger)', fontSize: '0.9rem', textAlign: 'center', fontWeight: 'bold', marginTop: '1rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.3rem', overflowWrap: 'anywhere' }}><AlertCircle size={16} />{parseError}</div>}
           </div>
 
         </div>
 
         {/* Right Column: Transaction History */}
-        <div className="glass-panel" style={{ padding: '1.5rem', height: '100%', display: 'flex', flexDirection: 'column' }}>
+        <div className="glass-panel min-w-0" style={{ padding: '1.5rem', height: '100%', display: 'flex', flexDirection: 'column' }}>
           <h3 style={{ fontSize: '1.25rem', marginBottom: '1.25rem' }}>Transaction History ({transactions.length})</h3>
           
           {loading && transactions.length === 0 ? (
@@ -365,7 +368,7 @@ function Transactions() {
               No transactions yet. Add one above!
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', maxHeight: '680px', overflowY: 'auto', paddingRight: '0.5rem' }}>
+            <div className="lg:max-h-170 lg:overflow-y-auto lg:pr-2" style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
               {transactions.map((t) => {
                 const Icon = getCategoryIcon(t.category, t.type);
                 const color = getCategoryColor(t.category, t.type);
@@ -374,13 +377,16 @@ function Transactions() {
                   <div 
                     key={t.id} 
                     className="transaction-item" 
-                    style={{ 
-                      padding: '1rem', 
-                      background: 'var(--bg-color)', 
+                    style={{
+                      padding: '1rem',
+                      background: 'var(--bg-color)',
                       borderRadius: 'var(--radius-md)',
                       display: 'flex',
+                      flexWrap: 'wrap',
                       justifyContent: 'space-between',
                       alignItems: 'center',
+                      rowGap: '0.5rem',
+                      columnGap: '0.75rem',
                       border: '1px solid var(--border-color)',
                       transition: 'transform 0.2s',
                     }}
@@ -412,7 +418,7 @@ function Transactions() {
                       </div>
                     </div>
                     
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexShrink: 0, marginLeft: '1rem' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexShrink: 0, marginLeft: 'auto' }}>
                       <span style={{ color: color, fontSize: '1.05rem', fontWeight: 700, whiteSpace: 'nowrap' }}>
                         {t.amount > 0 ? '+' : ''}{t.amount.toLocaleString('en-IN', { style: 'currency', currency: 'INR' })}
                       </span>

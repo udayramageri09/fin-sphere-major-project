@@ -34,7 +34,7 @@ function App() {
         <TopNav currentView={currentView} setCurrentView={setCurrentView} />
 
         {/* Main Content Area */}
-        <main className="flex-1 w-full pt-24 pb-24 px-4 md:px-8">
+        <main className="flex-1 w-full pt-24 pb-40 px-4 md:px-8">
           <div className="max-w-7xl mx-auto w-full h-full flex flex-col gap-6">
             {currentView === 'dashboard' && <Dashboard />}
             {currentView === 'transactions' && <Transactions />}
