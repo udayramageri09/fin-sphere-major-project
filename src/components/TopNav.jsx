@@ -1,5 +1,6 @@
-import { LayoutDashboard, Wallet, CreditCard, PieChart, Target, CalendarRange, Brain, Menu, X, Settings } from 'lucide-react';
+import { LayoutDashboard, Wallet, CreditCard, PieChart, Target, CalendarRange, Brain, Menu, X, Settings, LogOut } from 'lucide-react';
 import { useState } from 'react';
+import { useAuth } from '../context/AuthContext';
 
 const navItems = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -13,6 +14,7 @@ const navItems = [
 
 function TopNav({ currentView, setCurrentView }) {
   const [isOpen, setIsOpen] = useState(false);
+  const { user, logout } = useAuth();
 
   const handleNav = (id) => {
     setCurrentView(id);
@@ -51,11 +53,21 @@ function TopNav({ currentView, setCurrentView }) {
 
         {/* Right side (Desktop Settings / Mobile Hamburger) */}
         <div className="flex items-center gap-2">
+          {user?.email && (
+            <span className="hidden xl:block text-sm text-zinc-500 max-w-45 truncate">{user.email}</span>
+          )}
           <button className="hidden xl:flex p-2 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 rounded-full transition-colors">
             <Settings size={20} />
           </button>
-          
-          <button 
+          <button
+            onClick={logout}
+            title="Log out"
+            className="hidden xl:flex p-2 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 rounded-full transition-colors"
+          >
+            <LogOut size={20} />
+          </button>
+
+          <button
             onClick={() => setIsOpen(!isOpen)} 
             className="xl:hidden p-2 -mr-2 text-zinc-900 hover:bg-zinc-100 rounded-full transition-colors"
           >
@@ -93,9 +105,19 @@ function TopNav({ currentView, setCurrentView }) {
                 );
               })}
               <div className="h-px bg-zinc-200 my-2" />
+              {user?.email && (
+                <div className="px-4 py-1 text-xs text-zinc-400 truncate">{user.email}</div>
+              )}
               <button className="flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium w-full text-left text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 transition-all duration-200">
                 <Settings size={20} className="text-zinc-400" />
                 <span>Settings</span>
+              </button>
+              <button
+                onClick={() => { setIsOpen(false); logout(); }}
+                className="flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium w-full text-left text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 transition-all duration-200"
+              >
+                <LogOut size={20} className="text-zinc-400" />
+                <span>Log out</span>
               </button>
            </div>
         </div>

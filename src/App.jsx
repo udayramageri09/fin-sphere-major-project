@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { FinanceProvider } from './context/FinanceContext'
+import { useAuth } from './context/AuthContext'
 import TopNav from './components/TopNav'
 import Dashboard from './pages/Dashboard'
 import Transactions from './pages/Transactions'
@@ -9,9 +10,23 @@ import Goals from './pages/Goals'
 import Subscriptions from './pages/Subscriptions'
 import Plans from './pages/Plans'
 import AIAvatar from './components/AIAvatar'
+import AuthPage from './pages/AuthPage'
 
 function App() {
   const [currentView, setCurrentView] = useState('dashboard');
+  const { status } = useAuth();
+
+  if (status === 'checking') {
+    return (
+      <div className="flex items-center justify-center min-h-screen w-screen bg-zinc-50">
+        <div className="w-8 h-8 rounded-lg bg-zinc-900 animate-pulse" />
+      </div>
+    );
+  }
+
+  if (status === 'unauthenticated') {
+    return <AuthPage />;
+  }
 
   return (
     <FinanceProvider currentView={currentView} setCurrentView={setCurrentView}>

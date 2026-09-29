@@ -159,6 +159,12 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
 
 app.post('/api/auth/login', authLimiter, async (req, res) => {
   const { email, password } = req.body;
+  // 1. Presence check (must come first, guards against null/undefined below)
+  if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+  // 2. Type check — reject non-string values that passed the truthiness check above
+  if (typeof email !== 'string' || typeof password !== 'string') {
+    return res.status(400).json({ error: 'Email and password must be strings' });
+  }
   const user = users.find(u => u.email === email);
   if (!user || !(await bcrypt.compare(password, user.password))) {
     return res.status(401).json({ error: 'Invalid credentials' });

@@ -1,5 +1,6 @@
 /* eslint-disable react-refresh/only-export-components, react-hooks/exhaustive-deps, react-hooks/set-state-in-effect */
 import { createContext, useContext, useState, useEffect } from 'react';
+import { useAuth } from './AuthContext';
 
 const FinanceContext = createContext(null);
 
@@ -15,6 +16,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
   const [transactions, setTransactions] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const { invalidateSession } = useAuth();
 
   const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:5000/api';
 
@@ -23,6 +25,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     setError(null);
     try {
       const res = await fetch(`${API_URL}/transactions`, { credentials: 'include' });
+      if (res.status === 401) return invalidateSession();
       if (!res.ok) throw new Error('Failed to fetch transactions');
       const data = await res.json();
       setTransactions(data);
@@ -48,6 +51,10 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(txn)
       });
+      if (res.status === 401) {
+        invalidateSession();
+        throw new Error('Session expired');
+      }
       if (!res.ok) throw new Error('Failed to add transaction');
       const newTxn = await res.json();
       setTransactions(prev => [newTxn, ...prev]);
@@ -66,6 +73,10 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
         method: 'DELETE',
         credentials: 'include'
       });
+      if (res.status === 401) {
+        invalidateSession();
+        throw new Error('Session expired');
+      }
       if (!res.ok) throw new Error('Failed to delete transaction');
       setTransactions(prev => prev.filter(t => t.id !== id));
     } catch (err) {
@@ -98,6 +109,10 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
         });
       }
 
+      if (res.status === 401) {
+        invalidateSession();
+        throw new Error('Session expired');
+      }
       if (!res.ok) {
         const errData = await res.json();
         throw new Error(errData.error || 'Failed to parse statement');
@@ -123,6 +138,10 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages })
       });
+      if (res.status === 401) {
+        invalidateSession();
+        throw new Error('Session expired');
+      }
       if (!res.ok) throw new Error('Failed to fetch AI chat response');
       const data = await res.json();
       return data.reply;
