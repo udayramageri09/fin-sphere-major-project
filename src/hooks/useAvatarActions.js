@@ -92,13 +92,10 @@ export function useAvatarActions() {
     if (!action) return false;
 
     if (action.type === 'scroll') {
-      const main = document.querySelector('.main-content');
-      if (main) {
-        if (action.direction === 'top') main.scrollTop = 0;
-        else if (action.direction === 'bottom') main.scrollTop = main.scrollHeight;
-        else if (action.direction === 'down') main.scrollTop += action.amount;
-        else if (action.direction === 'up') main.scrollTop -= action.amount;
-      }
+      if (action.direction === 'top') window.scrollTo(0, 0);
+      else if (action.direction === 'bottom') window.scrollTo(0, document.documentElement.scrollHeight);
+      else if (action.direction === 'down') window.scrollBy(0, action.amount);
+      else if (action.direction === 'up') window.scrollBy(0, -action.amount);
       window.dispatchEvent(new CustomEvent('bot-speak', {
         detail: { message: action.direction === 'down' ? "Scrolling down! 👇" : "Scrolling up! 👆" }
       }));

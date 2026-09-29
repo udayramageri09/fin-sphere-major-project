@@ -23,7 +23,7 @@ function Subscriptions() {
   };
 
   return (
-    <div className="animate-fade-in" style={{ padding: '2rem', maxWidth: '1200px', margin: '0 auto' }}>
+    <div className="animate-fade-in">
       <h2 style={{ marginBottom: '2rem', fontSize: '2rem' }}>SIPs & Subscriptions</h2>
 
       <div className="glass-panel" style={{ padding: '1.5rem' }}>
