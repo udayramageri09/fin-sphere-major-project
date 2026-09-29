@@ -24,7 +24,7 @@ function Liabilities() {
   };
 
   return (
-    <div className="animate-fade-in" style={{ padding: '2rem', maxWidth: '1400px', margin: '0 auto' }}>
+    <div className="animate-fade-in">
       <h2 style={{ marginBottom: '2rem', fontSize: '2rem' }}>Active Liabilities</h2>
       
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '1.5rem', marginBottom: '3rem' }}>

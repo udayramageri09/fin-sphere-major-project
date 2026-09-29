@@ -36,7 +36,7 @@ function AuthPage() {
   const displayError = localError || authMessage;
 
   return (
-    <div className="flex items-center justify-center min-h-screen w-screen bg-zinc-50 px-4">
+    <div className="flex items-center justify-center min-h-screen w-full bg-zinc-50 px-4">
       <div className="w-full max-w-sm glass-panel widget-card">
         <div className="flex items-center gap-3 mb-6">
           <div className="w-8 h-8 rounded-lg bg-zinc-900 flex-shrink-0" />

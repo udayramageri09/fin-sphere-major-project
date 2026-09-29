@@ -32,22 +32,27 @@
   --radius-sm: 8px;
 }
 
-/* ─── Global Reset ─── */
-*, *::before, *::after {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-  border-color: var(--border-color);
-}
+/* ─── Base ─── */
+/* Tailwind Preflight already resets box-sizing, margin and padding. These rules
+   live in @layer base so Tailwind utilities can override them. */
+@layer base {
+  *, *::before, *::after {
+    border-color: var(--border-color);
+  }
 
-body {
-  font-family: 'Inter', system-ui, -apple-system, sans-serif;
-  background-color: var(--bg-color);
-  color: var(--text-primary);
-  line-height: 1.5;
-  min-height: 100vh;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+  body {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    background-color: var(--bg-color);
+    color: var(--text-primary);
+    line-height: 1.5;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  button {
+    cursor: pointer;
+  }
 }
 
 /* ─── Utility Classes ─── */
@@ -63,33 +68,35 @@ body {
   }
 }
 
-/* ─── Glass Panel (used across all components) ─── */
-.glass-panel {
-  background: var(--glass-bg);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  border: 1px solid var(--glass-border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--glass-shadow);
-}
+@layer components {
+  /* ─── Glass Panel (used across all components) ─── */
+  .glass-panel {
+    background: var(--glass-bg);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--glass-shadow);
+  }
 
-/* ─── Widget Card (shared by sub-components) ─── */
-.widget-card {
-  padding: 1.5rem;
-}
+  /* ─── Widget Card (shared by sub-components) ─── */
+  .widget-card {
+    padding: 1.5rem;
+  }
 
-.widget-title {
-  font-size: 1.1rem;
-  font-weight: 700;
-  color: var(--text-primary);
-  margin-bottom: 1.25rem;
-  letter-spacing: -0.02em;
-}
+  .widget-title {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin-bottom: 1.25rem;
+    letter-spacing: -0.02em;
+  }
 
-.widget-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+  .widget-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
 }
 
 /* ─── Scrollbar ─── */
@@ -105,12 +112,4 @@ body {
 }
 .animate-fade-in {
   animation: fadeIn 0.4s ease-out forwards;
-}
-
-/* ─── Button Reset ─── */
-button {
-  cursor: pointer;
-  font-family: inherit;
-  border: none;
-  background: none;
 }

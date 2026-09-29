@@ -105,7 +105,7 @@ function Transactions() {
   };
 
   return (
-    <div className="animate-fade-in" style={{ padding: '2rem', maxWidth: '1400px', margin: '0 auto' }}>
+    <div className="animate-fade-in">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem' }}>
         <div>
           <h2 style={{ fontSize: '2rem', fontWeight: 700, letterSpacing: '-0.025em' }}>Transactions Center</h2>

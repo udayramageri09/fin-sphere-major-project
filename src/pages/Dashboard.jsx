@@ -51,7 +51,7 @@ function Dashboard() {
 
   return (
     <motion.div 
-      className="flex flex-col gap-8 max-w-7xl mx-auto"
+      className="flex flex-col gap-8"
       variants={containerVariants}
       initial="hidden"
       animate="show"
