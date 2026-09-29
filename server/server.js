@@ -62,7 +62,7 @@ const upload = multer({
 
 // Prepopulated transactions list in memory (resets on server restart for simplicity, 
 // but we can persist it to a local JSON file to make it real and persistent!)
-const DATA_FILE = './server_db.json';
+const DATA_FILE = path.join(__dirname, 'server_db.json');
 let transactions = [];
 
 const defaultTransactions = [
@@ -118,7 +118,7 @@ const authLimiter = rateLimit({
 // ───────────────────────────────────────────────────────────────────────────────
 
 // --- AUTHENTICATION ---
-const USERS_FILE = './server_users.json';
+const USERS_FILE = path.join(__dirname, 'server_users.json');
 let users = [];
 
 function loadUsers() {
