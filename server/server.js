@@ -212,6 +212,163 @@ function normalizeImportedRows(candidates) {
 }
 // ───────────────────────────────────────────────────────────────────────────────
 
+// ── Statement parsing helpers ──────────────────────────────────────────────────
+// Pure helpers for the Excel and text importers. They only turn raw statement
+// content into candidate rows; every candidate still goes through
+// normalizeImportedRows(), which owns all validation (dates, amounts, titles).
+// Header labels are matched exactly (after normalization), in priority order, so a
+// "Value Date" column never wins over a "Transaction Date" column.
+const HEADER_ALIASES = {
+  date: ['transaction date', 'txn date', 'date', 'value date'],
+  description: ['transaction remarks', 'remarks', 'narration', 'description', 'particulars'],
+  debit: ['withdrawal amount', 'withdrawal amt', 'withdrawal', 'debit amount', 'debit amt', 'debit'],
+  credit: ['deposit amount', 'deposit amt', 'deposit', 'credit amount', 'credit amt', 'credit']
+};
+
+// Lower-case, drop "(INR)"-style notes and dots, collapse whitespace.
+const normalizeHeaderCell = (cell) =>
+  String(cell ?? '').toLowerCase().replace(/\([^)]*\)/g, ' ').replace(/[.:*]/g, ' ').replace(/\s+/g, ' ').trim();
+
+// Column indexes for the header row, or null unless it names a date, a description and
+// at least one of debit/credit. A serial-number column, if present, is simply not used.
+function findStatementColumns(row) {
+  const cells = Array.from(row, normalizeHeaderCell);
+  const find = (aliases) => {
+    for (const alias of aliases) {
+      const index = cells.indexOf(alias);
+      if (index !== -1) return index;
+    }
+    return -1;
+  };
+  const columns = {
+    date: find(HEADER_ALIASES.date),
+    description: find(HEADER_ALIASES.description),
+    debit: find(HEADER_ALIASES.debit),
+    credit: find(HEADER_ALIASES.credit)
+  };
+  if (columns.date === -1 || columns.description === -1) return null;
+  if (columns.debit === -1 && columns.credit === -1) return null;
+  return columns;
+}
+
+// The "Legends Used in Account Statement" footer block. Only a row that STARTS with the
+// word counts, so a merchant called "Legend Hotel" in a narration does not end the import.
+function isLegendRow(row) {
+  const first = row.find((cell) => cell !== undefined && cell !== null && String(cell).trim() !== '');
+  return first !== undefined && /^legends?\b/i.test(String(first).trim());
+}
+
+const formatYmd = (year, month, day) =>
+  `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+
+// Normalizes a statement date to YYYY-MM-DD, day-first. Accepts YYYY-MM-DD, DD/MM/YYYY
+// (also - or . separators), an optional trailing time, and Excel serial numbers.
+// It does NOT check the calendar or fall back to today: an unrecognized or impossible
+// date comes back in a form the validator rejects, so that row is skipped.
+function parseStatementDate(value) {
+  if (typeof value === 'number') {
+    const parts = Number.isFinite(value) ? XLSX.SSF.parse_date_code(Math.floor(value)) : null;
+    // The window keeps stray numbers (1, 5000, 125000) from becoming plausible-looking dates.
+    if (parts && parts.y >= 1990 && parts.y <= 2100) return formatYmd(parts.y, parts.m, parts.d);
+    return String(value);
+  }
+  if (typeof value !== 'string') return '';
+  const text = value.trim().replace(/[ T]\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?$/, '');
+  let match = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/.exec(text);
+  if (match) return formatYmd(match[1], match[2], match[3]);
+  match = /^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/.exec(text); // DD/MM/YYYY, never MM/DD
+  if (match) return formatYmd(match[3], match[2], match[1]);
+  return text;
+}
+
+// One debit/credit cell -> blank | zero | positive (with value) | invalid.
+// Negative values and text that is not a plain number are invalid, not guessed at.
+function classifyAmountCell(cell) {
+  if (cell === undefined || cell === null) return { kind: 'blank' };
+  let n;
+  if (typeof cell === 'number') {
+    n = cell;
+  } else {
+    const text = String(cell).replace(/[\s,]/g, '').replace(/^(?:₹|rs\.?|inr)/i, '');
+    if (text === '' || text === '-') return { kind: 'blank' };
+    if (!DECIMAL_PATTERN.test(text)) return { kind: 'invalid' };
+    n = Number(text);
+  }
+  if (!Number.isFinite(n) || n < 0) return { kind: 'invalid' };
+  return n === 0 ? { kind: 'zero' } : { kind: 'positive', value: n };
+}
+
+// Trim separator punctuation from the ends (an explicit character list: the old
+// /[\s,;-|]/ was a RANGE from ';' to '|' that also deleted every letter), and fall
+// back only when nothing usable is left. It never shortens a title: the 120-character
+// limit belongs to normalizeTransactionInput(), which skips an overlong row.
+function finalizeStatementTitle(text) {
+  const cleaned = String(text ?? '')
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s,;:|/\\-]+|[\s,;:|/\\-]+$/g, '');
+  return cleaned || 'Bank Transaction';
+}
+
+// "UPI/123456789012/Swiggy/..." -> the first segment that is not just a reference number.
+function titleFromRemarks(remarks) {
+  const text = remarks.trim();
+  if (/^upi\//i.test(text)) {
+    const payee = text.split('/').slice(1).map((part) => part.trim()).find((part) => part && !/^\d+$/.test(part));
+    if (payee) return payee;
+  }
+  return text;
+}
+
+const TEXT_DATE_PATTERN = /(?<![\w/.-])(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{4})(?![\w/-])/;
+const AMOUNT_TOKEN = /(?<![\w.])[-+]?\d[\d,]*(?:\.\d+)?/g;
+const DIRECTION_WORDS = 'CREDITED|CREDIT|DEBITED|DEBIT|CR|DR';
+const MARKER_AFTER = new RegExp(`^\\s*\\.?\\s*(${DIRECTION_WORDS})\\b`, 'i');
+const MARKER_BEFORE = new RegExp(`\\b(${DIRECTION_WORDS})\\.?\\s*$`, 'i');
+const markerDirection = (word) => (/^(?:credit|credited|cr)$/i.test(word) ? 'income' : 'expense');
+// A running balance ("15000.00 CR") that follows the amount is not part of the description.
+const TRAILING_BALANCE = new RegExp(`\\s[-+]?\\d[\\d,]*\\.\\d{2}(?:\\s*(?:${DIRECTION_WORDS})\\b\\.?)?`, 'gi');
+
+// One line of pasted/text statement -> null (not a transaction line), { ambiguous: true }
+// (a date and an amount but no clear direction), or { date, amount, type, titleText }.
+// Direction comes only from evidence attached to the amount itself: an explicit +/- sign,
+// or a whole-word CR/DR/CREDIT/DEBIT directly before or after it. Words inside the
+// narration ("Microsoft", "Credit Card Bill", "Dr. Sharma") are never evidence, and a
+// number with no evidence (a balance, a reference) is passed over.
+function parseTextStatementLine(line) {
+  const dateMatch = TEXT_DATE_PATTERN.exec(line);
+  if (!dateMatch) return null;
+  const text = line.replace(new RegExp(TEXT_DATE_PATTERN, 'g'), ' ').replace(/\b(?:INR|Rs)\b\.?|₹/gi, ' ');
+
+  let plausibleAmounts = 0;
+  for (const match of text.matchAll(AMOUNT_TOKEN)) {
+    const token = match[0];
+    // Longer than any storable amount: phone, account and reference numbers.
+    if (token.replace(/^[-+]/, '').split('.')[0].replace(/,/g, '').length > 9) continue;
+    plausibleAmounts++;
+
+    const start = match.index;
+    const end = start + token.length;
+    const sign = token[0] === '-' ? 'expense' : token[0] === '+' ? 'income' : null;
+    const before = MARKER_BEFORE.exec(text.slice(0, start));
+    const after = MARKER_AFTER.exec(text.slice(end));
+    const directions = new Set(
+      [sign, before && markerDirection(before[1]), after && markerDirection(after[1])].filter(Boolean)
+    );
+    if (directions.size === 0) continue;
+    if (directions.size > 1) return { ambiguous: true }; // e.g. "-450.00 CR"
+
+    const afterText = text.slice(after ? end + after[0].length : end).replace(TRAILING_BALANCE, ' ');
+    return {
+      date: parseStatementDate(dateMatch[0]),
+      amount: Math.abs(Number(token.replace(/,/g, ''))),
+      type: [...directions][0],
+      titleText: `${text.slice(0, before ? before.index : start)} ${afterText}`
+    };
+  }
+  return plausibleAmounts > 0 ? { ambiguous: true } : null;
+}
+// ───────────────────────────────────────────────────────────────────────────────
+
 // Helper: check if Groq API key is configured
 function isGroqConfigured() {
   return process.env.GROQ_API_KEY && process.env.GROQ_API_KEY !== 'your_groq_api_key_here';
@@ -386,80 +543,51 @@ app.post('/api/transactions/parse-statement', authenticate, (req, res, next) => 
   if (isExcel) {
     try {
       const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
-      const sheetName = workbook.SheetNames[0];
-      const worksheet = workbook.Sheets[sheetName];
-      const rows = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+      const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+      const sheetRows = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
 
-      // Find the header row (e.g. looking for both "Transaction Remarks" and "Transaction Date")
+      // Find the header row: it must name a date, a description and at least one of a
+      // debit/credit column (see HEADER_ALIASES). A serial-number column is not needed.
       let headerRowIndex = -1;
-      for (let i = 0; i < rows.length; i++) {
-        const row = rows[i];
-        if (row && 
-            row.some(cell => cell && cell.toString().toLowerCase().includes('transaction date')) &&
-            row.some(cell => cell && cell.toString().toLowerCase().includes('transaction remarks'))) {
+      let columns = null;
+      for (let i = 0; i < sheetRows.length; i++) {
+        columns = Array.isArray(sheetRows[i]) ? findStatementColumns(sheetRows[i]) : null;
+        if (columns) {
           headerRowIndex = i;
           break;
         }
       }
 
-      if (headerRowIndex !== -1) {
-        const headerRow = rows[headerRowIndex];
-        const dateCol = headerRow.findIndex(cell => cell && cell.toString().toLowerCase().includes('transaction date'));
-        const remarksCol = headerRow.findIndex(cell => cell && cell.toString().toLowerCase().includes('transaction remarks'));
-        const withdrawalCol = headerRow.findIndex(cell => cell && cell.toString().toLowerCase().includes('withdrawal'));
-        const depositCol = headerRow.findIndex(cell => cell && cell.toString().toLowerCase().includes('deposit'));
-        const sNoCol = headerRow.findIndex(cell => cell && cell.toString().toLowerCase().includes('s no'));
-
+      if (columns) {
         const parsedTxns = [];
+        let parserSkipped = 0; // rows the parser itself refuses (ambiguous or unreadable amounts)
 
-        for (let i = headerRowIndex + 1; i < rows.length; i++) {
-          const row = rows[i];
-          if (!row) continue;
+        for (let i = headerRowIndex + 1; i < sheetRows.length; i++) {
+          const row = sheetRows[i];
+          if (!Array.isArray(row)) continue;
 
-          // Stop parsing if we reach "Legends Used" or "Legends"
-          const firstCell = row[1] ? row[1].toString().toLowerCase() : '';
-          const remarksCell = row[remarksCol] ? row[remarksCol].toString().toLowerCase() : '';
-          if (firstCell.includes('legend') || remarksCell.includes('legend') || firstCell.includes('legends')) {
-            break;
+          // Stop at the "Legends Used" footer block
+          if (isLegendRow(row)) break;
+          // Exported statements often repeat the header row on every page
+          if (HEADER_ALIASES.date.includes(normalizeHeaderCell(row[columns.date]))) continue;
+
+          const debit = classifyAmountCell(row[columns.debit]);
+          const credit = classifyAmountCell(row[columns.credit]);
+          if (debit.kind === 'invalid' || credit.kind === 'invalid') {
+            parserSkipped++;
+            continue;
+          }
+          const hasDebit = debit.kind === 'positive';
+          const hasCredit = credit.kind === 'positive';
+          if (!hasDebit && !hasCredit) continue; // no amount: notes, balances, blank lines
+          if (hasDebit && hasCredit) {
+            parserSkipped++; // both sides filled in: do not guess the direction
+            continue;
           }
 
-          // Check if row has a valid S No (integer)
-          const sNoVal = row[sNoCol] ? row[sNoCol].toString().trim() : '';
-          if (!/^\d+$/.test(sNoVal)) {
-            continue; // Skip legends, terms, balance details
-          }
-
-          // Extract values
-          const rawRemarks = row[remarksCol] ? row[remarksCol].toString().trim() : 'Bank Transaction';
-          const withdrawalVal = row[withdrawalCol] !== undefined ? parseFloat(row[withdrawalCol].toString().replace(/,/g, '')) : 0;
-          const depositVal = row[depositCol] !== undefined ? parseFloat(row[depositCol].toString().replace(/,/g, '')) : 0;
-          const rawDate = row[dateCol] ? row[dateCol].toString().trim() : '';
-
-          let amount = 0;
-          let type = 'expense';
-
-          if (depositVal > 0) {
-            amount = depositVal;
-            type = 'income';
-          } else if (withdrawalVal > 0) {
-            amount = -withdrawalVal;
-            type = 'expense';
-          } else {
-            continue; // skip zero values or undefined
-          }
-
-          // Parse date DD/MM/YYYY to YYYY-MM-DD
-          let dateStr = new Date().toISOString().split('T')[0];
-          if (rawDate) {
-            const dateParts = rawDate.split(/[-/]/);
-            if (dateParts.length === 3) {
-              if (dateParts[0].length === 4) { // YYYY-MM-DD
-                dateStr = `${dateParts[0]}-${dateParts[1].padStart(2, '0')}-${dateParts[2].padStart(2, '0')}`;
-              } else { // DD-MM-YYYY or DD/MM/YYYY
-                dateStr = `${dateParts[2]}-${dateParts[1].padStart(2, '0')}-${dateParts[0].padStart(2, '0')}`;
-              }
-            }
-          }
+          const rawRemarks = row[columns.description] != null ? String(row[columns.description]).trim() : '';
+          const amount = hasCredit ? credit.value : -debit.value;
+          const type = hasCredit ? 'income' : 'expense';
 
           // Categories
           let category = 'General';
@@ -480,32 +608,23 @@ app.post('/api/transactions/parse-statement', authenticate, (req, res, next) => 
             category = 'Travel';
           }
 
-          // Clean title:
-          let title = rawRemarks;
-          if (title.toUpperCase().startsWith('UPI/')) {
-            const parts = title.split('/');
-            if (parts.length > 1) {
-              title = parts[1];
-            }
-          }
-          title = title.trim();
-
           parsedTxns.push({
             userId: req.user.id, // ownership stamp for Excel-parsed transactions
-            title: title || 'Bank Transaction',
+            title: finalizeStatementTitle(titleFromRemarks(rawRemarks)),
             amount,
-            date: dateStr,
+            date: parseStatementDate(row[columns.date]),
             type,
             category
           });
         }
 
-        if (parsedTxns.length > 0) {
-          const { rows, skipped } = normalizeImportedRows(parsedTxns);
-          if (rows.length > 0) {
-            transactions = [...rows, ...transactions];
+        if (parsedTxns.length > 0 || parserSkipped > 0) {
+          const { rows: savedRows, skipped: invalidRows } = normalizeImportedRows(parsedTxns);
+          const skipped = parserSkipped + invalidRows;
+          if (savedRows.length > 0) {
+            transactions = [...savedRows, ...transactions];
             saveTransactions();
-            return res.json({ success: true, count: rows.length, skipped, transactions: rows });
+            return res.json({ success: true, count: savedRows.length, skipped, transactions: savedRows });
           }
           return res.status(400).json({
             error: `No valid transactions found: ${skipped} row(s) failed validation.`,
@@ -619,70 +738,53 @@ Return only the valid JSON array, like: [{"title": "Salary", "amount": 50000, "d
   // Fallback Rule-Based Parser (if Groq is not configured or fails)
   console.log('Using rule-based parser fallback');
   try {
-    const lines = statementText.split('\n');
+    const lines = statementText.split(/\r?\n/);
     const parsedTxns = [];
-    
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim();
-      if (!line) continue;
-      
-      const dateMatch = line.match(/(\d{4}[-/]\d{2}[-/]\d{2})|(\d{2}[-/]\d{2}[-/]\d{4})|((Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2})/i);
-      const amountMatches = line.match(/[-+]?\d+[\d,]*\.\d{2}|[-+]?\d+[\d,]*/g);
-      
-      if (dateMatch && amountMatches && amountMatches.length > 0) {
-        let amountStr = amountMatches[amountMatches.length - 1];
-        let amount = parseFloat(amountStr.replace(/,/g, ''));
-        
-        let title = line.replace(dateMatch[0], '').replace(amountStr, '').replace(/INR|Rs\.?|₹/g, '').trim();
-        title = title.replace(/^[\s,;-|]+|[\s,;-|]+$/g, '');
-        
-        if (!title) title = 'Bank Transaction';
-        
-        let type = 'expense';
-        if (line.toLowerCase().includes('cr') || line.toLowerCase().includes('deposit') || line.toLowerCase().includes('credit') || amount > 0) {
-          type = 'income';
-          amount = Math.abs(amount);
-        } else {
-          amount = -Math.abs(amount);
-        }
-        
-        let date = new Date().toISOString().split('T')[0];
-        if (dateMatch[1]) date = dateMatch[1].replace(/\//g, '-');
-        else if (dateMatch[2]) {
-          const parts = dateMatch[2].split(/[-/]/);
-          date = `${parts[2]}-${parts[1]}-${parts[0]}`;
-        }
-        
-        let category = 'General';
-        const lowerTitle = title.toLowerCase();
-        if (lowerTitle.includes('amazon') || lowerTitle.includes('flipkart') || lowerTitle.includes('shop')) category = 'Shopping';
-        else if (lowerTitle.includes('coffee') || lowerTitle.includes('restaurant') || lowerTitle.includes('zomato') || lowerTitle.includes('swiggy') || lowerTitle.includes('food')) category = 'Food';
-        else if (lowerTitle.includes('salary') || lowerTitle.includes('deposit') || lowerTitle.includes('paycheck')) category = 'Salary';
-        else if (lowerTitle.includes('netflix') || lowerTitle.includes('spotify') || lowerTitle.includes('hotstar')) category = 'Entertainment';
-        else if (lowerTitle.includes('dividend') || lowerTitle.includes('stock') || lowerTitle.includes('mutual')) category = 'Investment';
-        else if (lowerTitle.includes('bill') || lowerTitle.includes('electricity') || lowerTitle.includes('recharge')) category = 'Bills';
+    let parserSkipped = 0; // lines with a date and an amount but no clear direction
 
-        parsedTxns.push({
-          userId: req.user.id, // ownership stamp for rule-based-parsed transactions
-          title,
-          amount,
-          date,
-          type,
-          category
-        });
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line) continue;
+
+      const parsed = parseTextStatementLine(line);
+      if (!parsed) continue; // not a transaction line (no date, or no usable amount)
+      if (parsed.ambiguous) {
+        parserSkipped++;
+        continue;
       }
+
+      const title = finalizeStatementTitle(parsed.titleText);
+
+      let category = 'General';
+      const lowerTitle = title.toLowerCase();
+      if (lowerTitle.includes('amazon') || lowerTitle.includes('flipkart') || lowerTitle.includes('shop')) category = 'Shopping';
+      else if (lowerTitle.includes('coffee') || lowerTitle.includes('restaurant') || lowerTitle.includes('zomato') || lowerTitle.includes('swiggy') || lowerTitle.includes('food')) category = 'Food';
+      else if (lowerTitle.includes('salary') || lowerTitle.includes('deposit') || lowerTitle.includes('paycheck')) category = 'Salary';
+      else if (lowerTitle.includes('netflix') || lowerTitle.includes('spotify') || lowerTitle.includes('hotstar')) category = 'Entertainment';
+      else if (lowerTitle.includes('dividend') || lowerTitle.includes('stock') || lowerTitle.includes('mutual')) category = 'Investment';
+      else if (lowerTitle.includes('bill') || lowerTitle.includes('electricity') || lowerTitle.includes('recharge')) category = 'Bills';
+
+      parsedTxns.push({
+        userId: req.user.id, // ownership stamp for rule-based-parsed transactions
+        title,
+        amount: parsed.type === 'income' ? parsed.amount : -parsed.amount,
+        date: parsed.date,
+        type: parsed.type,
+        category
+      });
     }
 
-    if (parsedTxns.length > 0) {
-      const { rows, skipped } = normalizeImportedRows(parsedTxns);
-      if (rows.length > 0) {
-        transactions = [...rows, ...transactions];
+    if (parsedTxns.length > 0 || parserSkipped > 0) {
+      const { rows: savedRows, skipped: invalidRows } = normalizeImportedRows(parsedTxns);
+      const skipped = parserSkipped + invalidRows;
+      if (savedRows.length > 0) {
+        transactions = [...savedRows, ...transactions];
         saveTransactions();
         return res.json({
           success: true,
-          count: rows.length,
+          count: savedRows.length,
           skipped,
-          transactions: rows,
+          transactions: savedRows,
           notice: 'Parsed using local backup engine'
         });
       }
