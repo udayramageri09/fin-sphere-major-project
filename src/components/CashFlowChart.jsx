@@ -1,45 +1,22 @@
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 import { useFinance } from '../context/FinanceContext';
+import { aggregateMonthlyTransactions, getRecentMonthKeys } from '../utils/finance';
+
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// 'YYYY-MM' -> 'Oct 26'
+const formatMonthLabel = (key) => `${MONTH_NAMES[Number(key.slice(5, 7)) - 1]} ${key.slice(2, 4)}`;
 
 function CashFlowChart() {
   const { transactions } = useFinance();
 
-  const getMonthsList = () => {
-    const list = [];
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    const d = new Date();
-    for (let i = 5; i >= 0; i--) {
-      const targetDate = new Date(d.getFullYear(), d.getMonth() - i, 1);
-      const mName = months[targetDate.getMonth()];
-      const year = targetDate.getFullYear();
-      list.push({
-        name: `${mName} ${year.toString().slice(-2)}`,
-        monthIdx: targetDate.getMonth(),
-        year: year,
-        income: 0,
-        expenses: 0
-      });
-    }
-    return list;
-  };
-
-  const chartData = getMonthsList();
-
-  transactions.forEach(t => {
-    const tDate = new Date(t.date);
-    if (isNaN(tDate.getTime())) return;
-    const tMonth = tDate.getMonth();
-    const tYear = tDate.getFullYear();
-    const match = chartData.find(c => c.monthIdx === tMonth && c.year === tYear);
-    if (match) {
-      const amt = Math.abs(t.amount);
-      if (t.type === 'income' || t.amount > 0) {
-        match.income += amt;
-      } else {
-        match.expenses += amt;
-      }
-    }
-  });
+  // Same classifier, local-date parser and month keys as the summary cards.
+  const monthly = aggregateMonthlyTransactions(transactions);
+  const chartData = getRecentMonthKeys(6).map((key) => ({
+    name: formatMonthLabel(key),
+    income: monthly[key]?.income ?? 0,
+    expenses: monthly[key]?.expenses ?? 0
+  }));
 
   const customTooltipStyle = {
     backgroundColor: '#ffffff',

@@ -1,6 +1,7 @@
 /* eslint-disable react-refresh/only-export-components, react-hooks/exhaustive-deps, react-hooks/set-state-in-effect */
 import { createContext, useContext, useState, useEffect } from 'react';
 import { useAuth } from './AuthContext';
+import { summarizeTransactions } from '../utils/finance';
 
 const FinanceContext = createContext(null);
 
@@ -151,20 +152,11 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     }
   };
 
-  // Derive Stats
-  const totalIncome = transactions
-    .filter(t => t.type === 'income' || t.amount > 0)
-    .reduce((sum, t) => sum + Math.abs(t.amount), 0);
-
-  const totalExpenses = transactions
-    .filter(t => t.type === 'expense' || t.amount < 0)
-    .reduce((sum, t) => sum + Math.abs(t.amount), 0);
-
-  // Net Worth = Base (45,00,000) + income - expenses
-  const baseNetWorth = 4500000;
-  const netWorth = baseNetWorth + (totalIncome - totalExpenses);
-
-  const activeLiabilities = 2450000;
+  // Derive Stats from the signed amount (> 0 income, < 0 expense). totalIncome and
+  // totalExpenses are all-time magnitudes; balance is all-time income minus
+  // expenses; currentMonth/previousMonth are local calendar-month figures.
+  const { totalIncome, totalExpenses, balance, currentMonth, previousMonth } =
+    summarizeTransactions(transactions);
 
   return (
     <FinanceContext.Provider value={{
@@ -173,8 +165,9 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
       error,
       totalIncome,
       totalExpenses,
-      netWorth,
-      activeLiabilities,
+      balance,
+      currentMonth,
+      previousMonth,
       fetchTransactions,
       addTransaction,
       deleteTransaction,
