@@ -3,23 +3,13 @@ import FinancialSummary from '../components/FinancialSummary';
 import CreditScoreWidget from '../components/CreditScoreWidget';
 import GoalTracker from '../components/GoalTracker';
 import CashFlowChart from '../components/CashFlowChart';
-import { AlertTriangle, ShoppingBag, Coffee, ArrowDownCircle, ArrowUpCircle, Award, Star } from 'lucide-react';
+import { ShoppingBag, Coffee, ArrowDownCircle, ArrowUpCircle } from 'lucide-react';
 import { useFinance } from '../context/FinanceContext';
 import { motion } from 'framer-motion';
-import confetti from 'canvas-confetti';
 
 function Dashboard() {
   const { transactions } = useFinance();
   const recentTransactions = transactions.slice(0, 3);
-  
-  const handleClaimXP = () => {
-    confetti({
-      particleCount: 100,
-      spread: 70,
-      origin: { y: 0.6 },
-      colors: ['#09090b', '#52525b', '#a1a1aa', '#e4e4e7'] // Monochrome confetti
-    });
-  };
 
   const getCategoryIcon = (cat, txnType) => {
     const c = (cat || '').toLowerCase();
@@ -27,13 +17,6 @@ function Dashboard() {
     if (c.includes('shop') || c.includes('amazon')) return ShoppingBag;
     if (txnType === 'income' || c.includes('salary') || c.includes('dividend')) return ArrowUpCircle;
     return ArrowDownCircle;
-  };
-
-  const handleAlertHover = () => {
-    window.dispatchEvent(new CustomEvent('bot-speak', { detail: { message: "Yikes! You might want to transfer some funds before your SIP bounces! 🚨" }}));
-  };
-  const handleAlertLeave = () => {
-    window.dispatchEvent(new CustomEvent('bot-quiet'));
   };
 
   const containerVariants = {
@@ -56,60 +39,10 @@ function Dashboard() {
       initial="hidden"
       animate="show"
     >
-      <motion.div 
-        variants={itemVariants}
-        className="flex flex-wrap items-center gap-4 bg-zinc-100 border border-zinc-300 p-4 rounded-xl mb-2 text-zinc-800"
-        data-avatar-target="balance-alert"
-        onMouseEnter={handleAlertHover}
-        onMouseLeave={handleAlertLeave}
-      >
-        <AlertTriangle size={24} className="text-zinc-900" />
-        <div className="flex-1 min-w-48">
-          <h4 className="m-0 text-base font-bold text-zinc-900 tracking-tight">Low Balance Alert</h4>
-          <p className="m-0 text-sm text-zinc-600">Your linked account balance (₹12,500) is insufficient for upcoming SIPs & bills due this week (₹25,649).</p>
-        </div>
-        <button className="bg-zinc-900 text-zinc-50 border-none px-4 py-2 rounded-lg cursor-pointer font-semibold text-sm hover:bg-zinc-800 transition-colors">
-          Transfer Funds
-        </button>
-      </motion.div>
-
       <motion.header variants={itemVariants} className="flex flex-col md:flex-row md:flex-wrap justify-between items-start md:items-center gap-6">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight-display text-zinc-900 mb-1">Welcome back, Alex</h1>
+          <h1 className="text-3xl font-bold tracking-tight-display text-zinc-900 mb-1">Welcome back</h1>
           <p className="text-zinc-500">Here's your financial overview for today.</p>
-        </div>
-        
-        {/* Gamification Level Badge */}
-        <div className="flex items-center gap-4 bg-white border border-zinc-200 shadow-sm rounded-xl p-3 pr-5">
-          <div className="w-12 h-12 rounded-full bg-zinc-900 text-zinc-50 flex items-center justify-center relative">
-            <Award size={24} />
-            <div className="absolute -bottom-1 -right-1 bg-white text-zinc-900 text-[10px] font-bold px-1.5 py-0.5 rounded-full border border-zinc-200">
-              Lvl 5
-            </div>
-          </div>
-          <div className="flex flex-col">
-            <div className="flex justify-between items-center mb-1 w-32">
-              <span className="text-xs font-bold text-zinc-900">Master Saver</span>
-              <span className="text-[10px] font-medium text-zinc-500 tabular-nums">850/1000 XP</span>
-            </div>
-            <div className="w-full bg-zinc-100 rounded-full h-1.5 overflow-hidden">
-              <motion.div 
-                className="bg-zinc-900 h-full" 
-                initial={{ width: 0 }}
-                animate={{ width: '85%' }}
-                transition={{ duration: 1.5, delay: 0.5, ease: 'easeOut' }}
-              />
-            </div>
-          </div>
-          <motion.button 
-            whileHover={{ scale: 1.1 }} 
-            whileTap={{ scale: 0.9 }}
-            onClick={handleClaimXP}
-            className="ml-2 w-8 h-8 rounded-full bg-zinc-100 text-zinc-900 flex items-center justify-center hover:bg-zinc-200 transition-colors"
-            title="Claim Daily XP"
-          >
-            <Star size={14} />
-          </motion.button>
         </div>
 
         <PanProfile />
