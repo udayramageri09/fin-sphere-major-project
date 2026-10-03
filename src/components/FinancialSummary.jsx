@@ -1,24 +1,44 @@
 import { motion } from 'framer-motion';
-import { ArrowUpRight, ArrowDownRight, IndianRupee, CreditCard } from 'lucide-react';
+import { ArrowUpRight, ArrowDownRight, IndianRupee } from 'lucide-react';
 import { useFinance } from '../context/FinanceContext';
+import { percentChange } from '../utils/finance';
+
+// Whole rupees print without decimals; anything with paise prints both digits.
+const formatCurrency = (value) => {
+  const fractionDigits = Number.isInteger(value) ? 0 : 2;
+  return value.toLocaleString('en-IN', {
+    style: 'currency',
+    currency: 'INR',
+    minimumFractionDigits: fractionDigits,
+    maximumFractionDigits: fractionDigits,
+  });
+};
+
+const formatChange = (change) => {
+  const rounded = Math.round(change * 10) / 10;
+  if (rounded === 0) return '0.0%';
+  return `${rounded > 0 ? '+' : '-'}${Math.abs(rounded).toFixed(1)}%`;
+};
 
 function FinancialSummary() {
-  const { netWorth, totalIncome, totalExpenses, activeLiabilities } = useFinance();
+  const { balance, currentMonth, previousMonth } = useFinance();
 
+  // `change` is a percentage vs last month, or null when last month has nothing to
+  // compare against; `note` is a static caption for cards without a comparison.
   const stats = [
-    { label: 'Total Net Worth', value: netWorth, change: '+2.4%', isPositive: true, icon: IndianRupee },
-    { label: 'Monthly Income', value: totalIncome, change: '+5.1%', isPositive: true, icon: ArrowUpRight },
-    { label: 'Monthly Expenses', value: totalExpenses, change: '-1.2%', isPositive: false, icon: ArrowDownRight },
-    { label: 'Active Liabilities', value: activeLiabilities, change: '-3.0%', isPositive: true, icon: CreditCard },
+    { label: 'Balance', value: balance, note: 'All-time income minus expenses', icon: IndianRupee },
+    { label: 'Income This Month', value: currentMonth.income, change: percentChange(currentMonth.income, previousMonth.income), icon: ArrowUpRight },
+    { label: 'Expenses This Month', value: currentMonth.expenses, change: percentChange(currentMonth.expenses, previousMonth.expenses), icon: ArrowDownRight },
   ];
 
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
       {stats.map((stat, idx) => {
         const Icon = stat.icon;
+        const hasChange = stat.change !== undefined && stat.change !== null;
         return (
           <motion.div
-            key={idx}
+            key={stat.label}
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ type: 'spring', damping: 20, stiffness: 100, delay: idx * 0.08 }}
@@ -31,11 +51,19 @@ function FinancialSummary() {
               </div>
             </div>
             <div className="text-2xl font-bold text-zinc-900 tabular-nums tracking-tight-display truncate">
-              {stat.value.toLocaleString('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 })}
+              {formatCurrency(stat.value)}
             </div>
-            <div className={`flex items-center gap-1 text-xs font-medium truncate ${stat.isPositive ? 'text-zinc-900' : 'text-zinc-500'}`}>
-              {stat.isPositive ? <ArrowUpRight size={14} className="shrink-0" /> : <ArrowDownRight size={14} className="shrink-0" />}
-              <span className="text-zinc-500">{stat.change} from last month</span>
+            <div className="flex items-center gap-1 text-xs font-medium truncate text-zinc-500">
+              {hasChange ? (
+                <>
+                  {stat.change >= 0
+                    ? <ArrowUpRight size={14} className="shrink-0" />
+                    : <ArrowDownRight size={14} className="shrink-0" />}
+                  <span>{formatChange(stat.change)} from last month</span>
+                </>
+              ) : (
+                <span>{stat.note ?? 'No previous-month data to compare'}</span>
+              )}
             </div>
           </motion.div>
         );
