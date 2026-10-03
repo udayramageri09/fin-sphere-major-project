@@ -11,6 +11,7 @@ import jwt from 'jsonwebtoken';
 import cookieParser from 'cookie-parser';
 import bcrypt from 'bcrypt';
 import rateLimit from 'express-rate-limit';
+import { randomUUID } from 'node:crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -193,8 +194,9 @@ function normalizeTransactionInput(raw, nowMs = Date.now()) {
   };
 }
 
-// Runs importer candidates (which already carry id/userId stamped by the parsers)
-// through the same boundary. Invalid rows are skipped, never fatal to valid ones.
+// Runs importer candidates (which carry the userId stamped by the parsers) through
+// the same boundary. Invalid rows are skipped, never fatal to valid ones. Row IDs
+// are generated here, never taken from a parser.
 function normalizeImportedRows(candidates) {
   const rows = [];
   let skipped = 0;
@@ -204,7 +206,7 @@ function normalizeImportedRows(candidates) {
       skipped++;
       continue;
     }
-    rows.push({ id: candidate.id, userId: candidate.userId, ...result.value });
+    rows.push({ id: randomUUID(), userId: candidate.userId, ...result.value });
   }
   return { rows, skipped };
 }
@@ -321,7 +323,7 @@ app.post('/api/transactions', authenticate, (req, res) => {
   }
 
   const newTransaction = {
-    id: Date.now(),
+    id: randomUUID(),
     userId: req.user.id, // ownership stamp — always from verified JWT, never from req.body
     ...result.value
   };
@@ -333,16 +335,22 @@ app.post('/api/transactions', authenticate, (req, res) => {
 
 // 3. DELETE /api/transactions/:id
 app.delete('/api/transactions/:id', authenticate, (req, res) => {
-  const id = parseInt(req.params.id);
-  const target = transactions.find(t => t.id === id);
+  // The route param is an opaque identifier. New rows have UUID string IDs; historical
+  // rows have numeric IDs, so both sides are compared as strings (no parseInt, which
+  // would read "123abc" as 123). The ownership test is part of the lookup, so another
+  // user's row with the same ID can never match, and exactly one owned row is removed
+  // even if legacy data repeats an ID.
+  const index = transactions.findIndex(
+    t => t.userId === req.user.id && String(t.id) === String(req.params.id)
+  );
 
   // Return 404 for both non-existent and non-owned transactions.
   // This avoids revealing the existence of another user's record.
-  if (!target || target.userId !== req.user.id) {
+  if (index === -1) {
     return res.status(404).json({ error: 'Transaction not found' });
   }
 
-  transactions = transactions.filter(t => t.id !== id);
+  transactions.splice(index, 1);
   saveTransactions();
   res.json({ message: 'Transaction deleted successfully' });
 });
@@ -483,7 +491,6 @@ app.post('/api/transactions/parse-statement', authenticate, (req, res, next) => 
           title = title.trim();
 
           parsedTxns.push({
-            id: Date.now() + i,
             userId: req.user.id, // ownership stamp for Excel-parsed transactions
             title: title || 'Bank Transaction',
             amount,
@@ -579,11 +586,10 @@ Return only the valid JSON array, like: [{"title": "Salary", "amount": 50000, "d
 
         const parsed = JSON.parse(reply);
         if (Array.isArray(parsed)) {
-          const candidates = parsed.map((item, index) => {
+          const candidates = parsed.map((item) => {
             // Non-object entries become empty candidates and are skipped by validation.
             const txn = item !== null && typeof item === 'object' ? item : {};
             return {
-              id: Date.now() + index,
               userId: req.user.id, // ownership stamp for AI-parsed transactions
               title: txn.title || 'Unlabeled Transaction',
               amount: txn.amount, // passed raw: strict parsing happens in the validator
@@ -657,7 +663,6 @@ Return only the valid JSON array, like: [{"title": "Salary", "amount": 50000, "d
         else if (lowerTitle.includes('bill') || lowerTitle.includes('electricity') || lowerTitle.includes('recharge')) category = 'Bills';
 
         parsedTxns.push({
-          id: Date.now() + i,
           userId: req.user.id, // ownership stamp for rule-based-parsed transactions
           title,
           amount,

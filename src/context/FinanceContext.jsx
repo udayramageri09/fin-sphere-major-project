@@ -79,7 +79,16 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
         throw new Error('Session expired');
       }
       if (!res.ok) throw new Error('Failed to delete transaction');
-      setTransactions(prev => prev.filter(t => t.id !== id));
+      // The API removes exactly one owned row, even if legacy data repeats an ID, so
+      // mirror that: drop only the first local match (IDs compared as strings because
+      // historical rows have numeric IDs and new rows have UUID strings).
+      setTransactions(prev => {
+        const index = prev.findIndex(t => String(t.id) === String(id));
+        if (index === -1) return prev;
+        const next = [...prev];
+        next.splice(index, 1);
+        return next;
+      });
     } catch (err) {
       console.error(err);
       setError(err.message);
