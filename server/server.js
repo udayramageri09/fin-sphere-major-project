@@ -97,6 +97,119 @@ function saveTransactions() {
 
 loadTransactions();
 
+// ── Transaction validation & normalization ─────────────────────────────────────
+// The single boundary every persisted transaction passes through: manual POST and
+// all three statement-import parsers. normalizeTransactionInput() returns either
+// { ok: true, value } with canonical fields or { ok: false, error } - never a
+// partially normalized object. It only reads title/amount/date/type/category and
+// never returns id or userId, so ownership cannot come from request data.
+const MAX_TITLE_LENGTH = 120;
+const MAX_ABS_AMOUNT = 100_000_000; // ₹10 crore
+const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
+const DECIMAL_PATTERN = /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/;
+
+const fail = (error) => ({ ok: false, error });
+
+function isRealCalendarDate(year, month, day) {
+  if (month < 1 || month > 12 || day < 1) return false;
+  const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+  const daysInMonth = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return day <= daysInMonth[month - 1];
+}
+
+// Shifting the decimal point through the exponent avoids binary drift of n * 100
+// (1.005 -> 1.01, where Math.round(1.005 * 100) / 100 would give 1).
+// Only call with 0.005 <= n <= MAX_ABS_AMOUNT so String(n) never uses exponent form.
+function roundToPaise(n) {
+  return Number(`${Math.round(Number(`${n}e2`))}e-2`);
+}
+
+function normalizeTransactionInput(raw, nowMs = Date.now()) {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return fail('Transaction must be an object');
+  }
+
+  // Title
+  if (typeof raw.title !== 'string') return fail('Title must be a string');
+  const title = raw.title.trim();
+  if (title.length === 0) return fail('Title is required');
+  if (title.length > MAX_TITLE_LENGTH) {
+    return fail(`Title must be ${MAX_TITLE_LENGTH} characters or fewer`);
+  }
+
+  // Amount: only numbers and plain decimal strings. Number()/parseFloat() alone would
+  // accept "123abc" (parseFloat), "" and null (Number -> 0), and "0x10"/"1e3".
+  const rawAmount = typeof raw.amount === 'string' ? raw.amount.trim() : raw.amount;
+  if (typeof rawAmount === 'string' && !DECIMAL_PATTERN.test(rawAmount)) {
+    return fail('Amount must be a plain decimal number, e.g. 1234.56');
+  }
+  if (typeof rawAmount !== 'number' && typeof rawAmount !== 'string') {
+    return fail('Amount must be a number');
+  }
+  const parsedAmount = Number(rawAmount);
+  if (!Number.isFinite(parsedAmount)) return fail('Amount must be a finite number');
+  const absAmount = Math.abs(parsedAmount);
+  if (absAmount > MAX_ABS_AMOUNT) {
+    return fail(`Amount must not exceed ${MAX_ABS_AMOUNT} (₹10 crore)`);
+  }
+  if (absAmount < 0.005) return fail('Amount must be non-zero (minimum 0.01)');
+  const roundedAmount = roundToPaise(absAmount);
+
+  // Type (case-insensitive, nothing else accepted)
+  const type = typeof raw.type === 'string' ? raw.type.toLowerCase() : '';
+  if (type !== 'income' && type !== 'expense') {
+    return fail('Type must be "income" or "expense"');
+  }
+
+  // Date: exact YYYY-MM-DD, real calendar date, at most one day ahead. The limit is
+  // UTC today + 1 day: any real local date (UTC-12 .. UTC+14) is at most one day
+  // ahead of the UTC date, so users in every timezone pass. Fixed-width ISO strings
+  // compare correctly as text, so no Date parsing or local-time conversion is involved.
+  if (typeof raw.date !== 'string') return fail('Date must be a string in YYYY-MM-DD format');
+  const dateMatch = DATE_PATTERN.exec(raw.date);
+  if (!dateMatch) return fail('Date must be in YYYY-MM-DD format');
+  if (!isRealCalendarDate(Number(dateMatch[1]), Number(dateMatch[2]), Number(dateMatch[3]))) {
+    return fail('Date is not a valid calendar date');
+  }
+  const latestAllowedDate = new Date(nowMs + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  if (raw.date > latestAllowedDate) return fail('Date cannot be more than one day in the future');
+
+  // Category: omitted/blank -> General
+  let category = 'General';
+  if (raw.category !== undefined && raw.category !== null) {
+    if (typeof raw.category !== 'string') return fail('Category must be a string');
+    category = raw.category.trim() || 'General';
+  }
+
+  return {
+    ok: true,
+    value: {
+      title,
+      amount: type === 'income' ? roundedAmount : -roundedAmount, // sign always follows type
+      date: raw.date,
+      type,
+      category
+    }
+  };
+}
+
+// Runs importer candidates (which already carry id/userId stamped by the parsers)
+// through the same boundary. Invalid rows are skipped, never fatal to valid ones.
+function normalizeImportedRows(candidates) {
+  const rows = [];
+  let skipped = 0;
+  for (const candidate of candidates) {
+    const result = normalizeTransactionInput(candidate);
+    if (!result.ok) {
+      skipped++;
+      continue;
+    }
+    rows.push({ id: candidate.id, userId: candidate.userId, ...result.value });
+  }
+  return { rows, skipped };
+}
+// ───────────────────────────────────────────────────────────────────────────────
+
 // Helper: check if Groq API key is configured
 function isGroqConfigured() {
   return process.env.GROQ_API_KEY && process.env.GROQ_API_KEY !== 'your_groq_api_key_here';
@@ -201,19 +314,16 @@ app.get('/api/transactions', authenticate, (req, res) => {
 
 // 2. POST /api/transactions (Manual Entry)
 app.post('/api/transactions', authenticate, (req, res) => {
-  const { title, amount, date, type, category } = req.body;
-  if (!title || amount === undefined || !date || !type) {
-    return res.status(400).json({ error: 'Title, amount, date, and type are required' });
+  // Validate before touching in-memory state or the persistence file.
+  const result = normalizeTransactionInput(req.body);
+  if (!result.ok) {
+    return res.status(400).json({ error: result.error });
   }
 
   const newTransaction = {
     id: Date.now(),
     userId: req.user.id, // ownership stamp — always from verified JWT, never from req.body
-    title,
-    amount: parseFloat(amount),
-    date,
-    type,
-    category: category || 'General'
+    ...result.value
   };
 
   transactions.unshift(newTransaction); // Add to beginning
@@ -384,9 +494,16 @@ app.post('/api/transactions/parse-statement', authenticate, (req, res, next) => 
         }
 
         if (parsedTxns.length > 0) {
-          transactions = [...parsedTxns, ...transactions];
-          saveTransactions();
-          return res.json({ success: true, count: parsedTxns.length, transactions: parsedTxns });
+          const { rows, skipped } = normalizeImportedRows(parsedTxns);
+          if (rows.length > 0) {
+            transactions = [...rows, ...transactions];
+            saveTransactions();
+            return res.json({ success: true, count: rows.length, skipped, transactions: rows });
+          }
+          return res.status(400).json({
+            error: `No valid transactions found: ${skipped} row(s) failed validation.`,
+            skipped
+          });
         }
       }
 
@@ -462,19 +579,27 @@ Return only the valid JSON array, like: [{"title": "Salary", "amount": 50000, "d
 
         const parsed = JSON.parse(reply);
         if (Array.isArray(parsed)) {
-          const newTxns = parsed.map((txn, index) => ({
-            id: Date.now() + index,
-            userId: req.user.id, // ownership stamp for AI-parsed transactions
-            title: txn.title || 'Unlabeled Transaction',
-            amount: parseFloat(txn.amount) || 0,
-            date: txn.date || new Date().toISOString().split('T')[0],
-            type: txn.type || (txn.amount > 0 ? 'income' : 'expense'),
-            category: txn.category || 'General'
-          }));
-          
-          transactions = [...newTxns, ...transactions];
-          saveTransactions();
-          return res.json({ success: true, count: newTxns.length, transactions: newTxns });
+          const candidates = parsed.map((item, index) => {
+            // Non-object entries become empty candidates and are skipped by validation.
+            const txn = item !== null && typeof item === 'object' ? item : {};
+            return {
+              id: Date.now() + index,
+              userId: req.user.id, // ownership stamp for AI-parsed transactions
+              title: txn.title || 'Unlabeled Transaction',
+              amount: txn.amount, // passed raw: strict parsing happens in the validator
+              date: txn.date || new Date().toISOString().split('T')[0],
+              type: txn.type || (txn.amount > 0 ? 'income' : 'expense'),
+              category: txn.category || 'General'
+            };
+          });
+          const { rows, skipped } = normalizeImportedRows(candidates);
+
+          if (rows.length > 0) {
+            transactions = [...rows, ...transactions];
+            saveTransactions();
+            return res.json({ success: true, count: rows.length, skipped, transactions: rows });
+          }
+          // No valid rows from the AI: fall through to the rule-based parser below.
         }
       } else {
         const errText = await response.text();
@@ -544,13 +669,21 @@ Return only the valid JSON array, like: [{"title": "Salary", "amount": 50000, "d
     }
 
     if (parsedTxns.length > 0) {
-      transactions = [...parsedTxns, ...transactions];
-      saveTransactions();
-      return res.json({ 
-        success: true, 
-        count: parsedTxns.length, 
-        transactions: parsedTxns,
-        notice: 'Parsed using local backup engine' 
+      const { rows, skipped } = normalizeImportedRows(parsedTxns);
+      if (rows.length > 0) {
+        transactions = [...rows, ...transactions];
+        saveTransactions();
+        return res.json({
+          success: true,
+          count: rows.length,
+          skipped,
+          transactions: rows,
+          notice: 'Parsed using local backup engine'
+        });
+      }
+      return res.status(400).json({
+        error: `No valid transactions found: ${skipped} row(s) failed validation.`,
+        skipped
       });
     }
 
