@@ -262,7 +262,7 @@ function Transactions() {
               <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                 <textarea 
                   rows={5} 
-                  placeholder="Paste transaction logs from mail or statement here. E.g.:&#13;05/20/2026 Amazon Spend -1599.00&#13;05/22/2026 Salary Credit +150000.00" 
+                  placeholder="Paste transaction logs from mail or statement here. E.g.:&#13;20/05/2026 Amazon Spend -1599.00&#13;22/05/2026 Salary Credit +150000.00"
                   value={pasteText}
                   onChange={(e) => setPasteText(e.target.value)}
                   style={{ 
