@@ -26,6 +26,9 @@ server_db.json
 server/server_db.json
 server/server_users.json
 server_users.json
+# User goals (also matches the .tmp write file and any .corrupt-* backup)
+server_goals*
+server/server_goals*
 
 # Bank statement files (real financial data / PII)
 *.xls

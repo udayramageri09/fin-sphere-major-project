@@ -98,6 +98,46 @@ function saveTransactions() {
 
 loadTransactions();
 
+// ── Goals persistence ──────────────────────────────────────────────────────────
+// Same JSON-file approach as transactions, in its own file so it never touches the
+// transaction or user data. Path is __dirname-based, so it is the same file no matter
+// where the server is started from.
+const GOALS_FILE = path.join(__dirname, 'server_goals.json');
+let goals = [];
+
+function loadGoals() {
+  if (!fs.existsSync(GOALS_FILE)) return;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(GOALS_FILE, 'utf8'));
+    if (!Array.isArray(parsed)) throw new Error('goals file is not an array');
+    goals = parsed;
+  } catch (err) {
+    // Keep the unreadable file for recovery instead of letting the next save overwrite it.
+    console.error('Error loading goals, starting empty:', err);
+    try {
+      fs.renameSync(GOALS_FILE, `${GOALS_FILE.replace(/\.json$/, '')}.corrupt-${Date.now()}.json`);
+    } catch (renameErr) {
+      console.error('Could not set aside the unreadable goals file:', renameErr);
+    }
+  }
+}
+
+// Writes via a temp file + rename so a crash mid-write cannot truncate the real file.
+// Returns false on failure so the caller can roll back and report an error.
+function saveGoals() {
+  try {
+    const tmpFile = `${GOALS_FILE}.tmp`;
+    fs.writeFileSync(tmpFile, JSON.stringify(goals, null, 2), 'utf8');
+    fs.renameSync(tmpFile, GOALS_FILE);
+    return true;
+  } catch (err) {
+    console.error('Error saving goals:', err);
+    return false;
+  }
+}
+
+loadGoals();
+
 // ── Transaction validation & normalization ─────────────────────────────────────
 // The single boundary every persisted transaction passes through: manual POST and
 // all three statement-import parsers. normalizeTransactionInput() returns either
@@ -369,6 +409,70 @@ function parseTextStatementLine(line) {
 }
 // ───────────────────────────────────────────────────────────────────────────────
 
+// ── Goal validation & normalization ────────────────────────────────────────────
+// Server-side authority for POST /api/goals; the frontend checks are only a convenience.
+// Returns { ok: true, value } or { ok: false, error }. It never reads or returns id,
+// userId or createdAt: the route stamps those, so ownership cannot come from the body.
+
+// A JSON number, or a plain decimal string, as a finite Number; anything else is null.
+// (Number()/parseFloat() alone would accept "", null, "0x10", "1e3" and "12abc".)
+function toAmount(raw) {
+  const value = typeof raw === 'string' ? raw.trim() : raw;
+  if (typeof value === 'string') {
+    if (!DECIMAL_PATTERN.test(value)) return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+// Goals have no upper cap, so unlike roundToPaise() this must also cope with huge values
+// (String(n) uses exponent form from 1e21, which that helper cannot handle). From 1e13
+// up a double cannot hold paise anyway, so the value is already as precise as it gets.
+const roundGoalAmount = (n) => (n >= 1e13 ? n : roundToPaise(n));
+
+function normalizeGoalInput(raw, nowMs = Date.now()) {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return fail('Goal must be an object');
+  }
+
+  // Title
+  if (typeof raw.title !== 'string') return fail('Title must be a string');
+  const title = raw.title.trim();
+  if (title.length === 0) return fail('Title is required');
+  if (title.length > MAX_TITLE_LENGTH) {
+    return fail(`Title must be ${MAX_TITLE_LENGTH} characters or fewer`);
+  }
+
+  // Target amount: finite and > 0 (no upper cap), rounded to paise
+  const target = toAmount(raw.targetAmount);
+  if (target === null) return fail('Target amount must be a number');
+  if (target < 0.005) return fail('Target amount must be greater than 0 (minimum 0.01)');
+  const targetAmount = roundGoalAmount(target);
+
+  // Current amount: omitted means 0; otherwise 0 <= current <= target
+  const current = raw.currentAmount === undefined ? 0 : toAmount(raw.currentAmount);
+  if (current === null) return fail('Current amount must be a number');
+  if (current < 0) return fail('Current amount cannot be negative');
+  const currentAmount = current < 0.005 ? 0 : roundGoalAmount(current);
+  if (currentAmount > targetAmount) return fail('Current amount cannot exceed the target amount');
+
+  // Target date: exact YYYY-MM-DD, a real calendar date, not in the past. "Past" is judged
+  // against the server's UTC calendar date, so the result is deterministic. Fixed-width ISO
+  // strings compare correctly as text, so no Date parsing or local-time conversion is involved.
+  if (typeof raw.targetDate !== 'string') return fail('Target date must be a string in YYYY-MM-DD format');
+  const dateMatch = DATE_PATTERN.exec(raw.targetDate);
+  if (!dateMatch) return fail('Target date must be in YYYY-MM-DD format');
+  if (!isRealCalendarDate(Number(dateMatch[1]), Number(dateMatch[2]), Number(dateMatch[3]))) {
+    return fail('Target date is not a valid calendar date');
+  }
+  const today = new Date(nowMs).toISOString().slice(0, 10);
+  if (raw.targetDate < today) return fail('Target date cannot be in the past');
+
+  return { ok: true, value: { title, targetAmount, currentAmount, targetDate: raw.targetDate } };
+}
+// ───────────────────────────────────────────────────────────────────────────────
+
 // Helper: check if Groq API key is configured
 function isGroqConfigured() {
   return process.env.GROQ_API_KEY && process.env.GROQ_API_KEY !== 'your_groq_api_key_here';
@@ -510,6 +614,51 @@ app.delete('/api/transactions/:id', authenticate, (req, res) => {
   transactions.splice(index, 1);
   saveTransactions();
   res.json({ message: 'Transaction deleted successfully' });
+});
+
+// ── Goals ──────────────────────────────────────────────────────────────────────
+// GET /api/goals - only the authenticated user's goals
+app.get('/api/goals', authenticate, (req, res) => {
+  res.json(goals.filter(g => g.userId === req.user.id));
+});
+
+// POST /api/goals - validate first; nothing is mutated or written on a 400
+app.post('/api/goals', authenticate, (req, res) => {
+  const result = normalizeGoalInput(req.body);
+  if (!result.ok) {
+    return res.status(400).json({ error: result.error });
+  }
+
+  const goal = {
+    id: randomUUID(),
+    userId: req.user.id, // ownership stamp: always from the verified JWT, never from req.body
+    ...result.value,
+    createdAt: new Date().toISOString()
+  };
+
+  goals.unshift(goal); // newest first
+  if (!saveGoals()) {
+    goals.shift(); // roll back so memory never disagrees with the file
+    return res.status(500).json({ error: 'Could not save goal' });
+  }
+  res.status(201).json(goal);
+});
+
+// DELETE /api/goals/:id - exactly one goal, and only one owned by the caller
+app.delete('/api/goals/:id', authenticate, (req, res) => {
+  const index = goals.findIndex(g => g.userId === req.user.id && String(g.id) === String(req.params.id));
+
+  // 404 for both missing and not-yours, so another user's goal is never revealed.
+  if (index === -1) {
+    return res.status(404).json({ error: 'Goal not found' });
+  }
+
+  const [removed] = goals.splice(index, 1);
+  if (!saveGoals()) {
+    goals.splice(index, 0, removed); // roll back
+    return res.status(500).json({ error: 'Could not delete goal' });
+  }
+  res.json({ message: 'Goal deleted successfully' });
 });
 
 // 4. POST /api/transactions/parse-statement

@@ -17,6 +17,10 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
   const [transactions, setTransactions] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  // goalsLoading starts true so the first paint is "loading", never a false "no goals yet".
+  const [goals, setGoals] = useState([]);
+  const [goalsLoading, setGoalsLoading] = useState(true);
+  const [goalsError, setGoalsError] = useState(null);
   const { invalidateSession } = useAuth();
 
   const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:5000/api';
@@ -38,8 +42,25 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     }
   };
 
+  const fetchGoals = async () => {
+    setGoalsLoading(true);
+    setGoalsError(null);
+    try {
+      const res = await fetch(`${API_URL}/goals`, { credentials: 'include' });
+      if (res.status === 401) return invalidateSession();
+      if (!res.ok) throw new Error('Failed to load goals');
+      setGoals(await res.json());
+    } catch (err) {
+      console.error(err);
+      setGoalsError(err.message);
+    } finally {
+      setGoalsLoading(false);
+    }
+  };
+
   useEffect(() => {
     fetchTransactions();
+    fetchGoals();
     // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect
   }, []);
 
@@ -94,6 +115,41 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
       setError(err.message);
       throw err;
     }
+  };
+
+  // Goal create/delete throw on failure so the caller can show the message inline
+  // (the server's validation text is passed through); a 401 ends the session.
+  const addGoal = async (goal) => {
+    const res = await fetch(`${API_URL}/goals`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(goal)
+    });
+    if (res.status === 401) {
+      invalidateSession();
+      throw new Error('Session expired');
+    }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Failed to add goal');
+    setGoals(prev => [data, ...prev]);
+    return data;
+  };
+
+  const deleteGoal = async (id) => {
+    const res = await fetch(`${API_URL}/goals/${id}`, {
+      method: 'DELETE',
+      credentials: 'include'
+    });
+    if (res.status === 401) {
+      invalidateSession();
+      throw new Error('Session expired');
+    }
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Failed to delete goal');
+    }
+    setGoals(prev => prev.filter(g => g.id !== id));
   };
 
   // Handles pasting text or uploading files
@@ -177,6 +233,12 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
       balance,
       currentMonth,
       previousMonth,
+      goals,
+      goalsLoading,
+      goalsError,
+      fetchGoals,
+      addGoal,
+      deleteGoal,
       fetchTransactions,
       addTransaction,
       deleteTransaction,
