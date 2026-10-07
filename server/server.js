@@ -950,7 +950,33 @@ Return only the valid JSON array, like: [{"title": "Salary", "amount": 50000, "d
   }
 });
 
+// ₹ with Indian grouping, at most 2 decimals, and a leading minus for negatives.
+const formatRupees = (n) => {
+  const rounded = Math.round(n * 100) / 100 || 0; // also normalizes -0
+  return `${rounded < 0 ? '-' : ''}₹${Math.abs(rounded).toLocaleString('en-IN')}`;
+};
+
+// The caller's own saved goals as assistant context. Titles are user text, so they are
+// quoted with JSON.stringify to keep them on one line and clearly data. Capped so a
+// user with many goals cannot bloat the prompt.
+const MAX_GOALS_IN_PROMPT = 20;
+function describeGoalsForAssistant(userGoals) {
+  if (userGoals.length === 0) return ' none saved yet';
+  const lines = userGoals.slice(0, MAX_GOALS_IN_PROMPT).map((g) => {
+    const percent = g.targetAmount > 0 ? Math.round((g.currentAmount / g.targetAmount) * 100) : 0;
+    return `  - ${JSON.stringify(g.title)}: ${formatRupees(g.currentAmount)} saved of ${formatRupees(g.targetAmount)} target (${percent}% complete), target date ${g.targetDate}`;
+  });
+  if (userGoals.length > MAX_GOALS_IN_PROMPT) {
+    lines.push(`  - (${userGoals.length - MAX_GOALS_IN_PROMPT} more goals not shown)`);
+  }
+  return `\n${lines.join('\n')}`;
+}
+
 // 5. POST /api/chat
+// The assistant may only state facts that exist for the authenticated user: their own
+// transactions (and totals derived from them) and their own saved goals. Credit score,
+// liabilities and portfolio data do not exist in FinSphere, so they are declared
+// unavailable instead of being filled in.
 app.post('/api/chat', authenticate, async (req, res) => {
   const { messages } = req.body;
   if (!messages || !Array.isArray(messages)) {
@@ -958,46 +984,42 @@ app.post('/api/chat', authenticate, async (req, res) => {
   }
 
   // Scope financial context to the authenticated user only.
-  // The global transactions array is never sent to the AI.
+  // Neither the global transactions array nor the global goals array is sent to the AI.
   const userTransactions = transactions.filter(t => t.userId === req.user.id);
+  const userGoals = goals.filter(g => g.userId === req.user.id);
 
-  // Calculate current metrics to provide as context
+  // Totals over ALL of this user's recorded transactions (sign decides the side).
   const totalIncome = userTransactions.filter(t => t.amount > 0).reduce((sum, t) => sum + t.amount, 0);
   const totalExpenses = userTransactions.filter(t => t.amount < 0).reduce((sum, t) => sum + Math.abs(t.amount), 0);
-  const netWorth = 4500000 + (totalIncome - totalExpenses); // base ₹45,50,000 + delta
-  const liabilities = 2450000;
 
   const currentContext = {
-    netWorth,
-    monthlyIncome: totalIncome,
-    monthlyExpenses: totalExpenses,
-    liabilities,
+    totalIncome,
+    totalExpenses,
+    netCashFlow: totalIncome - totalExpenses,
     transactionCount: userTransactions.length,
     recentTransactions: userTransactions.slice(0, 10)
   };
 
   const systemMessage = {
     role: 'system',
-    content: `You are FinFlow AI assistant, a helpful financial advisor bot. 
-The user is viewing their financial dashboard. 
+    content: `You are FinFlow AI assistant, a helpful financial advisor bot.
+The user is viewing their financial dashboard.
 
-Here is their LIVE financial context:
-- Total Net Worth: ₹${currentContext.netWorth.toLocaleString('en-IN')}
-- Monthly Income: ₹${currentContext.monthlyIncome.toLocaleString('en-IN')}
-- Monthly Expenses: ₹${currentContext.monthlyExpenses.toLocaleString('en-IN')}
-- Active Liabilities: ₹${currentContext.liabilities.toLocaleString('en-IN')}
-- Credit Score: 785 out of 850 (Rating: Excellent, Linked to PAN, updated 2 days ago)
-- Savings Goals:
-  1. Emergency Fund: ₹3,00,000 funded of ₹5,00,000 target (60% completed)
-  2. Europe Trip: ₹1,50,000 funded of ₹3,50,000 target (43% completed, Europe Trip is looking very achievable!)
-- Portfolio Distribution: Mutual Funds (60%), Direct Stocks (40%)
+Here is the financial data that actually exists for this user:
+- Total income (all recorded transactions): ${formatRupees(currentContext.totalIncome)}
+- Total expenses (all recorded transactions): ${formatRupees(currentContext.totalExpenses)}
+- Net cash flow (total income minus total expenses): ${formatRupees(currentContext.netCashFlow)}
+- Number of recorded transactions: ${currentContext.transactionCount}
+- Savings goals (saved by the user):${describeGoalsForAssistant(userGoals)}
 - Live Transactions (Latest first): ${JSON.stringify(currentContext.recentTransactions)}
 
+NOT available for this user (no such data has been entered or connected): credit score, liabilities or loans, portfolio holdings or allocation, and net worth.
+
 Guidelines:
-1. Always base your replies on the above live data. When asked about spending, credit score, savings goals, or net worth, refer to their real numbers.
+1. Base your replies only on the data above. If asked about something listed as not available, say it is not available in FinSphere yet. Never estimate, guess or invent figures for it, and never derive a credit score from transactions.
 2. Be brief, professional, and friendly. Use relevant emojis.
-3. Suggest concrete advice if they are spending too much or have low balance.
-4. Let the user know they can update transactions by manual entry or parsing bank statements.
+3. Suggest concrete advice if they are spending too much or their net cash flow is negative.
+4. Let the user know they can update transactions by manual entry or parsing bank statements, and manage savings goals on the Goals page.
 
 Keep responses under 3-4 sentences if possible, unless a detailed breakdown is requested.`
   };
@@ -1042,26 +1064,26 @@ Keep responses under 3-4 sentences if possible, unless a detailed breakdown is r
   if (userMessage.includes('hello') || userMessage.includes('hi')) {
     reply = `Hi there! 👋 I am your FinFlow AI assistant. How can I assist you with your budget or transactions today?`;
   } else if (userMessage.includes('credit score') || userMessage.includes('credit')) {
-    reply = `Your credit score is 785 out of 850, which is rated as Excellent! 📈 Keep maintaining good financial habits and managing your liabilities to keep it high.`;
-  } else if (userMessage.includes('goal') || userMessage.includes('saving') || userMessage.includes('europe') || userMessage.includes('emergency')) {
-    reply = `You currently have two savings goals:
-1. Emergency Fund: ₹3,00,000 funded of ₹5,00,000 target (60% completed)
-2. Europe Trip: ₹1,50,000 funded of ₹3,50,000 target (43% completed, looking very achievable!) ✈️`;
+    reply = `I don't have a credit score for you. FinSphere isn't connected to any credit bureau, and I won't estimate one from your transactions.`;
+  } else if (userMessage.includes('goal') || userMessage.includes('saving')) {
+    reply = userGoals.length === 0
+      ? `You don't have any saved goals yet. You can add one from the Goals page.`
+      : `Your saved goals:${describeGoalsForAssistant(userGoals)}`;
   } else if (userMessage.includes('portfolio') || userMessage.includes('mutual') || userMessage.includes('stock')) {
-    reply = `Your portfolio distribution is divided into Mutual Funds (60%) and Direct Stocks (40%). 📊`;
+    reply = `I don't have any portfolio or investment holdings data for you, so I can't describe an allocation.`;
   } else if (userMessage.includes('net worth') || userMessage.includes('wealth') || userMessage.includes('balance')) {
-    reply = `Based on your live calculations, your Total Net Worth is ₹${currentContext.netWorth.toLocaleString('en-IN')}. This is calculated from your base net worth plus your active transactions! 💰`;
+    reply = `I can't work out your net worth because FinSphere doesn't have your assets or liabilities. From your recorded transactions, your net cash flow (total income minus total expenses) is ${formatRupees(currentContext.netCashFlow)}. 💰`;
   } else if (userMessage.includes('spend') || userMessage.includes('expense') || userMessage.includes('cost')) {
-    reply = `You have spent a total of ₹${currentContext.monthlyExpenses.toLocaleString('en-IN')} recently. Your transactions show shopping, coffee, and bills. Try to keep an eye on non-essential expenditures! 📉`;
+    reply = `Across your ${currentContext.transactionCount} recorded transactions, your total expenses come to ${formatRupees(currentContext.totalExpenses)}. Try to keep an eye on non-essential expenditures! 📉`;
   } else if (userMessage.includes('income') || userMessage.includes('salary') || userMessage.includes('earn')) {
-    reply = `Your recent income sums up to ₹${currentContext.monthlyIncome.toLocaleString('en-IN')}. This includes your salary and other dividend gains! 💵`;
+    reply = `Across your ${currentContext.transactionCount} recorded transactions, your total income comes to ${formatRupees(currentContext.totalIncome)}. 💵`;
   } else if (userMessage.includes('statement') || userMessage.includes('upload') || userMessage.includes('parse')) {
     reply = `You can easily parse bank statements by going to the 'All Transactions' tab, pasting your bank statement logs, or uploading a statement text file! I'll auto-extract all of them. 📂`;
   } else {
     // Pick a random recent transaction to talk about (scoped to the authenticated user)
     const randomTx = userTransactions[Math.floor(Math.random() * userTransactions.length)];
-    const txDetail = randomTx ? `For example, I see a recent transaction for "${randomTx.title}" of ₹${Math.abs(randomTx.amount).toLocaleString('en-IN')}.` : '';
-    reply = `I can help you review your finances! ${txDetail} Ask me about your net worth, recent expenses, or how to import statements! 💡`;
+    const txDetail = randomTx ? `For example, I see a recent transaction for "${randomTx.title}" of ${formatRupees(Math.abs(randomTx.amount))}.` : '';
+    reply = `I can help you review your finances! ${txDetail} Ask me about your spending, income, savings goals, or how to import statements! 💡`;
   }
 
   res.json({ reply });
