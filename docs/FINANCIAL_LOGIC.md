@@ -1,0 +1,53 @@
+# FinSphere financial logic
+
+The exact rules behind the money figures. They are implemented three times and the test suites check that the three agree on shared fixtures:
+
+| Layer | Where | Used for |
+|---|---|---|
+| SQL | `server/db/index.js` | budget actuals, the assistant's totals |
+| JavaScript | `src/utils/finance.js` | dashboard figures |
+| Python | `ml_service/models/analytics.py` (shared helper) | health scorer, forecaster, spending clusters |
+
+See [ML_ARCHITECTURE.md](ML_ARCHITECTURE.md) for where each is used.
+
+## 1. `type` and `classification`
+
+* `type` is the **direction**: `income` (amount stored positive) or `expense` (stored negative). The database enforces the sign.
+* `classification` is the **analytical meaning**: `income`, `expense`, `refund`, `transfer`, `unknown`. Allowed pairings (database constraint): an `income`-direction row may be `income`, `refund`, `transfer` or `unknown`; an `expense`-direction row may be `expense`, `transfer` or `unknown`.
+* Direction is never inferred from the classification, and the classification is never inferred from the title or category.
+
+## 2. How a row counts
+
+| Classification | Analytical income | Analytical spending | Effect |
+|---|---|---|---|
+| `income` | yes | no | |
+| `expense` | no | yes | |
+| `refund` | no | no | **reduces spending**; never income |
+| `transfer` | no | no | excluded from both |
+| `unknown` (also a missing or unrecognised value) | credit: yes (provisional) | debit: yes (provisional) | falls back to direction, so historical and imported rows keep counting |
+
+Every historical and every imported row is stored as `unknown`.
+
+## 3. Net spending
+
+For a period, net spending = `max(gross spending - refunds, 0)`. The floor is applied **once per period** in SQL and JavaScript. The Python scorer and forecaster apply it **per calendar month**, so one month's refunds can never make another month's spending negative. The amounts are summed exactly (NUMERIC in SQL, integer paise in Python).
+
+Consequence: if refunds in a period exceed that period's spending, the excess is discarded, not carried over or shown as income. A dashboard can therefore show ₹0 spending for a period in which refunds exceeded purchases.
+
+The Balance figure is different on purpose: it is the raw signed total of all rows and ignores classification.
+
+## 4. Ratios that use these rules
+
+* **Monthly income** = analytical income / number of calendar months that have any transaction (transfers count as "having a transaction"; months with none are not invented). Without a dated month there is no monthly income.
+* **Debt-to-income (DTI)** = monthly debt payments / analytical monthly income x 100. Monthly debt payments are the sum of the monthly payments of the user's unpaid saved liabilities. Balances and interest rates are not part of it. If either input is missing, DTI is omitted, not set to a default; a real 0 is a supplied value and scores as 0.
+* **Average monthly expenses** = analytical net spending (per month, floored) / the same month count.
+* **Emergency coverage** (months) = emergency fund / analytical average monthly expenses. Omitted when the fund is not saved or the average is 0; a saved fund of 0 gives 0 months.
+* **Savings rate** = (analytical income - net spending) / analytical income x 100 (0 when there is no income). **Expense ratio** = net spending / income x 100 (100 when there is no income).
+* **Budget actuals**: for a month and a category, actual = `max(spending in that category - refunds in that category, 0)`, classification-aware, net of matching refunds. Categories match as `lower(btrim(category))` with no aliases.
+
+## 5. Not modelled
+
+* **No transfer pairing.** A transfer is excluded because it is marked as one; it is not matched with the opposite leg in another account.
+* **No refund linking.** A refund reduces spending in the period it is dated (and, for budgets, in its category); it is not tied to the original purchase.
+* **Unknown history.** A past transfer or refund stored as `unknown` is counted by direction.
+* **Time zones.** Dates are plain calendar dates. The assistant reports the current budget month in UTC, not in the user's time zone.
