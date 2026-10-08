@@ -454,9 +454,10 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     }
   };
 
-  // Derive Stats from the signed amount (> 0 income, < 0 expense). totalIncome and
-  // totalExpenses are all-time magnitudes; balance is all-time income minus
-  // expenses; currentMonth/previousMonth are local calendar-month figures.
+  // Derive Stats classification-aware (see src/utils/finance.js): totalIncome and totalExpenses are all-time
+  // analytical income and net spending (refunds and transfers handled; unlabelled rows count by direction);
+  // balance is the raw signed total of everything recorded; currentMonth/previousMonth are local calendar-month
+  // figures with the same semantics.
   const { totalIncome, totalExpenses, balance, currentMonth, previousMonth } =
     summarizeTransactions(transactions);
 

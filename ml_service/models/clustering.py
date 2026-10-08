@@ -7,6 +7,8 @@ from sklearn.cluster import AgglomerativeClustering
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import silhouette_score
 
+from models.analytics import add_analytical_columns
+
 _CLUSTER_LABELS = {
     0: 'Micro Transactions',
     1: 'Mid-Range Purchases',
@@ -16,13 +18,16 @@ _CLUSTER_LABELS = {
 _CLUSTER_DESCRIPTIONS = {
     0: 'Small, frequent day-to-day expenses (food, coffee, transit)',
     1: 'Moderate purchases — shopping, subscriptions, utility bills',
-    2: 'Large transactions — salary credits, EMI payments, investments'
+    2: 'Large outflows — EMI payments, rent, big purchases, investments'
 }
 
 
 def run_clustering(transactions: list[dict], n_clusters: int = 3) -> dict:
     """
-    Runs Agglomerative (Hierarchical) Clustering on transaction amounts.
+    Runs Agglomerative (Hierarchical) Clustering on the amounts of the user's SPENDING transactions.
+    "Spending" follows models/analytics.py (Issue #61): explicit expenses plus unclassified debits. Income, refunds
+    and transfers are not spending transactions, so they are not clustered (the Plans page presents these as
+    spending-behaviour clusters, and the plan rules quote them as a share of spending).
     Uses Ward linkage — avoids all MKL/BLAS threadpool issues.
 
     Clusters are sorted by centroid amount: 0=micro, 1=mid, 2=high-value.
@@ -35,18 +40,23 @@ def run_clustering(transactions: list[dict], n_clusters: int = 3) -> dict:
         "insights": { dominant_cluster, high_value_exposure_pct, ... }
     }
     """
-    if not transactions or len(transactions) < n_clusters:
-        return {
-            'clusters': [],
-            'labeled_transactions': [],
-            'model_metrics': {},
-            'insights': {'message': f'Need at least {n_clusters} transactions for clustering'}
-        }
+    empty = {
+        'clusters': [],
+        'labeled_transactions': [],
+        'model_metrics': {},
+        'insights': {'message': f'Need at least {n_clusters} spending transactions for clustering'}
+    }
+    if not transactions:
+        return empty
 
     df = pd.DataFrame(transactions)
     df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0)
+    add_analytical_columns(df)
+    df = df[df['spending_p'] > 0].reset_index(drop=True)
+    if len(df) < n_clusters:
+        return empty
     df['abs_amount'] = df['amount'].abs()
-    df['is_expense'] = (df['amount'] < 0).astype(float)
+    df['is_expense'] = 1.0   # every remaining row is a spending transaction (kept so the feature matrix keeps its shape)
 
     X = df[['abs_amount', 'is_expense']].values.astype(float)
     scaler = StandardScaler()

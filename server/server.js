@@ -16,7 +16,7 @@ import {
   listTransactionsByUser, createTransaction, createTransactionsBatch, deleteTransactionByUserAndId,
   listGoalsByUser, createGoal, deleteGoalByUserAndId, addGoalContribution, listGoalContributions,
   listLiabilitiesByUser, createLiability, deleteLiabilityByUserAndId, sumMonthlyPaymentsByUser, repayLiability, listLiabilityRepayments,
-  getEmergencyFundByUser, upsertEmergencyFund,
+  getEmergencyFundByUser, upsertEmergencyFund, getTransactionTotalsByUser,
   listBudgetsByUserAndMonth, upsertBudget, deleteBudgetByUserAndId
 } from './db/index.js';
 
@@ -1377,14 +1377,21 @@ app.post('/api/chat', authenticate, async (req, res) => {
     return respondDbError(res, err, 'Could not load liabilities');
   }
 
-  // Totals over ALL of this user's recorded transactions (sign decides the side).
-  const totalIncome = userTransactions.filter(t => t.amount > 0).reduce((sum, t) => sum + t.amount, 0);
-  const totalExpenses = userTransactions.filter(t => t.amount < 0).reduce((sum, t) => sum + Math.abs(t.amount), 0);
+  // Totals over ALL of this user's recorded transactions, classification-aware and computed exactly in the database:
+  // income excludes refunds and transfers, spending is expenses minus refunds (floored at 0) without transfers, and
+  // unlabelled ("unknown") rows still count by direction. The definition lives in server/db/index.js.
+  let totals;
+  try {
+    totals = await getTransactionTotalsByUser(req.user.id);
+  } catch (err) {
+    return respondDbError(res, err, 'Could not load transactions');
+  }
 
   const currentContext = {
-    totalIncome,
-    totalExpenses,
-    netCashFlow: totalIncome - totalExpenses,
+    totalIncome: totals.totalIncome,
+    totalExpenses: totals.totalSpending,
+    netCashFlow: totals.netCashFlow,
+    unknownCount: totals.unknownCount,
     transactionCount: userTransactions.length,
     recentTransactions: userTransactions.slice(0, 10)
   };
@@ -1395,15 +1402,15 @@ app.post('/api/chat', authenticate, async (req, res) => {
 The user is viewing their financial dashboard.
 
 Here is the financial data that actually exists for this user:
-- Total income (all recorded transactions): ${formatRupees(currentContext.totalIncome)}
-- Total expenses (all recorded transactions): ${formatRupees(currentContext.totalExpenses)}
-- Net cash flow (total income minus total expenses): ${formatRupees(currentContext.netCashFlow)}
-- Number of recorded transactions: ${currentContext.transactionCount}
+- Total income (all recorded transactions; refunds and transfers are not income): ${formatRupees(currentContext.totalIncome)}
+- Total spending (all recorded transactions; expenses minus refunds, transfers excluded): ${formatRupees(currentContext.totalExpenses)}
+- Net cash flow (total income minus total spending): ${formatRupees(currentContext.netCashFlow)}
+- Number of recorded transactions: ${currentContext.transactionCount}, of which ${currentContext.unknownCount} are not classified yet (they are counted as income or spending by their direction, which is provisional - do not call them confirmed income or expenses)
 - Savings goals (saved by the user):${describeGoalsForAssistant(userGoals)}
 - Liabilities (saved by the user):${describeLiabilitiesForAssistant(userLiabilities)}
 - Emergency fund (saved by the user): ${describeEmergencyFundForAssistant(emergencyFund)}
 - Monthly budgets for ${budgetMonth} (limits the user set, with their real expense spending that month):${describeBudgetsForAssistant(userBudgets)}
-- Live Transactions (Latest first; "classification" is an optional analytical label, "unknown" means not labelled yet - the totals above use each transaction's direction only): ${JSON.stringify(currentContext.recentTransactions)}
+- Live Transactions (Latest first; "classification" is an optional analytical label, "unknown" means not labelled yet - such a transaction is counted by its direction in the totals above, a refund reduces spending and is not income, a transfer is in neither total): ${JSON.stringify(currentContext.recentTransactions)}
 
 NOT available for this user (no such data has been entered or connected): credit score, portfolio holdings or allocation, and net worth (FinSphere has no asset data).
 
@@ -1476,11 +1483,11 @@ Keep responses under 3-4 sentences if possible, unless a detailed breakdown is r
   } else if (userMessage.includes('portfolio') || userMessage.includes('mutual') || userMessage.includes('stock')) {
     reply = `I don't have any portfolio or investment holdings data for you, so I can't describe an allocation.`;
   } else if (userMessage.includes('net worth') || userMessage.includes('wealth') || userMessage.includes('balance')) {
-    reply = `I can't work out your net worth because FinSphere doesn't have your assets. From your recorded transactions, your net cash flow (total income minus total expenses) is ${formatRupees(currentContext.netCashFlow)}. 💰`;
+    reply = `I can't work out your net worth because FinSphere doesn't have your assets. From your recorded transactions, your net cash flow (total income minus total spending, refunds and transfers handled as described in your totals) is ${formatRupees(currentContext.netCashFlow)}. 💰`;
   } else if (userMessage.includes('spend') || userMessage.includes('expense') || userMessage.includes('cost')) {
-    reply = `Across your ${currentContext.transactionCount} recorded transactions, your total expenses come to ${formatRupees(currentContext.totalExpenses)}. Try to keep an eye on non-essential expenditures! 📉`;
+    reply = `Across your ${currentContext.transactionCount} recorded transactions, your total spending (expenses minus refunds, transfers excluded) comes to ${formatRupees(currentContext.totalExpenses)}. Try to keep an eye on non-essential expenditures! 📉`;
   } else if (userMessage.includes('income') || userMessage.includes('salary') || userMessage.includes('earn')) {
-    reply = `Across your ${currentContext.transactionCount} recorded transactions, your total income comes to ${formatRupees(currentContext.totalIncome)}. 💵`;
+    reply = `Across your ${currentContext.transactionCount} recorded transactions, your total income (refunds and transfers excluded) comes to ${formatRupees(currentContext.totalIncome)}. 💵`;
   } else if (userMessage.includes('statement') || userMessage.includes('upload') || userMessage.includes('parse')) {
     reply = `You can easily parse bank statements by going to the 'All Transactions' tab, pasting your bank statement logs, or uploading a statement text file! I'll auto-extract all of them. 📂`;
   } else {

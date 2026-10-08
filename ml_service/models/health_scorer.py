@@ -12,7 +12,9 @@ Ratios:
   5. Investment Rate       = Investment Credits / Income × 100           [weight: 10%]
   6. Cash Flow Positivity  = Positive Cash Flow Months / Total Months    [weight: 10%]
 
-Ratios 1, 2, 5 and 6 come from the transactions alone. Ratio 3 needs the user's total monthly
+Ratios 1, 2, 5 and 6 come from the transactions alone. Income and spending are ANALYTICAL (Issue #61):
+refunds and transfers are not income, transfers are not spending, refunds reduce the spending of their month (floored
+at 0 per month), and unclassified ('unknown') rows count by the direction of their amount. Ratio 3 needs the user's total monthly
 debt payments (the sum of the monthly payments of their saved liabilities); ratio 4 needs the
 user's saved emergency fund. When such an input is missing (None), or
 the denominator cannot be computed, that ratio is OMITTED: it is never replaced by a default,
@@ -32,6 +34,8 @@ import math
 import numpy as np
 import pandas as pd
 from typing import Optional
+
+from models.analytics import add_analytical_columns
 
 
 _GRADE_THRESHOLDS = [
@@ -154,20 +158,32 @@ def run_health_scorer(
     df['date'] = pd.to_datetime(df['date'], errors='coerce')
     df['year_month'] = df['date'].dt.to_period('M')
 
-    total_income = float(df[df['amount'] > 0]['amount'].sum())
-    total_expenses = float(df[df['amount'] < 0]['amount'].abs().sum())
-    investment_credits = float(
-        df[(df['amount'] > 0) & (df.get('category', pd.Series(dtype=str)).str.lower().str.contains('invest|dividend|mutual|stock', na=False))]['amount'].sum()
-    )
+    # ── Analytical roles (Issue #61): income / spending / refund paise per row. The rule lives in models/analytics.py
+    # (the same rule as server/db/index.js and src/utils/finance.js). Net spending of a MONTH = max(spending - refunds, 0),
+    # so one month's refunds never make another month's spending negative. Money is exact integer paise.
+    add_analytical_columns(df)
 
-    # Monthly cash flow positivity
-    monthly = df.groupby('year_month')['amount'].sum()
-    n_months = len(monthly)
-    positive_months = int((monthly > 0).sum())
+    # Calendar months that have any transaction (transfers included) - the month count the averages use.
+    dated = df[df['year_month'].notna()]
+    by_month = dated.groupby('year_month')[['income_p', 'spending_p', 'refund_p']].sum()
+    n_months = len(by_month)
+    net_spending_by_month = (by_month['spending_p'] - by_month['refund_p']).clip(lower=0)
+    undated = df[df['year_month'].isna()]
+    undated_net = max(int(undated['spending_p'].sum()) - int(undated['refund_p'].sum()), 0)
+
+    total_income = int(df['income_p'].sum()) / 100
+    total_expenses = (int(net_spending_by_month.sum()) + undated_net) / 100
+    is_investment = df.get('category', pd.Series('', index=df.index)).astype(str).str.lower().str.contains('invest|dividend|mutual|stock', na=False)
+    investment_credits = int(df.loc[(df['income_p'] > 0) & is_investment, 'income_p'].sum()) / 100
+
+    # Monthly cash flow positivity: analytical income minus net spending, per month
+    month_flow = by_month['income_p'] - net_spending_by_month
+    positive_months = int((month_flow > 0).sum())
     positive_cf_rate = (positive_months / n_months * 100) if n_months > 0 else 0
 
-    # Monthly expense average (for emergency coverage): real expense transactions over the months that have
-    # transactions - the same month count as the monthly income. No months with a valid date -> no average.
+    # Monthly expense average (for emergency coverage): analytical NET spending (expenses minus refunds, per month,
+    # transfers excluded) over the months that have transactions - the same month count as the monthly income.
+    # No months with a valid date -> no average.
     avg_monthly_expenses = (total_expenses / n_months) if n_months > 0 else 0.0
 
     # Ratios computed from the transactions alone

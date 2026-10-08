@@ -139,8 +139,19 @@ export async function findUserByEmail(email) {
 // Rows come back in the shape the API has always returned: amount as a Number, date as
 // 'YYYY-MM-DD' text (selected with to_char so no time-zone conversion can shift it), and
 // the id as the stored text (historical numeric ids therefore read back as numeric strings).
-// NOTE (Issue #61): every total derived from transactions (monthly income, DTI, emergency expenses, budget actuals,
-// dashboard sums) still uses `type` / the sign only. `classification` is stored and returned but not consumed yet.
+// ── Analytical semantics (Issue #61) - the ONE definition every transaction-derived figure follows ──────────────
+// A transaction's analytical role comes from its `classification`; `type` / the sign only breaks ties for 'unknown':
+//   income    -> analytical income                      (classification = 'income')
+//   expense   -> analytical spending                    (classification = 'expense')
+//   refund    -> NOT income; it reduces spending        (classification = 'refund')
+//   transfer  -> neither income nor spending
+//   unknown   -> legacy fallback by direction: type 'income' counts as income, type 'expense' as spending
+//                (all historical and imported rows are 'unknown', so they keep contributing exactly as before)
+// Net spending of a period (and, for budgets, of a canonical category within it) = max(gross spending - refunds, 0).
+// Refunds never raise income. Categories match as lower(btrim(category)) with no aliases.
+// This file's SQL (budget actuals, listBudgetsByUserAndMonth; chat totals, getTransactionTotalsByUser), the dashboard
+// helpers in src/utils/finance.js and the health scorer in ml_service/models/health_scorer.py implement this same rule;
+// the test suites prove they agree on shared fixtures. Amounts are summed as exact NUMERIC / integer paise.
 const TX_COLUMNS = `id, user_id, title, amount, to_char(date, 'YYYY-MM-DD') AS date, type, category, classification`;
 
 function toTransaction(row) {
@@ -629,6 +640,26 @@ async function importLegacyLiabilities(client, file) {
   }
 }
 
+// Classification-aware totals over ALL of one user's transactions, in one query, as exact NUMERIC (see the semantics
+// above): income, spending (gross expenses - refunds, floored at 0), net (income - spending), and how many rows are still
+// 'unknown' (counted by direction until classified).
+export async function getTransactionTotalsByUser(userId) {
+  const { rows } = await pool.query(
+    `WITH x AS (
+       SELECT COUNT(*)::int AS n,
+              COUNT(*) FILTER (WHERE classification = 'unknown')::int AS unknown_n,
+              COALESCE(SUM(abs(amount)) FILTER (WHERE classification = 'income' OR (classification = 'unknown' AND type = 'income')), 0) AS income,
+              COALESCE(SUM(abs(amount)) FILTER (WHERE classification = 'expense' OR (classification = 'unknown' AND type = 'expense')), 0) AS gross,
+              COALESCE(SUM(abs(amount)) FILTER (WHERE classification = 'refund'), 0) AS refunds
+       FROM transactions WHERE user_id = $1)
+     SELECT n, unknown_n, income::text AS income, GREATEST(gross - refunds, 0)::text AS spending,
+            (income - GREATEST(gross - refunds, 0))::text AS net
+     FROM x`,
+    [userId]);
+  const r = rows[0];
+  return { count: r.n, unknownCount: r.unknown_n, totalIncome: Number(r.income), totalSpending: Number(r.spending), netCashFlow: Number(r.net) };
+}
+
 // ── Monthly category budgets ───────────────────────────────────────────────────
 // API shape: category = the label the user typed, categoryKey = the canonical key (lower(btrim(label))) used to
 // match transactions, month = 'YYYY-MM'. The month is a DATE (first day) in the database; to_char keeps any
@@ -653,8 +684,9 @@ function toBudget(row) {
 
 // The owner's budgets for one month ('YYYY-MM'), each with its real spending, in ONE query:
 //   budgets LEFT JOIN (the owner's expense transactions of that calendar month, summed per canonical category).
-// - Expense rows are identified by type = 'expense' (the table also guarantees their amount is negative), and the
-//   total is negated so actualSpent is a positive spending figure. Income never counts.
+// - Spending is analytical (see the semantics above): classification 'expense', plus 'unknown' expense-direction rows,
+//   minus the SAME canonical category's refunds in that month, floored at 0. Transfers and income never count, and
+//   actualSpent is a positive figure.
 // - A transaction belongs to a budget when lower(btrim(transaction.category)) = budgets.category - the same rule the
 //   budgets use for their own key, with no aliases (Food = FOOD = " food ", but not Foods and not Dining).
 // - The month window is [first day, first day of the next month) on the DATE column: no time zone is involved.
@@ -664,9 +696,13 @@ export async function listBudgetsByUserAndMonth(userId, month) {
   const { rows } = await pool.query(
     `WITH m AS (SELECT ($2 || '-01')::date AS first_day),
           spent AS (
-            SELECT lower(btrim(t.category)) AS category, -SUM(t.amount) AS total
+            SELECT lower(btrim(t.category)) AS category,
+                   GREATEST(
+                     COALESCE(SUM(abs(t.amount)) FILTER (WHERE t.classification = 'expense' OR (t.classification = 'unknown' AND t.type = 'expense')), 0)
+                     - COALESCE(SUM(abs(t.amount)) FILTER (WHERE t.classification = 'refund'), 0),
+                     0) AS total
             FROM transactions t, m
-            WHERE t.user_id = $1 AND t.type = 'expense'
+            WHERE t.user_id = $1
               AND t.date >= m.first_day AND t.date < (m.first_day + INTERVAL '1 month')
             GROUP BY lower(btrim(t.category)))
      SELECT ${BUDGET_COLUMNS_B},

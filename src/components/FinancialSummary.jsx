@@ -26,7 +26,7 @@ function FinancialSummary() {
   // `change` is a percentage vs last month, or null when last month has nothing to
   // compare against; `note` is a static caption for cards without a comparison.
   const stats = [
-    { label: 'Balance', value: balance, note: 'All-time income minus expenses', icon: IndianRupee },
+    { label: 'Balance', value: balance, note: 'All-time money in minus money out, including transfers and refunds', icon: IndianRupee },
     { label: 'Income This Month', value: currentMonth.income, change: percentChange(currentMonth.income, previousMonth.income), icon: ArrowUpRight },
     { label: 'Expenses This Month', value: currentMonth.expenses, change: percentChange(currentMonth.expenses, previousMonth.expenses), icon: ArrowDownRight },
   ];
