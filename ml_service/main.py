@@ -62,7 +62,8 @@ class AnalysisRequest(BaseModel):
     transactions: list[Transaction]
     # Optional user-supplied amounts, None = "not available": the ratio that needs it is then omitted,
     # never defaulted. monthly_debt_payments is the sum of the user's monthly debt payments per month
-    # (0 = a real "no payments"); it drives DTI. emergency_fund is not stored by FinSphere yet.
+    # (0 = a real "no payments"); it drives DTI. emergency_fund is the user's saved emergency fund in rupees
+    # (0 = a real "nothing saved yet"); it drives emergency coverage (months).
     # (A client still sending the old "liabilities" field is accepted and the field is ignored.)
     monthly_debt_payments: Optional[float] = None
     emergency_fund: Optional[float] = None

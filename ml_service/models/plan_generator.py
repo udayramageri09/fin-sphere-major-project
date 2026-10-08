@@ -7,6 +7,8 @@ to produce a structured, prioritised financial action plan.
 This is NOT an LLM — it is a deterministic rule engine operating on quantified thresholds.
 """
 
+import math
+from decimal import Decimal
 from typing import Any
 
 
@@ -44,6 +46,33 @@ def _make_step(
     }
 
 
+def _exact_emergency_coverage(metadata: dict):
+    """
+    The user's emergency coverage in months from the UNROUNDED inputs, never from the one-decimal ratio shown
+    to the user (a raw 2.99 months is displayed as 3.0 but is still below the 3-month line).
+
+    Average monthly expenses = total_expenses_analyzed / months_analyzed. total_expenses_analyzed is a sum of
+    paise-valued amounts rounded to 2 decimals, so it is exact; monthly_expenses_used (itself rounded to 2
+    decimals) would not be exact for e.g. 100.01 / 3. Coverage = emergency_fund_used / that average, i.e.
+    emergency_fund_used * months / total expenses. The comparison is done in exact decimal arithmetic so a value
+    that is exactly on a threshold (3.0, 6.0) is never pushed to the wrong side by float rounding.
+
+    Returns (fund, total_expenses, months) as Decimals, or None when any input is missing or unusable: no ratio
+    is ever invented from missing metadata.
+    """
+    def _num(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            return None
+        return Decimal(str(value))
+
+    fund = _num(metadata.get('emergency_fund_used'))
+    total = _num(metadata.get('total_expenses_analyzed'))
+    months = _num(metadata.get('months_analyzed'))
+    if fund is None or total is None or months is None or fund < 0 or total <= 0 or months <= 0:
+        return None
+    return fund, total, months
+
+
 def generate_plan(
     forecast: dict,
     anomalies: dict,
@@ -70,7 +99,7 @@ def generate_plan(
     # A health result exists only if it carries a composite score; an error payload or an
     # empty dict means there is none, so no score is reported and no health rule runs.
     # Likewise a ratio that is absent (dti / emergency_coverage when the user's monthly debt payments,
-    # monthly income or emergency fund are unknown) stays None and its rules are skipped: missing data is
+    # monthly income, emergency fund or expenses are unknown) stays None and its rules are skipped: missing data is
     # never replaced by a default that would trigger a made-up alert.
     health_score = health.get('composite_score') if health else None
     if health_score is not None:
@@ -83,7 +112,11 @@ def generate_plan(
         savings_rate = ratios.get('savings_rate', {}).get('value')
         # DTI = monthly debt payments / monthly income x 100 (debt service, not outstanding balances).
         dti = ratios.get('dti', {}).get('value')
+        # Months of expenses the user's saved emergency fund covers. Absent (None) when no fund is configured or
+        # there are no expenses to measure it against; a configured fund of 0 is a real 0.0 and does trigger HS-05.
+        # The displayed value is rounded to 1 decimal; the rules below use the exact coverage instead.
         emergency_months = ratios.get('emergency_coverage', {}).get('value')
+        exact = _exact_emergency_coverage(health.get('metadata', {})) if emergency_months is not None else None
 
         if savings_rate is not None and savings_rate < 10:
             steps.append(_make_step(
@@ -123,24 +156,36 @@ def generate_plan(
                 'HealthScorer', dti, 'advisory'
             ))
 
-        if emergency_months is not None and emergency_months < 3:
-            steps.append(_make_step(
-                'HS-05', 'Build Emergency Fund — Coverage Critical',
-                f'Emergency fund covers only {emergency_months:.1f} months. Minimum safe buffer is 3 months. '
-                f'Automate a monthly SIP specifically for emergency corpus.',
-                'critical', '3–6 months',
-                '3+ months emergency coverage',
-                'HealthScorer', emergency_months, 'advisory'
-            ))
-        elif emergency_months is not None and emergency_months < 6:
-            steps.append(_make_step(
-                'HS-06', 'Strengthen Emergency Fund to 6 Months',
-                f'Emergency fund covers {emergency_months:.1f} months. Target is 6 months for full resilience. '
-                f'Increase monthly emergency SIP by ₹2,000–₹5,000.',
-                'medium', '6 months',
-                '6-month emergency coverage',
-                'HealthScorer', emergency_months, 'advisory'
-            ))
+        if exact is not None:
+            fund, total, months = exact
+            # months of coverage = fund * months / total; compare against N months as fund * months vs N * total
+            raw_months = float(fund * months / total)
+            # Shown to 2 decimals, always rounded DOWN so 2.999 never reads as "3.00".
+            shown_months = math.floor(raw_months * 100) / 100
+            monthly_expenses = float(total / months)
+
+            if fund * months < 3 * total:
+                shortfall = 3 * monthly_expenses - float(fund)
+                steps.append(_make_step(
+                    'HS-05', 'Build Emergency Fund — Coverage Critical',
+                    f'Your emergency fund covers only {shown_months:.2f} months of expenses. Minimum safe buffer is 3 months '
+                    f'(about ₹{3 * monthly_expenses:,.0f}), so you are about ₹{shortfall:,.0f} short. '
+                    f'Set up a regular monthly transfer to emergency savings, kept somewhere you can reach quickly.',
+                    'critical', '3–6 months',
+                    '3+ months emergency coverage',
+                    'HealthScorer', shown_months, 'advisory'
+                ))
+            elif fund * months < 6 * total:
+                shortfall = 6 * monthly_expenses - float(fund)
+                steps.append(_make_step(
+                    'HS-06', 'Strengthen Emergency Fund to 6 Months',
+                    f'Your emergency fund covers {shown_months:.2f} months of expenses. Target is 6 months for full resilience '
+                    f'(about ₹{6 * monthly_expenses:,.0f}), so you are about ₹{shortfall:,.0f} short. '
+                    f'Keep adding to your emergency savings with a regular monthly contribution.',
+                    'medium', '6 months',
+                    '6-month emergency coverage',
+                    'HealthScorer', shown_months, 'advisory'
+                ))
 
     # ── FORECAST SIGNALS ─────────────────────────────────────────────────────
     if forecast and 'forecast' in forecast:

@@ -13,16 +13,18 @@ Ratios:
   6. Cash Flow Positivity  = Positive Cash Flow Months / Total Months    [weight: 10%]
 
 Ratios 1, 2, 5 and 6 come from the transactions alone. Ratio 3 needs the user's total monthly
-debt payments (the sum of the monthly payments of their saved liabilities); ratio 4 needs an
-emergency fund, which FinSphere does not store yet. When such an input is missing (None), or
+debt payments (the sum of the monthly payments of their saved liabilities); ratio 4 needs the
+user's saved emergency fund. When such an input is missing (None), or
 the denominator cannot be computed, that ratio is OMITTED: it is never replaced by a default,
 and the composite is renormalised over the ratios that exist. Missing is not zero: a real 0
-counts as supplied and is scored as 0 (no debt payments -> DTI 0).
+counts as supplied and is scored as 0 (no debt payments -> DTI 0; an emergency fund of 0 -> 0 months).
 
 DTI is the conventional debt-service ratio: what share of monthly income goes to debt
 payments. Outstanding balances (principal) and interest rates are not part of it.
 Monthly income is the transactions' total income divided by the number of calendar months
 that have any transaction (months with no transactions are not invented).
+Emergency coverage = emergency fund / average monthly expenses, where the average is the transactions'
+total expenses divided by that same month count (expense transactions only; income is not involved).
 """
 
 import math
@@ -45,6 +47,8 @@ _BENCHMARKS = {
     # Lower is better. These are conventional MONTHLY debt-service DTI levels: the 36% guideline
     # (back-end DTI above ~36% is a strain), lenders' ~43% ceiling, and 50% as a danger zone.
     'dti':               {'ideal': 20, 'acceptable': 36, 'poor': 50},
+    # Months of expenses covered; higher is better. 3-6 months is the conventional emergency-fund guidance
+    # (3 months = minimum buffer, 6 months = fully resilient), so these levels are kept.
     'emergency_months':  {'ideal': 6,  'acceptable': 3,  'poor': 1},
     'investment_rate':   {'ideal': 15, 'acceptable': 10, 'poor': 5},
     'positive_cf_rate':  {'ideal': 80, 'acceptable': 60, 'poor': 40},
@@ -162,8 +166,9 @@ def run_health_scorer(
     positive_months = int((monthly > 0).sum())
     positive_cf_rate = (positive_months / n_months * 100) if n_months > 0 else 0
 
-    # Monthly expense average (for emergency coverage)
-    avg_monthly_expenses = float(df[df['amount'] < 0]['amount'].abs().sum() / max(n_months, 1))
+    # Monthly expense average (for emergency coverage): real expense transactions over the months that have
+    # transactions - the same month count as the monthly income. No months with a valid date -> no average.
+    avg_monthly_expenses = (total_expenses / n_months) if n_months > 0 else 0.0
 
     # Ratios computed from the transactions alone
     savings_rate = ((total_income - total_expenses) / total_income * 100) if total_income > 0 else 0
@@ -305,6 +310,7 @@ def run_health_scorer(
             # Inputs the DTI was actually computed from (None when DTI is unavailable).
             'monthly_debt_payments_used': monthly_debt_payments if dti is not None else None,
             'monthly_income_used': round(monthly_income, 2) if dti is not None else None,
-            'emergency_fund_used': emergency_fund if emergency_months is not None else None
+            'emergency_fund_used': emergency_fund if emergency_months is not None else None,
+            'monthly_expenses_used': round(avg_monthly_expenses, 2) if emergency_months is not None else None
         }
     }

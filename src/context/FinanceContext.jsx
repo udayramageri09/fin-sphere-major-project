@@ -26,6 +26,11 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
   const [liabilities, setLiabilities] = useState([]);
   const [liabilitiesLoading, setLiabilitiesLoading] = useState(true);
   const [liabilitiesError, setLiabilitiesError] = useState(null);
+  // The emergency fund is one record per user. emergencyFund is null until the first load finishes, then
+  // { configured: false, ... } (nothing saved) or { configured: true, currentAmount, targetAmount, ... }.
+  const [emergencyFund, setEmergencyFund] = useState(null);
+  const [emergencyFundLoading, setEmergencyFundLoading] = useState(true);
+  const [emergencyFundError, setEmergencyFundError] = useState(null);
   const { invalidateSession } = useAuth();
 
   const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:5000/api';
@@ -86,10 +91,30 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     }
   };
 
+  const fetchEmergencyFund = async () => {
+    setEmergencyFundLoading(true);
+    setEmergencyFundError(null);
+    try {
+      const res = await fetch(`${API_URL}/emergency-fund`, { credentials: 'include' });
+      if (res.status === 401) {
+        setEmergencyFund(null);
+        return invalidateSession();
+      }
+      if (!res.ok) throw new Error('Failed to load emergency fund');
+      setEmergencyFund(await res.json());
+    } catch (err) {
+      console.error(err);
+      setEmergencyFundError(err.message);
+    } finally {
+      setEmergencyFundLoading(false);
+    }
+  };
+
   useEffect(() => {
     fetchTransactions();
     fetchGoals();
     fetchLiabilities();
+    fetchEmergencyFund();
     // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect
   }, []);
 
@@ -216,6 +241,26 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     setLiabilities(prev => prev.filter(l => l.id !== id));
   };
 
+  // Saves (creates or replaces) the emergency fund. Throws on failure so the form can show the server's
+  // validation message inline; a 401 ends the session.
+  const saveEmergencyFund = async (values) => {
+    const res = await fetch(`${API_URL}/emergency-fund`, {
+      method: 'PUT',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(values)
+    });
+    if (res.status === 401) {
+      setEmergencyFund(null);
+      invalidateSession();
+      throw new Error('Session expired');
+    }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Failed to save emergency fund');
+    setEmergencyFund(data);
+    return data;
+  };
+
   // Handles pasting text or uploading files
   const parseStatement = async (input) => {
     setLoading(true);
@@ -309,6 +354,11 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
       fetchLiabilities,
       addLiability,
       deleteLiability,
+      emergencyFund,
+      emergencyFundLoading,
+      emergencyFundError,
+      fetchEmergencyFund,
+      saveEmergencyFund,
       fetchTransactions,
       addTransaction,
       deleteTransaction,
