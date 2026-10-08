@@ -1,5 +1,5 @@
 // PostgreSQL access for FinSphere (pg + parameterized SQL, no ORM).
-// Scope today: users, transactions and goals (liabilities are still a JSON file).
+// Scope: users, transactions, goals and liabilities (every domain is in PostgreSQL).
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
@@ -11,6 +11,7 @@ const SCHEMA_FILE = path.join(__dirname, 'schema.sql');
 const LEGACY_USERS_MIGRATION = 'import_users_json_v1';
 const LEGACY_TRANSACTIONS_MIGRATION = 'import_transactions_json_v1';
 const LEGACY_GOALS_MIGRATION = 'import_goals_json_v1';
+const LEGACY_LIABILITIES_MIGRATION = 'import_liabilities_json_v1';
 // Arbitrary constant: serializes schema setup/migration across concurrently starting instances.
 const INIT_LOCK_ID = 703939;
 
@@ -39,7 +40,7 @@ function toUser(row) {
 
 // Creates the pool, applies the schema and runs the one-time legacy users import.
 // Throws (never swallows) so the caller can refuse to start.
-export async function initDatabase({ env = process.env, legacyUsersFile, legacyTransactionsFile, legacyGoalsFile } = {}) {
+export async function initDatabase({ env = process.env, legacyUsersFile, legacyTransactionsFile, legacyGoalsFile, legacyLiabilitiesFile } = {}) {
   if (!env.DATABASE_URL) throw new Error('DATABASE_URL is not set');
   pool = new pg.Pool({ connectionString: env.DATABASE_URL, ssl: sslConfig(env), max: 10, connectionTimeoutMillis: 10_000 });
   // An error on an idle client must not crash the process; the next query reports a real failure.
@@ -54,6 +55,7 @@ export async function initDatabase({ env = process.env, legacyUsersFile, legacyT
       // After users: transactions reference them.
       if (legacyTransactionsFile) await importLegacyTransactions(client, legacyTransactionsFile);
       if (legacyGoalsFile) await importLegacyGoals(client, legacyGoalsFile);
+      if (legacyLiabilitiesFile) await importLegacyLiabilities(client, legacyLiabilitiesFile);
     } finally {
       await client.query('SELECT pg_advisory_unlock($1)', [INIT_LOCK_ID]);
     }
@@ -365,6 +367,133 @@ async function importLegacyGoals(client, file) {
     await client.query('COMMIT');
     const skippedTotal = skipped['no owner'] + skipped['unknown owner'] + skipped.malformed;
     console.log(`Legacy goals import: ${rows.length} imported, ${skippedTotal} skipped (${skipped['no owner']} without an owner, ${skipped['unknown owner']} with an unknown owner, ${skipped.malformed} malformed).`);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  }
+}
+
+// ── Liabilities ────────────────────────────────────────────────────────────────
+// Same API shape as before: money and the rate as JS numbers, createdAt as an ISO string. NUMERIC has no
+// precision limit, so a Number survives the round trip (its shortest decimal form is stored and parsed back
+// to the same double) and nothing is computed in floating point inside SQL.
+const LIABILITY_TYPES = ['home_loan', 'personal_loan', 'vehicle_loan', 'education_loan', 'credit_card', 'other'];
+const LIABILITY_COLUMNS = 'id, user_id, name, type, outstanding_amount, interest_rate, monthly_payment, created_at';
+
+function toLiability(row) {
+  return {
+    id: row.id,
+    userId: Number(row.user_id),
+    name: row.name,
+    type: row.type,
+    outstandingAmount: Number(row.outstanding_amount),
+    interestRate: Number(row.interest_rate),
+    monthlyPayment: Number(row.monthly_payment),
+    createdAt: row.created_at.toISOString(),
+  };
+}
+
+// Newest first, like the old in-memory list.
+export async function listLiabilitiesByUser(userId) {
+  const { rows } = await pool.query(`SELECT ${LIABILITY_COLUMNS} FROM liabilities WHERE user_id = $1 ORDER BY seq DESC`, [userId]);
+  return rows.map(toLiability);
+}
+
+// Total outstanding amount of one user's liabilities (nothing else contributes), summed exactly in SQL.
+// No rows -> 0, a real zero. Returns null if the exact total is too large for a finite number, so the
+// caller can report "unavailable" instead of a capped or fake value.
+export async function sumOutstandingByUser(userId) {
+  const { rows } = await pool.query('SELECT COALESCE(SUM(outstanding_amount), 0)::text AS total FROM liabilities WHERE user_id = $1', [userId]);
+  const total = Number(rows[0].total);
+  return Number.isFinite(total) ? total : null;
+}
+
+// Inserts validated liabilities in one statement (all or none). The first element gets the highest seq,
+// i.e. it is listed first.
+async function insertLiabilities(db, rows) {
+  await db.query(
+    `INSERT INTO liabilities (id, user_id, name, type, outstanding_amount, interest_rate, monthly_payment, created_at)
+     SELECT id, user_id, name, type, outstanding_amount, interest_rate, monthly_payment, created_at::timestamptz
+     FROM unnest($1::text[], $2::bigint[], $3::text[], $4::text[], $5::numeric[], $6::numeric[], $7::numeric[], $8::text[])
+          WITH ORDINALITY AS t(id, user_id, name, type, outstanding_amount, interest_rate, monthly_payment, created_at, ord)
+     ORDER BY ord DESC`,
+    [
+      rows.map((r) => r.id),
+      rows.map((r) => r.userId),
+      rows.map((r) => r.name),
+      rows.map((r) => r.type),
+      rows.map((r) => String(r.outstandingAmount)),   // shortest round-trip decimal text, e.g. '1234.56' or '1e+300'
+      rows.map((r) => String(r.interestRate)),
+      rows.map((r) => String(r.monthlyPayment)),
+      rows.map((r) => r.createdAt),
+    ]);
+}
+
+export const createLiability = (liability) => insertLiabilities(pool, [liability]);
+
+// Removes exactly one liability and only one owned by userId (the owner is part of the lookup).
+export async function deleteLiabilityByUserAndId(userId, id) {
+  const { rowCount } = await pool.query(
+    `DELETE FROM liabilities
+     WHERE seq = (SELECT seq FROM liabilities WHERE user_id = $1 AND id = $2 ORDER BY seq DESC LIMIT 1)
+       AND user_id = $1`,
+    [userId, String(id)]);
+  return rowCount > 0;
+}
+
+// Whether one server_liabilities.json record can become a row WITHOUT being changed. Nothing is trimmed,
+// case-folded, rounded, clamped, defaulted or invented: every field is stored exactly as it was, or the record
+// is skipped and counted.
+function legacyLiabilityRow(l, knownUserIds) {
+  if (l === null || typeof l !== 'object' || Array.isArray(l)) return { reason: 'malformed' };
+  if (l.userId === undefined || l.userId === null) return { reason: 'no owner' };
+  if (!Number.isSafeInteger(l.userId) || !knownUserIds.has(l.userId)) return { reason: 'unknown owner' };
+  const hasNul = (v) => v.includes('\u0000');   // PostgreSQL text cannot hold NUL
+  if (typeof l.id !== 'string' || l.id.length < 1 || l.id.length > 64 || hasNul(l.id)) return { reason: 'malformed' };
+  if (typeof l.name !== 'string' || l.name.length < 1 || l.name.length > 120 || l.name !== l.name.trim() || hasNul(l.name)) return { reason: 'malformed' };
+  if (!LIABILITY_TYPES.includes(l.type)) return { reason: 'malformed' };
+  const { outstandingAmount: owed, interestRate: rate, monthlyPayment: payment } = l;
+  if (typeof owed !== 'number' || !Number.isFinite(owed) || owed <= 0) return { reason: 'malformed' };
+  if (typeof rate !== 'number' || !Number.isFinite(rate) || rate < 0 || rate > 100) return { reason: 'malformed' };
+  if (typeof payment !== 'number' || !Number.isFinite(payment) || payment < 0) return { reason: 'malformed' };
+  // createdAt must already be the canonical ISO timestamp the API produced; a missing one is not invented.
+  if (typeof l.createdAt !== 'string' || Number.isNaN(Date.parse(l.createdAt)) || new Date(l.createdAt).toISOString() !== l.createdAt) return { reason: 'malformed' };
+  return { row: { id: l.id, userId: l.userId, name: l.name, type: l.type, outstandingAmount: owed, interestRate: rate, monthlyPayment: payment, createdAt: l.createdAt } };
+}
+
+// One-time import of server_liabilities.json; same rules as the goals import (all-or-nothing, recorded in
+// schema_migrations, unreadable file refuses startup, skipped records are counted and never logged, file untouched,
+// the file's order is kept: its first element is the newest and is listed first).
+async function importLegacyLiabilities(client, file) {
+  const done = await client.query('SELECT 1 FROM schema_migrations WHERE name = $1', [LEGACY_LIABILITIES_MIGRATION]);
+  if (done.rowCount > 0) return;
+
+  let legacy = [];
+  if (fs.existsSync(file)) {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));   // corrupt file: throw, do not mark as migrated
+    if (!Array.isArray(parsed)) throw new Error('legacy liabilities file is not an array');
+    legacy = parsed;
+  }
+
+  await client.query('BEGIN');
+  try {
+    const knownUserIds = new Set((await client.query('SELECT id FROM users')).rows.map((r) => Number(r.id)));
+    const rows = [];
+    const seen = new Set();
+    const skipped = { 'no owner': 0, 'unknown owner': 0, malformed: 0 };
+    for (const l of legacy) {
+      const result = legacyLiabilityRow(l, knownUserIds);
+      if (!result.row) { skipped[result.reason]++; continue; }
+      const key = `${result.row.userId}:${result.row.id}`;
+      if (seen.has(key)) { skipped.malformed++; continue; }   // repeated id for one owner
+      seen.add(key);
+      rows.push(result.row);
+    }
+    if (rows.length > 0) await insertLiabilities(client, rows);
+    await client.query('INSERT INTO schema_migrations (name) VALUES ($1)', [LEGACY_LIABILITIES_MIGRATION]);
+    await client.query('COMMIT');
+    const skippedTotal = skipped['no owner'] + skipped['unknown owner'] + skipped.malformed;
+    console.log(`Legacy liabilities import: ${rows.length} imported, ${skippedTotal} skipped (${skipped['no owner']} without an owner, ${skipped['unknown owner']} with an unknown owner, ${skipped.malformed} malformed).`);
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
