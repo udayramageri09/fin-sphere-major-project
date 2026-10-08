@@ -1,5 +1,5 @@
 // PostgreSQL access for FinSphere (pg + parameterized SQL, no ORM).
-// Scope today: users and transactions (goals and liabilities are still JSON files).
+// Scope today: users, transactions and goals (liabilities are still a JSON file).
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
@@ -10,6 +10,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCHEMA_FILE = path.join(__dirname, 'schema.sql');
 const LEGACY_USERS_MIGRATION = 'import_users_json_v1';
 const LEGACY_TRANSACTIONS_MIGRATION = 'import_transactions_json_v1';
+const LEGACY_GOALS_MIGRATION = 'import_goals_json_v1';
 // Arbitrary constant: serializes schema setup/migration across concurrently starting instances.
 const INIT_LOCK_ID = 703939;
 
@@ -38,7 +39,7 @@ function toUser(row) {
 
 // Creates the pool, applies the schema and runs the one-time legacy users import.
 // Throws (never swallows) so the caller can refuse to start.
-export async function initDatabase({ env = process.env, legacyUsersFile, legacyTransactionsFile } = {}) {
+export async function initDatabase({ env = process.env, legacyUsersFile, legacyTransactionsFile, legacyGoalsFile } = {}) {
   if (!env.DATABASE_URL) throw new Error('DATABASE_URL is not set');
   pool = new pg.Pool({ connectionString: env.DATABASE_URL, ssl: sslConfig(env), max: 10, connectionTimeoutMillis: 10_000 });
   // An error on an idle client must not crash the process; the next query reports a real failure.
@@ -52,6 +53,7 @@ export async function initDatabase({ env = process.env, legacyUsersFile, legacyT
       if (legacyUsersFile) await importLegacyUsers(client, legacyUsersFile);
       // After users: transactions reference them.
       if (legacyTransactionsFile) await importLegacyTransactions(client, legacyTransactionsFile);
+      if (legacyGoalsFile) await importLegacyGoals(client, legacyGoalsFile);
     } finally {
       await client.query('SELECT pg_advisory_unlock($1)', [INIT_LOCK_ID]);
     }
@@ -250,6 +252,119 @@ async function importLegacyTransactions(client, file) {
     await client.query('COMMIT');
     const skippedTotal = skipped['no owner'] + skipped['unknown owner'] + skipped.malformed;
     console.log(`Legacy transactions import: ${rows.length} imported, ${skippedTotal} skipped (${skipped['no owner']} without an owner, ${skipped['unknown owner']} with an unknown owner, ${skipped.malformed} malformed).`);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  }
+}
+
+// ── Goals ──────────────────────────────────────────────────────────────────────
+// Same API shape as before: amounts as JS numbers, targetDate as 'YYYY-MM-DD' text, createdAt as an ISO string.
+// NUMERIC has no precision limit here, so a Number survives the round trip (its shortest decimal form is stored
+// and parsed back to the same double); values with paise stay exact, there is no float arithmetic in SQL.
+const GOAL_COLUMNS = `id, user_id, title, target_amount, current_amount, to_char(target_date, 'YYYY-MM-DD') AS target_date, created_at`;
+
+function toGoal(row) {
+  return {
+    id: row.id,
+    userId: Number(row.user_id),
+    title: row.title,
+    targetAmount: Number(row.target_amount),
+    currentAmount: Number(row.current_amount),
+    targetDate: row.target_date,
+    createdAt: row.created_at.toISOString(),
+  };
+}
+
+// Newest first, like the old in-memory list.
+export async function listGoalsByUser(userId) {
+  const { rows } = await pool.query(`SELECT ${GOAL_COLUMNS} FROM goals WHERE user_id = $1 ORDER BY seq DESC`, [userId]);
+  return rows.map(toGoal);
+}
+
+// Inserts validated goals ({id, userId, title, targetAmount, currentAmount, targetDate, createdAt}) in one
+// statement (all or none). The first element gets the highest seq, i.e. it is listed first.
+async function insertGoals(db, rows) {
+  await db.query(
+    `INSERT INTO goals (id, user_id, title, target_amount, current_amount, target_date, created_at)
+     SELECT id, user_id, title, target_amount, current_amount, target_date::date, created_at::timestamptz
+     FROM unnest($1::text[], $2::bigint[], $3::text[], $4::numeric[], $5::numeric[], $6::text[], $7::text[])
+          WITH ORDINALITY AS t(id, user_id, title, target_amount, current_amount, target_date, created_at, ord)
+     ORDER BY ord DESC`,
+    [
+      rows.map((r) => r.id),
+      rows.map((r) => r.userId),
+      rows.map((r) => r.title),
+      rows.map((r) => String(r.targetAmount)),     // shortest round-trip decimal text, e.g. '1234.56' or '1e+300'
+      rows.map((r) => String(r.currentAmount)),
+      rows.map((r) => r.targetDate),
+      rows.map((r) => r.createdAt),
+    ]);
+}
+
+export const createGoal = (goal) => insertGoals(pool, [goal]);
+
+// Removes exactly one goal and only one owned by userId (the owner is part of the lookup).
+export async function deleteGoalByUserAndId(userId, id) {
+  const { rowCount } = await pool.query(
+    `DELETE FROM goals
+     WHERE seq = (SELECT seq FROM goals WHERE user_id = $1 AND id = $2 ORDER BY seq DESC LIMIT 1)
+       AND user_id = $1`,
+    [userId, String(id)]);
+  return rowCount > 0;
+}
+
+// Whether one server_goals.json record can become a row WITHOUT being changed. Nothing is trimmed, rounded,
+// defaulted or invented: id, userId, title, targetAmount, currentAmount, targetDate and createdAt are stored
+// exactly as they were, or the record is skipped and counted.
+function legacyGoalRow(g, knownUserIds) {
+  if (g === null || typeof g !== 'object' || Array.isArray(g)) return { reason: 'malformed' };
+  if (g.userId === undefined || g.userId === null) return { reason: 'no owner' };
+  if (!Number.isSafeInteger(g.userId) || !knownUserIds.has(g.userId)) return { reason: 'unknown owner' };
+  const hasNul = (v) => v.includes('\u0000');   // PostgreSQL text cannot hold NUL
+  if (typeof g.id !== 'string' || g.id.length < 1 || g.id.length > 64 || hasNul(g.id)) return { reason: 'malformed' };
+  if (typeof g.title !== 'string' || g.title.length < 1 || g.title.length > 120 || g.title !== g.title.trim() || hasNul(g.title)) return { reason: 'malformed' };
+  const { targetAmount: target, currentAmount: current } = g;
+  if (typeof target !== 'number' || !Number.isFinite(target) || target <= 0) return { reason: 'malformed' };
+  if (typeof current !== 'number' || !Number.isFinite(current) || current < 0 || current > target) return { reason: 'malformed' };
+  if (typeof g.targetDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(g.targetDate)) return { reason: 'malformed' };
+  const day = new Date(`${g.targetDate}T00:00:00Z`);
+  if (Number.isNaN(day.getTime()) || day.toISOString().slice(0, 10) !== g.targetDate) return { reason: 'malformed' };
+  // createdAt must already be the canonical ISO timestamp the API produced; a missing one is not invented.
+  if (typeof g.createdAt !== 'string' || Number.isNaN(Date.parse(g.createdAt)) || new Date(g.createdAt).toISOString() !== g.createdAt) return { reason: 'malformed' };
+  return { row: { id: g.id, userId: g.userId, title: g.title, targetAmount: target, currentAmount: current, targetDate: g.targetDate, createdAt: g.createdAt } };
+}
+
+// One-time import of server_goals.json; same rules as the transactions import (all-or-nothing, recorded in
+// schema_migrations, unreadable file refuses startup, skipped records are counted and never logged, file untouched,
+// the file's order is kept: its first element is the newest and is listed first).
+async function importLegacyGoals(client, file) {
+  const done = await client.query('SELECT 1 FROM schema_migrations WHERE name = $1', [LEGACY_GOALS_MIGRATION]);
+  if (done.rowCount > 0) return;
+
+  let legacy = [];
+  if (fs.existsSync(file)) {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));   // corrupt file: throw, do not mark as migrated
+    if (!Array.isArray(parsed)) throw new Error('legacy goals file is not an array');
+    legacy = parsed;
+  }
+
+  await client.query('BEGIN');
+  try {
+    const knownUserIds = new Set((await client.query('SELECT id FROM users')).rows.map((r) => Number(r.id)));
+    const rows = [];
+    const seen = new Set();
+    const skipped = { 'no owner': 0, 'unknown owner': 0, malformed: 0 };
+    for (const g of legacy) {
+      const result = legacyGoalRow(g, knownUserIds);
+      if (result.row && seen.has(`${result.row.userId}:${result.row.id}`)) { skipped.malformed++; continue; }   // repeated id for one owner
+      if (result.row) { seen.add(`${result.row.userId}:${result.row.id}`); rows.push(result.row); } else skipped[result.reason]++;
+    }
+    if (rows.length > 0) await insertGoals(client, rows);
+    await client.query('INSERT INTO schema_migrations (name) VALUES ($1)', [LEGACY_GOALS_MIGRATION]);
+    await client.query('COMMIT');
+    const skippedTotal = skipped['no owner'] + skipped['unknown owner'] + skipped.malformed;
+    console.log(`Legacy goals import: ${rows.length} imported, ${skippedTotal} skipped (${skipped['no owner']} without an owner, ${skipped['unknown owner']} with an unknown owner, ${skipped.malformed} malformed).`);
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;

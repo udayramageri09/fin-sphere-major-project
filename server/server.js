@@ -14,7 +14,8 @@ import rateLimit from 'express-rate-limit';
 import { randomUUID } from 'node:crypto';
 import {
   initDatabase, closeDatabase, createUser, findUserByEmail, normalizeEmail, DuplicateEmailError,
-  listTransactionsByUser, createTransaction, createTransactionsBatch, deleteTransactionByUserAndId
+  listTransactionsByUser, createTransaction, createTransactionsBatch, deleteTransactionByUserAndId,
+  listGoalsByUser, createGoal, deleteGoalByUserAndId
 } from './db/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -69,45 +70,9 @@ const upload = multer({
 // to import existing rows; nothing writes to it any more.
 const LEGACY_TRANSACTIONS_FILE = path.join(__dirname, 'server_db.json');
 
-// ── Goals persistence ──────────────────────────────────────────────────────────
-// Own JSON file (transactions and users have moved to PostgreSQL), in its own file so it never touches the
-// transaction or user data. Path is __dirname-based, so it is the same file no matter
-// where the server is started from.
-const GOALS_FILE = path.join(__dirname, 'server_goals.json');
-let goals = [];
-
-function loadGoals() {
-  if (!fs.existsSync(GOALS_FILE)) return;
-  try {
-    const parsed = JSON.parse(fs.readFileSync(GOALS_FILE, 'utf8'));
-    if (!Array.isArray(parsed)) throw new Error('goals file is not an array');
-    goals = parsed;
-  } catch (err) {
-    // Keep the unreadable file for recovery instead of letting the next save overwrite it.
-    console.error('Error loading goals, starting empty:', err);
-    try {
-      fs.renameSync(GOALS_FILE, `${GOALS_FILE.replace(/\.json$/, '')}.corrupt-${Date.now()}.json`);
-    } catch (renameErr) {
-      console.error('Could not set aside the unreadable goals file:', renameErr);
-    }
-  }
-}
-
-// Writes via a temp file + rename so a crash mid-write cannot truncate the real file.
-// Returns false on failure so the caller can roll back and report an error.
-function saveGoals() {
-  try {
-    const tmpFile = `${GOALS_FILE}.tmp`;
-    fs.writeFileSync(tmpFile, JSON.stringify(goals, null, 2), 'utf8');
-    fs.renameSync(tmpFile, GOALS_FILE);
-    return true;
-  } catch (err) {
-    console.error('Error saving goals:', err);
-    return false;
-  }
-}
-
-loadGoals();
+// Goals live in PostgreSQL (see ./db). server_goals.json is only read once, at startup,
+// to import existing rows; nothing writes to it any more.
+const LEGACY_GOALS_FILE = path.join(__dirname, 'server_goals.json');
 
 // ── Liabilities persistence ────────────────────────────────────────────────────
 // Same reliability pattern as goals (own file, __dirname-based path, safe load, temp file +
@@ -456,6 +421,7 @@ function normalizeGoalInput(raw, nowMs = Date.now()) {
   if (title.length > MAX_TITLE_LENGTH) {
     return fail(`Title must be ${MAX_TITLE_LENGTH} characters or fewer`);
   }
+  if (title.includes('\u0000')) return fail('Title contains an invalid character');   // PostgreSQL text cannot hold NUL
 
   // Target amount: finite and > 0 (no upper cap), rounded to paise
   const target = toAmount(raw.targetAmount);
@@ -683,12 +649,16 @@ app.delete('/api/transactions/:id', authenticate, async (req, res) => {
 
 // ── Goals ──────────────────────────────────────────────────────────────────────
 // GET /api/goals - only the authenticated user's goals
-app.get('/api/goals', authenticate, (req, res) => {
-  res.json(goals.filter(g => g.userId === req.user.id));
+app.get('/api/goals', authenticate, async (req, res) => {
+  try {
+    res.json(await listGoalsByUser(req.user.id));
+  } catch (err) {
+    respondDbError(res, err, 'Could not load goals');
+  }
 });
 
-// POST /api/goals - validate first; nothing is mutated or written on a 400
-app.post('/api/goals', authenticate, (req, res) => {
+// POST /api/goals - validate first; nothing is written on a 400
+app.post('/api/goals', authenticate, async (req, res) => {
   const result = normalizeGoalInput(req.body);
   if (!result.ok) {
     return res.status(400).json({ error: result.error });
@@ -701,27 +671,26 @@ app.post('/api/goals', authenticate, (req, res) => {
     createdAt: new Date().toISOString()
   };
 
-  goals.unshift(goal); // newest first
-  if (!saveGoals()) {
-    goals.shift(); // roll back so memory never disagrees with the file
-    return res.status(500).json({ error: 'Could not save goal' });
+  try {
+    await createGoal(goal);
+  } catch (err) {
+    return respondDbError(res, err, 'Could not save goal');
   }
   res.status(201).json(goal);
 });
 
 // DELETE /api/goals/:id - exactly one goal, and only one owned by the caller
-app.delete('/api/goals/:id', authenticate, (req, res) => {
-  const index = goals.findIndex(g => g.userId === req.user.id && String(g.id) === String(req.params.id));
-
-  // 404 for both missing and not-yours, so another user's goal is never revealed.
-  if (index === -1) {
-    return res.status(404).json({ error: 'Goal not found' });
+app.delete('/api/goals/:id', authenticate, async (req, res) => {
+  let removed;
+  try {
+    removed = await deleteGoalByUserAndId(req.user.id, req.params.id);
+  } catch (err) {
+    return respondDbError(res, err, 'Could not delete goal');
   }
 
-  const [removed] = goals.splice(index, 1);
-  if (!saveGoals()) {
-    goals.splice(index, 0, removed); // roll back
-    return res.status(500).json({ error: 'Could not delete goal' });
+  // 404 for both missing and not-yours, so another user's goal is never revealed.
+  if (!removed) {
+    return res.status(404).json({ error: 'Goal not found' });
   }
   res.json({ message: 'Goal deleted successfully' });
 });
@@ -1124,7 +1093,12 @@ app.post('/api/chat', authenticate, async (req, res) => {
   } catch (err) {
     return respondDbError(res, err, 'Could not load transactions');
   }
-  const userGoals = goals.filter(g => g.userId === req.user.id);
+  let userGoals;
+  try {
+    userGoals = await listGoalsByUser(req.user.id);
+  } catch (err) {
+    return respondDbError(res, err, 'Could not load goals');
+  }
   const userLiabilities = liabilities.filter(l => l.userId === req.user.id);
 
   // Totals over ALL of this user's recorded transactions (sign decides the side).
@@ -1409,7 +1383,7 @@ Guidelines:
 // missing, unreachable or fails to initialise, refuse to start rather than pretend that
 // accounts can be saved.
 try {
-  await initDatabase({ legacyUsersFile: LEGACY_USERS_FILE, legacyTransactionsFile: LEGACY_TRANSACTIONS_FILE });
+  await initDatabase({ legacyUsersFile: LEGACY_USERS_FILE, legacyTransactionsFile: LEGACY_TRANSACTIONS_FILE, legacyGoalsFile: LEGACY_GOALS_FILE });
 } catch (err) {
   console.error(`FATAL: PostgreSQL initialisation failed: ${err.message}`);
   console.error('Set DATABASE_URL to a reachable PostgreSQL database (see server/.env.example).');
