@@ -21,6 +21,11 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
   const [goals, setGoals] = useState([]);
   const [goalsLoading, setGoalsLoading] = useState(true);
   const [goalsError, setGoalsError] = useState(null);
+  // Same for liabilities. All of this state lives in the provider, which App only renders
+  // while authenticated, so logging out (or losing the session) discards it.
+  const [liabilities, setLiabilities] = useState([]);
+  const [liabilitiesLoading, setLiabilitiesLoading] = useState(true);
+  const [liabilitiesError, setLiabilitiesError] = useState(null);
   const { invalidateSession } = useAuth();
 
   const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:5000/api';
@@ -58,9 +63,33 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     }
   };
 
+  // A 401 also clears any liabilities already held in memory before the session ends.
+  const dropLiabilitiesAndEndSession = () => {
+    setLiabilities([]);
+    setLiabilitiesError(null);
+    invalidateSession();
+  };
+
+  const fetchLiabilities = async () => {
+    setLiabilitiesLoading(true);
+    setLiabilitiesError(null);
+    try {
+      const res = await fetch(`${API_URL}/liabilities`, { credentials: 'include' });
+      if (res.status === 401) return dropLiabilitiesAndEndSession();
+      if (!res.ok) throw new Error('Failed to load liabilities');
+      setLiabilities(await res.json());
+    } catch (err) {
+      console.error(err);
+      setLiabilitiesError(err.message);
+    } finally {
+      setLiabilitiesLoading(false);
+    }
+  };
+
   useEffect(() => {
     fetchTransactions();
     fetchGoals();
+    fetchLiabilities();
     // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect
   }, []);
 
@@ -152,6 +181,41 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     setGoals(prev => prev.filter(g => g.id !== id));
   };
 
+  // Liability create/delete throw on failure so the caller can show the message inline
+  // (the server's validation text is passed through); a 401 ends the session.
+  const addLiability = async (liability) => {
+    const res = await fetch(`${API_URL}/liabilities`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(liability)
+    });
+    if (res.status === 401) {
+      dropLiabilitiesAndEndSession();
+      throw new Error('Session expired');
+    }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Failed to add liability');
+    setLiabilities(prev => [data, ...prev]);
+    return data;
+  };
+
+  const deleteLiability = async (id) => {
+    const res = await fetch(`${API_URL}/liabilities/${id}`, {
+      method: 'DELETE',
+      credentials: 'include'
+    });
+    if (res.status === 401) {
+      dropLiabilitiesAndEndSession();
+      throw new Error('Session expired');
+    }
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Failed to delete liability');
+    }
+    setLiabilities(prev => prev.filter(l => l.id !== id));
+  };
+
   // Handles pasting text or uploading files
   const parseStatement = async (input) => {
     setLoading(true);
@@ -239,6 +303,12 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
       fetchGoals,
       addGoal,
       deleteGoal,
+      liabilities,
+      liabilitiesLoading,
+      liabilitiesError,
+      fetchLiabilities,
+      addLiability,
+      deleteLiability,
       fetchTransactions,
       addTransaction,
       deleteTransaction,
