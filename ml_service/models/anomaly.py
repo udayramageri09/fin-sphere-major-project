@@ -88,7 +88,7 @@ def run_anomaly_detection(transactions: list[dict]) -> dict:
         if row['day_of_month'] <= 2 or row['day_of_month'] >= 28:
             reasons.append("Month boundary transaction")
         if not reasons:
-            reasons.append("Statistical outlier in spending pattern")
+            reasons.append("Statistical outlier in transaction pattern")
         return "; ".join(reasons)
 
     anomalies_list = []

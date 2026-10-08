@@ -1,11 +1,19 @@
-// Shared, pure helpers for transaction-derived dashboard figures. The signed
-// amount is the single source of truth: > 0 is income, < 0 is expense. Dashboard
-// cards and the cash-flow chart both go through these, so they cannot disagree.
+// Shared, pure helpers for transaction-derived dashboard figures. Dashboard cards and
+// the cash-flow chart both go through these, so they cannot disagree.
+//
+// Analytical semantics (Issue #61) - the same rule as server/db/index.js (SQL) and the
+// health scorer (Python); the test suites prove they agree:
+//   classification 'income'   -> income
+//   classification 'expense'  -> spending
+//   classification 'refund'   -> not income; reduces spending
+//   classification 'transfer' -> neither income nor spending
+//   'unknown' / missing / unrecognised -> fallback by the direction of the signed amount
+//     (> 0 income, < 0 spending), so historical and imported rows keep counting.
+// Net spending of a period = max(gross spending - refunds, 0). Money is summed as integer
+// paise, so there is no float drift. The Balance card is NOT analytical: it stays the raw
+// signed total of everything recorded (money in minus money out, transfers and refunds included).
 
 const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
-
-// Rounds to paise and normalizes -0 (which Intl would print as "-0") to 0.
-const roundMoney = (n) => Math.round(n * 100) / 100 || 0;
 
 // Parses a YYYY-MM-DD calendar date as LOCAL midnight. new Date('YYYY-MM-DD') is
 // parsed as UTC, which lands on the previous day for viewers west of UTC.
@@ -40,28 +48,52 @@ export function getRecentMonthKeys(count, now = new Date()) {
 }
 
 // { kind, value } with value as a positive magnitude, or null for amounts that
-// cannot be classified (zero, non-numeric, non-finite).
+// cannot be classified (zero, non-numeric, non-finite). Direction only: 'income' for > 0,
+// 'expense' for < 0. Kept for callers that need the raw direction.
 export function classifyTransactionAmount(amount) {
   if (typeof amount !== 'number' || !Number.isFinite(amount) || amount === 0) return null;
   return amount > 0 ? { kind: 'income', value: amount } : { kind: 'expense', value: -amount };
 }
 
-// { 'YYYY-MM': { income, expenses } } for every transaction with a usable amount
-// and a real calendar date. Each transaction lands in exactly one bucket.
-export function aggregateMonthlyTransactions(transactions) {
-  const months = {};
-  for (const t of transactions) {
-    const classified = classifyTransactionAmount(t?.amount);
-    const date = parseLocalDate(t?.date);
-    if (!classified || !date) continue;
-    const key = getMonthKey(date);
-    const bucket = months[key] ?? (months[key] = { income: 0, expenses: 0 });
-    if (classified.kind === 'income') bucket.income += classified.value;
-    else bucket.expenses += classified.value;
+const toPaise = (value) => Math.round(value * 100);
+
+// { role: 'income' | 'spending' | 'refund', paise } for a transaction, or null when it counts
+// for neither (a transfer, or an unusable amount). See the semantics at the top of this file.
+export function analyticalRole(transaction) {
+  const amount = transaction?.amount;
+  if (typeof amount !== 'number' || !Number.isFinite(amount) || amount === 0) return null;
+  const paise = toPaise(Math.abs(amount));
+  switch (transaction.classification) {
+    case 'income': return { role: 'income', paise };
+    case 'expense': return { role: 'spending', paise };
+    case 'refund': return { role: 'refund', paise };
+    case 'transfer': return null;
+    default: return { role: amount > 0 ? 'income' : 'spending', paise };   // unknown / missing: by direction
   }
-  for (const bucket of Object.values(months)) {
-    bucket.income = roundMoney(bucket.income);
-    bucket.expenses = roundMoney(bucket.expenses);
+}
+
+const emptyBucket = () => ({ income: 0, spending: 0, refunds: 0 });   // integer paise
+const addToBucket = (bucket, role) => {
+  if (role.role === 'income') bucket.income += role.paise;
+  else if (role.role === 'spending') bucket.spending += role.paise;
+  else bucket.refunds += role.paise;
+};
+const netSpendingPaise = (bucket) => Math.max(bucket.spending - bucket.refunds, 0);
+
+// { 'YYYY-MM': { income, expenses } } for every transaction with a usable amount and a
+// real calendar date. Income is analytical income; expenses are the month's NET spending
+// (expenses minus refunds, floored at 0, transfers excluded).
+export function aggregateMonthlyTransactions(transactions) {
+  const buckets = {};
+  for (const t of transactions) {
+    const role = analyticalRole(t);
+    const date = parseLocalDate(t?.date);
+    if (!role || !date) continue;
+    addToBucket(buckets[getMonthKey(date)] ?? (buckets[getMonthKey(date)] = emptyBucket()), role);
+  }
+  const months = {};
+  for (const [key, bucket] of Object.entries(buckets)) {
+    months[key] = { income: bucket.income / 100, expenses: netSpendingPaise(bucket) / 100 };
   }
   return months;
 }
@@ -69,24 +101,24 @@ export function aggregateMonthlyTransactions(transactions) {
 // All figures the dashboard summary needs. All-time totals ignore the date (a
 // recorded amount is real money even if its date is unusable); month figures
 // only include rows with a valid date.
+// - totalIncome / totalExpenses: analytical all-time income and net spending.
+// - balance: the raw signed sum of every recorded amount (not analytical, see the top).
 export function summarizeTransactions(transactions, now = new Date()) {
-  let totalIncome = 0;
-  let totalExpenses = 0;
+  const all = emptyBucket();
+  let signedPaise = 0;
   for (const t of transactions) {
-    const classified = classifyTransactionAmount(t?.amount);
-    if (!classified) continue;
-    if (classified.kind === 'income') totalIncome += classified.value;
-    else totalExpenses += classified.value;
+    const amount = t?.amount;
+    if (typeof amount === 'number' && Number.isFinite(amount)) signedPaise += toPaise(amount);
+    const role = analyticalRole(t);
+    if (role) addToBucket(all, role);
   }
-  totalIncome = roundMoney(totalIncome);
-  totalExpenses = roundMoney(totalExpenses);
 
   const months = aggregateMonthlyTransactions(transactions);
   const [previousKey, currentKey] = getRecentMonthKeys(2, now);
   return {
-    totalIncome,
-    totalExpenses,
-    balance: roundMoney(totalIncome - totalExpenses),
+    totalIncome: all.income / 100,
+    totalExpenses: netSpendingPaise(all) / 100,
+    balance: signedPaise / 100 || 0,
     currentMonth: months[currentKey] ?? { income: 0, expenses: 0 },
     previousMonth: months[previousKey] ?? { income: 0, expenses: 0 },
   };

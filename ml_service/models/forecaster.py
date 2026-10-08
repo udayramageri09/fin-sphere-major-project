@@ -15,10 +15,16 @@ from sklearn.metrics import r2_score
 from datetime import datetime
 import calendar
 
+from models.analytics import add_analytical_columns
+
 
 def _build_monthly_series(transactions: list[dict]) -> pd.DataFrame:
     """
-    Aggregates raw transactions into a monthly income/expense DataFrame.
+    Aggregates transactions into a monthly income / spending DataFrame, using the analytical semantics of
+    models/analytics.py (Issue #61): income = explicit income plus unclassified credits (refunds and transfers
+    are NOT income); expenses = explicit expenses plus unclassified debits MINUS that month's refunds, floored at 0
+    per month (transfers are NOT spending). A refund in one month never changes another month. Sums are exact
+    integer paise, converted to rupees only here.
     Returns DataFrame with columns: month_label, month_idx, income, expenses, net
     """
     if not transactions:
@@ -30,10 +36,12 @@ def _build_monthly_series(transactions: list[dict]) -> pd.DataFrame:
     df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0)
     df['year_month'] = df['date'].dt.to_period('M')
 
-    monthly = df.groupby('year_month').agg(
-        income=('amount', lambda x: x[x > 0].sum()),
-        expenses=('amount', lambda x: x[x < 0].abs().sum())
-    ).reset_index()
+    add_analytical_columns(df)
+    paise = df.groupby('year_month')[['income_p', 'spending_p', 'refund_p']].sum()
+    monthly = pd.DataFrame({
+        'income': paise['income_p'] / 100,
+        'expenses': (paise['spending_p'] - paise['refund_p']).clip(lower=0) / 100,
+    }).reset_index()
 
     monthly = monthly.sort_values('year_month')
     monthly['month_idx'] = range(len(monthly))

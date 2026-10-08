@@ -56,6 +56,9 @@ class Transaction(BaseModel):
     date: str
     type: Optional[str] = 'expense'
     category: Optional[str] = 'General'
+    # Analytical label from FinSphere (income | expense | refund | transfer | unknown). The health scorer uses it
+    # (Issue #61); a caller that omits it gets 'unknown', which falls back to the direction of the amount.
+    classification: Optional[str] = 'unknown'
 
 
 class AnalysisRequest(BaseModel):
