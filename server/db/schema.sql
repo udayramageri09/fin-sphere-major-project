@@ -50,6 +50,28 @@ CREATE TABLE IF NOT EXISTS transactions (
 CREATE INDEX IF NOT EXISTS transactions_user_seq_idx ON transactions (user_id, seq DESC);
 CREATE INDEX IF NOT EXISTS transactions_user_id_idx ON transactions (user_id, id);
 
+-- Analytical classification (Issue #59). `type` (income | expense) keeps meaning direction and sign; `classification`
+-- says what the money WAS, for analysis. Every existing row only ever proved its direction, so existing rows become
+-- 'unknown' (the column default fills them when it is added): no semantic meaning is fabricated for old data.
+-- Idempotent: safe on a fresh database and on every start of an existing one.
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS classification TEXT NOT NULL DEFAULT 'unknown';
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'transactions_classification_valid' AND conrelid = 'transactions'::regclass) THEN
+    ALTER TABLE transactions ADD CONSTRAINT transactions_classification_valid
+      CHECK (classification IN ('income', 'expense', 'refund', 'transfer', 'unknown'));
+  END IF;
+  -- Direction is never inferred from the classification: an income-direction row can be income / refund / transfer /
+  -- unknown, an expense-direction row can be expense / transfer / unknown. Nothing else is a coherent combination.
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'transactions_classification_matches_type' AND conrelid = 'transactions'::regclass) THEN
+    ALTER TABLE transactions ADD CONSTRAINT transactions_classification_matches_type CHECK (
+      (type = 'income'  AND classification IN ('income', 'refund', 'transfer', 'unknown')) OR
+      (type = 'expense' AND classification IN ('expense', 'transfer', 'unknown'))
+    );
+  END IF;
+END
+$$;
+
 -- Savings goals. Replaces server_goals.json (one-time import at startup, see db/index.js).
 CREATE TABLE IF NOT EXISTS goals (
   -- Insertion order: the API lists newest first (new rows used to be unshifted onto the front).
