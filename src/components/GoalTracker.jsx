@@ -47,13 +47,18 @@ const labelClass = 'text-xs font-medium text-zinc-500';
 const EMPTY_FORM = { title: '', targetAmount: '', currentAmount: '0', targetDate: '' };
 
 function GoalTracker() {
-  const { goals, goalsLoading, goalsError, fetchGoals, addGoal, deleteGoal } = useFinance();
+  const { goals, goalsLoading, goalsError, fetchGoals, addGoal, deleteGoal, addGoalContribution } = useFinance();
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState(EMPTY_FORM);
   const [formError, setFormError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [actionError, setActionError] = useState('');
   const [deletingId, setDeletingId] = useState(null);
+  // Only one goal has its contribution form open at a time.
+  const [contributingId, setContributingId] = useState(null);
+  const [contributionAmount, setContributionAmount] = useState('');
+  const [contributionError, setContributionError] = useState('');
+  const [isContributing, setIsContributing] = useState(false);
 
   const updateField = (field) => (e) => setForm((prev) => ({ ...prev, [field]: e.target.value }));
 
@@ -80,6 +85,28 @@ function GoalTracker() {
       setFormError(err.message);
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const openContribution = (id) => {
+    setContributingId(id);
+    setContributionAmount('');
+    setContributionError('');
+  };
+
+  // The server is the authority (positive amount, never past the target); its message is shown as-is.
+  const handleContribute = async (e, goalId) => {
+    e.preventDefault();
+    setContributionError('');
+    setIsContributing(true);
+    try {
+      await addGoalContribution(goalId, contributionAmount === '' ? null : Number(contributionAmount));
+      setContributingId(null);
+      setContributionAmount('');
+    } catch (err) {
+      setContributionError(err.message);
+    } finally {
+      setIsContributing(false);
     }
   };
 
@@ -247,6 +274,48 @@ function GoalTracker() {
                       {reached ? 'Goal reached' : `${dateLabel} · ${dueText(daysUntil(goal.targetDate))}`}
                     </span>
                   </div>
+                  {!reached && contributingId !== goal.id && (
+                    <button
+                      type="button"
+                      onClick={() => openContribution(goal.id)}
+                      aria-label={`Add contribution to ${goal.title}`}
+                      className="self-start px-3 py-1 rounded-lg text-xs font-semibold text-zinc-700 border border-zinc-200 bg-white hover:bg-zinc-100"
+                    >
+                      Add contribution
+                    </button>
+                  )}
+                  {!reached && contributingId === goal.id && (
+                    <form onSubmit={(e) => handleContribute(e, goal.id)} className="flex flex-col gap-2 p-3 rounded-xl bg-zinc-50 border border-zinc-200">
+                      <label htmlFor={`contribution-${goal.id}`} className={labelClass}>Contribution (₹)</label>
+                      <input
+                        id={`contribution-${goal.id}`}
+                        type="number"
+                        required
+                        min="0.01"
+                        step="0.01"
+                        value={contributionAmount}
+                        onChange={(e) => setContributionAmount(e.target.value)}
+                        className={inputClass}
+                      />
+                      {contributionError && errorBox(contributionError)}
+                      <div className="flex gap-2">
+                        <button
+                          type="submit"
+                          disabled={isContributing}
+                          className="px-3 py-1.5 rounded-xl text-xs font-medium bg-zinc-900 text-white hover:bg-zinc-800 disabled:opacity-60 disabled:cursor-not-allowed"
+                        >
+                          {isContributing ? 'Saving...' : 'Add'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setContributingId(null)}
+                          className="px-3 py-1.5 rounded-xl text-xs font-medium text-zinc-700 border border-zinc-200 bg-white hover:bg-zinc-100"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </form>
+                  )}
                 </div>
                 <button
                   type="button"

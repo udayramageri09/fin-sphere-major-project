@@ -101,3 +101,21 @@ CREATE TABLE IF NOT EXISTS emergency_funds (
   created_at     TIMESTAMPTZ NOT NULL,
   updated_at     TIMESTAMPTZ NOT NULL
 );
+
+-- Contributions toward a savings goal. goals.current_amount is the running balance (it starts at whatever the
+-- user entered when creating the goal; no history is invented for it) and every row here is one later, real
+-- deposit. A contribution and the balance update are written in one transaction (see addGoalContribution).
+CREATE TABLE IF NOT EXISTS goal_contributions (
+  -- Insertion order: history is listed newest first, deterministically.
+  seq        BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  id         TEXT NOT NULL UNIQUE CHECK (length(id) BETWEEN 1 AND 64),
+  user_id    BIGINT NOT NULL,
+  goal_id    TEXT NOT NULL,
+  -- Exact money; positive only for now. No transaction-style cap (the "< 1e310" bound only excludes NaN / Infinity).
+  amount     NUMERIC NOT NULL CHECK (amount > 0 AND amount < 1e310),
+  created_at TIMESTAMPTZ NOT NULL,
+  -- The composite key ties a contribution to a goal owned by the same user; deleting a goal removes its history.
+  CONSTRAINT goal_contributions_goal_fk FOREIGN KEY (user_id, goal_id) REFERENCES goals (user_id, id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS goal_contributions_goal_idx ON goal_contributions (user_id, goal_id, seq DESC);

@@ -1,5 +1,5 @@
 // PostgreSQL access for FinSphere (pg + parameterized SQL, no ORM).
-// Scope: users, transactions, goals, liabilities and the emergency fund (every domain is in PostgreSQL).
+// Scope: users, transactions, goals (with their contributions), liabilities and the emergency fund (every domain is in PostgreSQL).
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
@@ -314,6 +314,69 @@ export async function deleteGoalByUserAndId(userId, id) {
        AND user_id = $1`,
     [userId, String(id)]);
   return rowCount > 0;
+}
+
+// ── Goal contributions ─────────────────────────────────────────────────────────
+const CONTRIBUTION_COLUMNS = 'id, user_id, goal_id, amount, created_at';
+
+function toContribution(row) {
+  return {
+    id: row.id,
+    userId: Number(row.user_id),
+    goalId: row.goal_id,
+    amount: Number(row.amount),
+    createdAt: row.created_at.toISOString(),
+  };
+}
+
+// Records one contribution and raises the goal's balance by exactly that amount, atomically:
+//   1. BEGIN, then lock the owner's goal row (SELECT ... FOR UPDATE). Concurrent contributions to the same goal
+//      queue here, so each one sees the balance left by the previous one and none can push it past the target.
+//   2. The new balance and the "does it exceed the target" test are computed in exact NUMERIC arithmetic.
+//   3. Insert the contribution row and update the balance; COMMIT. Any failure rolls both back.
+// Returns { status: 'ok', goal, contribution } | { status: 'not_found' } (missing or not the owner's) |
+// { status: 'complete' } (balance already at the target) | { status: 'exceeds', remaining } (nothing is stored).
+export async function addGoalContribution({ userId, goalId, amount, contributionId, now }) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const locked = await client.query(
+      `SELECT current_amount, target_amount, (current_amount + $3::numeric) > target_amount AS exceeds,
+              (target_amount - current_amount) AS remaining
+       FROM goals WHERE user_id = $1 AND id = $2 FOR UPDATE`,
+      [userId, String(goalId), String(amount)]);
+    if (locked.rowCount === 0) { await client.query('ROLLBACK'); return { status: 'not_found' }; }
+    const { exceeds, remaining } = locked.rows[0];
+    if (exceeds) {
+      await client.query('ROLLBACK');
+      return Number(remaining) === 0 ? { status: 'complete' } : { status: 'exceeds', remaining: Number(remaining) };
+    }
+    const inserted = await client.query(
+      `INSERT INTO goal_contributions (id, user_id, goal_id, amount, created_at)
+       VALUES ($1, $2, $3, $4::numeric, $5::timestamptz) RETURNING ${CONTRIBUTION_COLUMNS}`,
+      [contributionId, userId, String(goalId), String(amount), now]);
+    const updated = await client.query(
+      `UPDATE goals SET current_amount = current_amount + $3::numeric
+       WHERE user_id = $1 AND id = $2 RETURNING ${GOAL_COLUMNS}`,
+      [userId, String(goalId), String(amount)]);
+    await client.query('COMMIT');
+    return { status: 'ok', goal: toGoal(updated.rows[0]), contribution: toContribution(inserted.rows[0]) };
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch { /* the original error is what matters */ }
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// The owner's contributions to one goal, newest first; null if the goal is missing or not theirs.
+export async function listGoalContributions(userId, goalId) {
+  const owned = await pool.query('SELECT 1 FROM goals WHERE user_id = $1 AND id = $2', [userId, String(goalId)]);
+  if (owned.rowCount === 0) return null;
+  const { rows } = await pool.query(
+    `SELECT ${CONTRIBUTION_COLUMNS} FROM goal_contributions WHERE user_id = $1 AND goal_id = $2 ORDER BY seq DESC`,
+    [userId, String(goalId)]);
+  return rows.map(toContribution);
 }
 
 // Whether one server_goals.json record can become a row WITHOUT being changed. Nothing is trimmed, rounded,

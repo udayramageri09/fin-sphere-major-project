@@ -206,6 +206,26 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     setGoals(prev => prev.filter(g => g.id !== id));
   };
 
+  // Records a contribution toward one goal. The server returns the updated goal, which replaces the matching
+  // entry, so the Dashboard and the Goals page (one shared state) stay in sync without a refetch. Throws on
+  // failure so the form can show the server's validation message; a 401 ends the session.
+  const addGoalContribution = async (goalId, amount) => {
+    const res = await fetch(`${API_URL}/goals/${encodeURIComponent(goalId)}/contributions`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ amount })
+    });
+    if (res.status === 401) {
+      invalidateSession();
+      throw new Error('Session expired');
+    }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Failed to add contribution');
+    setGoals(prev => prev.map(g => (g.id === goalId ? data.goal : g)));
+    return data;
+  };
+
   // Liability create/delete throw on failure so the caller can show the message inline
   // (the server's validation text is passed through); a 401 ends the session.
   const addLiability = async (liability) => {
@@ -348,6 +368,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
       fetchGoals,
       addGoal,
       deleteGoal,
+      addGoalContribution,
       liabilities,
       liabilitiesLoading,
       liabilitiesError,
