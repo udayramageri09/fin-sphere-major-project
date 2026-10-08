@@ -88,3 +88,16 @@ CREATE TABLE IF NOT EXISTS liabilities (
 );
 
 CREATE INDEX IF NOT EXISTS liabilities_user_seq_idx ON liabilities (user_id, seq DESC);
+
+-- Emergency fund: at most one record per user (the user_id primary key enforces it).
+CREATE TABLE IF NOT EXISTS emergency_funds (
+  user_id        BIGINT PRIMARY KEY REFERENCES users(id),
+  -- Exact money, no storage-convenience cap (a transaction-style limit does not apply). The "< 1e310" bounds
+  -- only exclude NaN / Infinity (PostgreSQL orders NaN above every number and Infinity above every finite one).
+  -- A current amount of 0 is a real, configured value; "not configured" is the absence of the row.
+  current_amount NUMERIC NOT NULL CHECK (current_amount >= 0 AND current_amount < 1e310),
+  -- Optional goal for the fund. It may be smaller than current_amount (a user can exceed their target).
+  target_amount  NUMERIC CHECK (target_amount IS NULL OR (target_amount > 0 AND target_amount < 1e310)),
+  created_at     TIMESTAMPTZ NOT NULL,
+  updated_at     TIMESTAMPTZ NOT NULL
+);

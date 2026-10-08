@@ -1,5 +1,5 @@
 // PostgreSQL access for FinSphere (pg + parameterized SQL, no ORM).
-// Scope: users, transactions, goals and liabilities (every domain is in PostgreSQL).
+// Scope: users, transactions, goals, liabilities and the emergency fund (every domain is in PostgreSQL).
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
@@ -498,6 +498,40 @@ async function importLegacyLiabilities(client, file) {
     await client.query('ROLLBACK');
     throw err;
   }
+}
+
+// ── Emergency fund ─────────────────────────────────────────────────────────────
+// One record per user. No row = not configured; a row with currentAmount 0 = configured, nothing saved yet.
+function toEmergencyFund(row) {
+  return {
+    currentAmount: Number(row.current_amount),
+    targetAmount: row.target_amount === null ? null : Number(row.target_amount),
+    createdAt: row.created_at.toISOString(),
+    updatedAt: row.updated_at.toISOString(),
+  };
+}
+
+const EMERGENCY_FUND_COLUMNS = 'current_amount, target_amount, created_at, updated_at';
+
+// The user's record, or null when none has been saved.
+export async function getEmergencyFundByUser(userId) {
+  const { rows } = await pool.query(`SELECT ${EMERGENCY_FUND_COLUMNS} FROM emergency_funds WHERE user_id = $1`, [userId]);
+  return rows.length ? toEmergencyFund(rows[0]) : null;
+}
+
+// Create-or-replace the user's record. created_at is set only on the first save; every save sets updated_at.
+// targetAmount may be null (no target). now is an ISO timestamp from the server.
+export async function upsertEmergencyFund({ userId, currentAmount, targetAmount, now }) {
+  const { rows } = await pool.query(
+    `INSERT INTO emergency_funds (user_id, current_amount, target_amount, created_at, updated_at)
+     VALUES ($1, $2::numeric, $3::numeric, $4::timestamptz, $4::timestamptz)
+     ON CONFLICT (user_id) DO UPDATE
+       SET current_amount = EXCLUDED.current_amount,
+           target_amount  = EXCLUDED.target_amount,
+           updated_at     = EXCLUDED.updated_at
+     RETURNING ${EMERGENCY_FUND_COLUMNS}`,
+    [userId, String(currentAmount), targetAmount === null ? null : String(targetAmount), now]);
+  return toEmergencyFund(rows[0]);
 }
 
 export async function closeDatabase() {

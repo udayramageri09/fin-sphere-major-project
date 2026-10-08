@@ -15,7 +15,8 @@ import {
   initDatabase, closeDatabase, createUser, findUserByEmail, normalizeEmail, DuplicateEmailError,
   listTransactionsByUser, createTransaction, createTransactionsBatch, deleteTransactionByUserAndId,
   listGoalsByUser, createGoal, deleteGoalByUserAndId,
-  listLiabilitiesByUser, createLiability, deleteLiabilityByUserAndId, sumMonthlyPaymentsByUser
+  listLiabilitiesByUser, createLiability, deleteLiabilityByUserAndId, sumMonthlyPaymentsByUser,
+  getEmergencyFundByUser, upsertEmergencyFund
 } from './db/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -709,6 +710,61 @@ app.delete('/api/liabilities/:id', authenticate, async (req, res) => {
   res.json({ message: 'Liability deleted successfully' });
 });
 
+// ── Emergency fund ─────────────────────────────────────────────────────────────
+// Server-side authority for PUT /api/emergency-fund. currentAmount is required: finite and >= 0 (0 is a real,
+// configured value). targetAmount is optional (omitted or null = no target); when given it is finite and > 0. Neither has an
+// upper cap, and current may exceed target. Never reads userId or timestamps from the body.
+function normalizeEmergencyFundInput(raw) {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return fail('Emergency fund must be an object');
+  }
+  const current = toAmount(raw.currentAmount);
+  if (current === null) return fail('Current amount must be a number');
+  if (current < 0) return fail('Current amount cannot be negative');
+  const currentAmount = current < 0.005 ? 0 : roundUncappedAmount(current);
+
+  let targetAmount = null;
+  if (raw.targetAmount !== undefined && raw.targetAmount !== null) {
+    const target = toAmount(raw.targetAmount);
+    if (target === null) return fail('Target amount must be a number');
+    if (target < 0.005) return fail('Target amount must be greater than 0 (minimum 0.01)');
+    targetAmount = roundUncappedAmount(target);
+  }
+  return { ok: true, value: { currentAmount, targetAmount } };
+}
+
+// Stable API shape. "configured" tells a saved fund of 0 apart from no fund at all.
+const emergencyFundResponse = (record) => record
+  ? { configured: true, ...record }
+  : { configured: false, currentAmount: null, targetAmount: null, createdAt: null, updatedAt: null };
+
+// GET /api/emergency-fund - only the authenticated user's record
+app.get('/api/emergency-fund', authenticate, async (req, res) => {
+  try {
+    res.json(emergencyFundResponse(await getEmergencyFundByUser(req.user.id)));
+  } catch (err) {
+    respondDbError(res, err, 'Could not load emergency fund');
+  }
+});
+
+// PUT /api/emergency-fund - create or replace the caller's record; nothing is written on a 400
+app.put('/api/emergency-fund', authenticate, async (req, res) => {
+  const result = normalizeEmergencyFundInput(req.body);
+  if (!result.ok) {
+    return res.status(400).json({ error: result.error });
+  }
+  try {
+    const saved = await upsertEmergencyFund({
+      userId: req.user.id, // ownership: always from the verified JWT, never from req.body
+      ...result.value,
+      now: new Date().toISOString()
+    });
+    res.json(emergencyFundResponse(saved));
+  } catch (err) {
+    respondDbError(res, err, 'Could not save emergency fund');
+  }
+});
+
 // 4. POST /api/transactions/parse-statement
 // Supports both pasted text (req.body.text) and file upload (req.file)
 // upload.single() is called programmatically (not as inline middleware) so that
@@ -1030,6 +1086,16 @@ function describeGoalsForAssistant(userGoals) {
   return `\n${lines.join('\n')}`;
 }
 
+// The caller's own saved emergency fund as assistant context: the amount they entered (and the optional
+// target they chose), never a coverage figure - months of coverage only come from the ML analysis.
+function describeEmergencyFundForAssistant(fund) {
+  if (!fund) return 'not set up yet (the user has not entered one)';
+  const target = fund.targetAmount === null
+    ? 'no target set'
+    : `target ${formatRupees(fund.targetAmount)} (${Math.round((fund.currentAmount / fund.targetAmount) * 100)}% of target)`;
+  return `${formatRupees(fund.currentAmount)} saved, ${target}`;
+}
+
 // Same idea for the caller's own saved liabilities (names are user text, so they are quoted).
 const MAX_LIABILITIES_IN_PROMPT = 20;
 function describeLiabilitiesForAssistant(userLiabilities) {
@@ -1068,6 +1134,12 @@ app.post('/api/chat', authenticate, async (req, res) => {
   } catch (err) {
     return respondDbError(res, err, 'Could not load goals');
   }
+  let emergencyFund;
+  try {
+    emergencyFund = await getEmergencyFundByUser(req.user.id);
+  } catch (err) {
+    return respondDbError(res, err, 'Could not load emergency fund');
+  }
   let userLiabilities;
   try {
     userLiabilities = await listLiabilitiesByUser(req.user.id);
@@ -1099,6 +1171,7 @@ Here is the financial data that actually exists for this user:
 - Number of recorded transactions: ${currentContext.transactionCount}
 - Savings goals (saved by the user):${describeGoalsForAssistant(userGoals)}
 - Liabilities (saved by the user):${describeLiabilitiesForAssistant(userLiabilities)}
+- Emergency fund (saved by the user): ${describeEmergencyFundForAssistant(emergencyFund)}
 - Live Transactions (Latest first): ${JSON.stringify(currentContext.recentTransactions)}
 
 NOT available for this user (no such data has been entered or connected): credit score, portfolio holdings or allocation, and net worth (FinSphere has no asset data).
@@ -1107,7 +1180,7 @@ Guidelines:
 1. Base your replies only on the data above. If asked about something listed as not available, say it is not available in FinSphere yet. Never estimate, guess or invent figures for it, and never derive a credit score from transactions.
 2. Be brief, professional, and friendly. Use relevant emojis.
 3. Suggest concrete advice if they are spending too much or their net cash flow is negative.
-4. Let the user know they can update transactions by manual entry or parsing bank statements, manage savings goals on the Goals page, and record liabilities on the Liabilities page.
+4. Let the user know they can update transactions by manual entry or parsing bank statements, manage savings goals and their emergency fund on the Goals page, and record liabilities on the Liabilities page.
 
 Keep responses under 3-4 sentences if possible, unless a detailed breakdown is requested.`
   };
@@ -1155,6 +1228,10 @@ Keep responses under 3-4 sentences if possible, unless a detailed breakdown is r
     reply = userLiabilities.length === 0
       ? `You don't have any saved liabilities yet. You can add them from the Liabilities page.`
       : `Your saved liabilities:${describeLiabilitiesForAssistant(userLiabilities)}`;
+  } else if (userMessage.includes('emergency')) {
+    reply = emergencyFund
+      ? `Your saved emergency fund: ${describeEmergencyFundForAssistant(emergencyFund)}.`
+      : `You haven't set up an emergency fund yet. You can add it on the Goals page.`;
   } else if (userMessage.includes('credit score') || userMessage.includes('credit')) {
     reply = `I don't have a credit score for you. FinSphere isn't connected to any credit bureau, and I won't estimate one from your transactions.`;
   } else if (userMessage.includes('goal') || userMessage.includes('saving')) {
@@ -1186,8 +1263,7 @@ app.get('/api/ml/analyze', authenticate, async (req, res) => {
   try {
     // Scope ML analysis to the authenticated user's own data only (ownership always comes
     // from req.user.id, never from the client). Besides transactions, the only other real
-    // input is the user's saved liabilities (their monthly payments). The emergency fund does not exist in FinSphere
-    // yet, so it is not sent and the ML service reports that ratio as unavailable.
+    // inputs are the user's saved liabilities (their monthly payments) and their emergency fund.
     let userTransactions;
     try {
       userTransactions = await listTransactionsByUser(req.user.id);
@@ -1206,9 +1282,19 @@ app.get('/api/ml/analyze', authenticate, async (req, res) => {
     } catch (dbErr) {
       return respondDbError(res, dbErr, 'Could not load liabilities');   // not an ML-service problem
     }
+    // The user's saved emergency fund amount. No record = null (unavailable: the coverage ratio is then
+    // omitted); a saved 0 is sent as 0. The target is not sent: no ML consumer uses it.
+    let emergencyFund;
+    try {
+      const record = await getEmergencyFundByUser(req.user.id);
+      emergencyFund = record && Number.isFinite(record.currentAmount) ? record.currentAmount : null;
+    } catch (dbErr) {
+      return respondDbError(res, dbErr, 'Could not load emergency fund');   // not an ML-service problem
+    }
     const payload = {
       transactions: userTransactions,
       monthly_debt_payments: monthlyDebtPayments,
+      emergency_fund: emergencyFund,
       n_forecast_months: 3
     };
 
@@ -1257,7 +1343,7 @@ app.post('/api/plan-chat', authenticate, async (req, res) => {
   const healthGrade = health.grade?.grade ?? 'N/A';
   const savingsRate = health.ratios?.savings_rate?.value ?? 'N/A';
   // dti / emergency_coverage are omitted by the ML service when the monthly debt payments or income / the
-  // emergency fund are unknown. They are then left out of the prompt (no "N/A%" line) and listed as
+  // emergency fund or expenses are unknown. They are then left out of the prompt (no "N/A%" line) and listed as
   // not analysed, so the advisor says so instead of guessing.
   const dti = health.ratios?.dti?.value ?? null;
   const emergencyMonths = health.ratios?.emergency_coverage?.value ?? null;
