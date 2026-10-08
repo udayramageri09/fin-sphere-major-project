@@ -69,8 +69,8 @@ def generate_plan(
     # ── HEALTH SCORE SIGNALS ─────────────────────────────────────────────────
     # A health result exists only if it carries a composite score; an error payload or an
     # empty dict means there is none, so no score is reported and no health rule runs.
-    # Likewise a ratio that is absent (dti / emergency_coverage when the user's liabilities
-    # or emergency fund are unknown) stays None and its rules are skipped: missing data is
+    # Likewise a ratio that is absent (dti / emergency_coverage when the user's monthly debt payments,
+    # monthly income or emergency fund are unknown) stays None and its rules are skipped: missing data is
     # never replaced by a default that would trigger a made-up alert.
     health_score = health.get('composite_score') if health else None
     if health_score is not None:
@@ -81,6 +81,7 @@ def generate_plan(
         ml_signals['health_grade'] = grade
 
         savings_rate = ratios.get('savings_rate', {}).get('value')
+        # DTI = monthly debt payments / monthly income x 100 (debt service, not outstanding balances).
         dti = ratios.get('dti', {}).get('value')
         emergency_months = ratios.get('emergency_coverage', {}).get('value')
 
@@ -106,18 +107,19 @@ def generate_plan(
         if dti is not None and dti > 50:
             steps.append(_make_step(
                 'HS-03', 'Debt-to-Income Ratio Is Dangerously High',
-                f'DTI is {dti:.1f}% (danger zone: >50%). Lenders typically reject above 43%. '
+                f'Your monthly debt payments are {dti:.1f}% of your monthly income (danger zone: >50%). '
+                f'Lenders typically want this debt-to-income ratio at or below 43%. '
                 f'Prioritise prepaying highest-interest debt first (avalanche method).',
                 'critical', 'Immediate',
-                'Bring DTI below 36% within 6 months',
+                'Bring monthly debt payments below 36% of monthly income within 6 months',
                 'HealthScorer', dti, 'alert'
             ))
         elif dti is not None and dti > 36:
             steps.append(_make_step(
                 'HS-04', 'Reduce Debt Load — DTI Above Acceptable',
-                f'DTI is {dti:.1f}%. Acceptable range is ≤36%. Make one extra EMI payment per quarter.',
+                f'Your monthly debt payments are {dti:.1f}% of your monthly income. Acceptable range is ≤36%. Make one extra EMI payment per quarter.',
                 'high', '3 months',
-                'Reduce DTI by ~5% per quarter',
+                'Reduce monthly debt payments by ~5 percentage points of income per quarter',
                 'HealthScorer', dti, 'advisory'
             ))
 

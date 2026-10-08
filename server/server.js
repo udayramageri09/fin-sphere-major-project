@@ -15,7 +15,7 @@ import {
   initDatabase, closeDatabase, createUser, findUserByEmail, normalizeEmail, DuplicateEmailError,
   listTransactionsByUser, createTransaction, createTransactionsBatch, deleteTransactionByUserAndId,
   listGoalsByUser, createGoal, deleteGoalByUserAndId,
-  listLiabilitiesByUser, createLiability, deleteLiabilityByUserAndId, sumOutstandingByUser
+  listLiabilitiesByUser, createLiability, deleteLiabilityByUserAndId, sumMonthlyPaymentsByUser
 } from './db/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1186,7 +1186,7 @@ app.get('/api/ml/analyze', authenticate, async (req, res) => {
   try {
     // Scope ML analysis to the authenticated user's own data only (ownership always comes
     // from req.user.id, never from the client). Besides transactions, the only other real
-    // input is the user's saved liabilities. The emergency fund does not exist in FinSphere
+    // input is the user's saved liabilities (their monthly payments). The emergency fund does not exist in FinSphere
     // yet, so it is not sent and the ML service reports that ratio as unavailable.
     let userTransactions;
     try {
@@ -1194,20 +1194,21 @@ app.get('/api/ml/analyze', authenticate, async (req, res) => {
     } catch (dbErr) {
       return respondDbError(res, dbErr, 'Could not load transactions');   // not an ML-service problem
     }
-    // Total outstanding amount across the user's liabilities (outstanding balances only: no monthly
-    // payment, no interest), summed exactly in the database. FinSphere has a liabilities feature, so
-    // "no saved liabilities" is a real 0 (not unknown). If the exact total is too large for a finite
-    // number it cannot be sent truthfully, so it is left out (null = unavailable) instead of being
-    // capped or replaced. The ML service computes DTI = liabilities / annual income x 100.
-    let totalLiabilities;
+    // Total monthly debt payments across the user's liabilities (monthly payments only: not the
+    // outstanding balances, not the interest), summed exactly in the database. FinSphere has a
+    // liabilities feature, so "no saved liabilities" is a real 0 (not unknown). If the exact total is
+    // too large for a finite number it cannot be sent truthfully, so it is left out (null = unavailable)
+    // instead of being capped or replaced. The ML service computes
+    // DTI = monthly_debt_payments / monthly income x 100.
+    let monthlyDebtPayments;
     try {
-      totalLiabilities = await sumOutstandingByUser(req.user.id);
+      monthlyDebtPayments = await sumMonthlyPaymentsByUser(req.user.id);
     } catch (dbErr) {
       return respondDbError(res, dbErr, 'Could not load liabilities');   // not an ML-service problem
     }
     const payload = {
       transactions: userTransactions,
-      liabilities: totalLiabilities,
+      monthly_debt_payments: monthlyDebtPayments,
       n_forecast_months: 3
     };
 
@@ -1255,13 +1256,13 @@ app.post('/api/plan-chat', authenticate, async (req, res) => {
   const healthScore = health.composite_score ?? 'N/A';
   const healthGrade = health.grade?.grade ?? 'N/A';
   const savingsRate = health.ratios?.savings_rate?.value ?? 'N/A';
-  // dti / emergency_coverage are omitted by the ML service when liabilities / the emergency
-  // fund are unknown. They are then left out of the prompt (no "N/A%" line) and listed as
+  // dti / emergency_coverage are omitted by the ML service when the monthly debt payments or income / the
+  // emergency fund are unknown. They are then left out of the prompt (no "N/A%" line) and listed as
   // not analysed, so the advisor says so instead of guessing.
   const dti = health.ratios?.dti?.value ?? null;
   const emergencyMonths = health.ratios?.emergency_coverage?.value ?? null;
   const optionalHealthLines = [
-    dti !== null ? `- Debt-to-Income: ${dti}%  (benchmark: ≤36%)` : null,
+    dti !== null ? `- Debt-to-Income (monthly debt payments as a share of monthly income): ${dti}%  (benchmark: ≤36%)` : null,
     emergencyMonths !== null ? `- Emergency Coverage: ${emergencyMonths} months (benchmark: ≥6 months)` : null,
   ].filter(Boolean).map((line) => `${line}\n`).join('');
   const notAnalysed = [
