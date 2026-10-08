@@ -15,7 +15,7 @@ import {
   initDatabase, closeDatabase, createUser, findUserByEmail, normalizeEmail, DuplicateEmailError,
   listTransactionsByUser, createTransaction, createTransactionsBatch, deleteTransactionByUserAndId,
   listGoalsByUser, createGoal, deleteGoalByUserAndId, addGoalContribution, listGoalContributions,
-  listLiabilitiesByUser, createLiability, deleteLiabilityByUserAndId, sumMonthlyPaymentsByUser,
+  listLiabilitiesByUser, createLiability, deleteLiabilityByUserAndId, sumMonthlyPaymentsByUser, repayLiability, listLiabilityRepayments,
   getEmergencyFundByUser, upsertEmergencyFund
 } from './db/index.js';
 
@@ -430,6 +430,19 @@ function normalizeContributionInput(raw) {
   return { ok: true, value: { amount: roundUncappedAmount(amount) } };
 }
 
+// ── Liability repayment validation ─────────────────────────────────────────────
+// A repayment is a positive amount (finite, > 0, no upper cap), rounded to paise. Only "amount" is read: the client
+// can never submit a balance, an id, an owner or a timestamp through this endpoint.
+function normalizeRepaymentInput(raw) {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return fail('Repayment must be an object');
+  }
+  const amount = toAmount(raw.amount);
+  if (amount === null) return fail('Amount must be a number');
+  if (amount < 0.005) return fail('Amount must be greater than 0 (minimum 0.01)');
+  return { ok: true, value: { amount: roundUncappedAmount(amount) } };
+}
+
 // ── Liability validation & normalization ───────────────────────────────────────
 // Server-side authority for POST /api/liabilities. Returns { ok: true, value } or
 // { ok: false, error }; it never reads or returns id, userId or createdAt (the route stamps
@@ -816,6 +829,44 @@ app.put('/api/emergency-fund', authenticate, async (req, res) => {
   }
 });
 
+// POST /api/liabilities/:id/repayments - record a real repayment toward one of the caller's liabilities
+app.post('/api/liabilities/:id/repayments', authenticate, async (req, res) => {
+  const result = normalizeRepaymentInput(req.body);
+  if (!result.ok) {
+    return res.status(400).json({ error: result.error });
+  }
+  let outcome;
+  try {
+    outcome = await repayLiability({
+      userId: req.user.id, // ownership: always from the verified JWT, never from req.body
+      liabilityId: req.params.id,
+      amount: result.value.amount,
+      repaymentId: randomUUID(),
+      now: new Date().toISOString()
+    });
+  } catch (err) {
+    return respondDbError(res, err, 'Could not save repayment');
+  }
+  // 404 for both missing and not-yours, exactly like DELETE /api/liabilities/:id.
+  if (outcome.status === 'not_found') return res.status(404).json({ error: 'Liability not found' });
+  if (outcome.status === 'paid_off') return res.status(400).json({ error: 'This liability is already paid off' });
+  if (outcome.status === 'exceeds') {
+    return res.status(400).json({ error: `Repayment would exceed the outstanding balance (${formatRupees(outcome.outstanding)} outstanding)` });
+  }
+  res.status(201).json({ liability: outcome.liability, repayment: outcome.repayment });
+});
+
+// GET /api/liabilities/:id/repayments - the caller's repayment history for one liability, newest first
+app.get('/api/liabilities/:id/repayments', authenticate, async (req, res) => {
+  try {
+    const repayments = await listLiabilityRepayments(req.user.id, req.params.id);
+    if (repayments === null) return res.status(404).json({ error: 'Liability not found' });
+    res.json(repayments);
+  } catch (err) {
+    respondDbError(res, err, 'Could not load repayments');
+  }
+});
+
 // 4. POST /api/transactions/parse-statement
 // Supports both pasted text (req.body.text) and file upload (req.file)
 // upload.single() is called programmatically (not as inline middleware) so that
@@ -1151,9 +1202,12 @@ function describeEmergencyFundForAssistant(fund) {
 const MAX_LIABILITIES_IN_PROMPT = 20;
 function describeLiabilitiesForAssistant(userLiabilities) {
   if (userLiabilities.length === 0) return ' none saved yet';
-  const lines = userLiabilities.slice(0, MAX_LIABILITIES_IN_PROMPT).map((l) =>
-    `  - ${JSON.stringify(l.name)} (${String(l.type).replace(/_/g, ' ')}): ${formatRupees(l.outstandingAmount)} outstanding, ${l.interestRate}% interest per year, ${formatRupees(l.monthlyPayment)} monthly payment`
-  );
+  const lines = userLiabilities.slice(0, MAX_LIABILITIES_IN_PROMPT).map((l) => {
+    const kind = String(l.type).replace(/_/g, ' ');
+    // A fully repaid liability has no payment due, so its stored monthly payment is not reported.
+    if (l.outstandingAmount === 0) return `  - ${JSON.stringify(l.name)} (${kind}): paid off (${formatRupees(0)} outstanding)`;
+    return `  - ${JSON.stringify(l.name)} (${kind}): ${formatRupees(l.outstandingAmount)} outstanding, ${l.interestRate}% interest per year, ${formatRupees(l.monthlyPayment)} monthly payment`;
+  });
   if (userLiabilities.length > MAX_LIABILITIES_IN_PROMPT) {
     lines.push(`  - (${userLiabilities.length - MAX_LIABILITIES_IN_PROMPT} more liabilities not shown)`);
   }

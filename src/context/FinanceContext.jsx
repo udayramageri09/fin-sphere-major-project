@@ -245,6 +245,25 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     return data;
   };
 
+  // Records a repayment toward one liability. The server returns the updated liability, which replaces the matching
+  // entry (no refetch). Throws on failure so the form can show the server's message; a 401 ends the session.
+  const addLiabilityRepayment = async (liabilityId, amount) => {
+    const res = await fetch(`${API_URL}/liabilities/${encodeURIComponent(liabilityId)}/repayments`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ amount })
+    });
+    if (res.status === 401) {
+      dropLiabilitiesAndEndSession();
+      throw new Error('Session expired');
+    }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Failed to add repayment');
+    setLiabilities(prev => prev.map(l => (l.id === liabilityId ? data.liability : l)));
+    return data;
+  };
+
   const deleteLiability = async (id) => {
     const res = await fetch(`${API_URL}/liabilities/${id}`, {
       method: 'DELETE',
@@ -375,6 +394,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
       fetchLiabilities,
       addLiability,
       deleteLiability,
+      addLiabilityRepayment,
       emergencyFund,
       emergencyFundLoading,
       emergencyFundError,
