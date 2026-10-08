@@ -33,6 +33,9 @@ const labelClass = 'text-xs font-medium text-zinc-500';
 
 const EMPTY_FORM = { category: '', amount: '' };
 
+// under / at / over comes from the server (exact values); the wording is only presentation.
+const STATUS_LABEL = { under: 'Under budget', at: 'At budget', over: 'Over budget' };
+
 function MonthlyBudgets() {
   const { budgets, budgetsMonth, budgetsLoading, budgetsError, fetchBudgets, saveBudget, deleteBudget } = useFinance();
   const [month, setMonth] = useState(currentLocalMonth);
@@ -223,31 +226,61 @@ function MonthlyBudgets() {
         <p className="text-sm text-zinc-500">No budgets set for {monthLabel(month)}. Use the + button to add a category limit.</p>
       ) : (
         <ul className="flex flex-col divide-y divide-zinc-100">
-          {budgets.map((b) => (
-            <li key={b.id} className="flex items-center justify-between gap-3 py-3">
-              <span className="font-semibold text-sm text-zinc-900 min-w-0 wrap-break-word">{b.category}</span>
-              <div className="flex items-center gap-2 shrink-0">
-                <strong className="text-sm text-zinc-900 tabular-nums">{formatCurrency(b.amount)}</strong>
-                <button
-                  type="button"
-                  onClick={() => openEdit(b)}
-                  aria-label={`Edit budget ${b.category}`}
-                  className="p-1.5 rounded-lg text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900"
+          {budgets.map((b) => {
+            // The bar is capped at the container width; the text always shows the true percentage (it can exceed 100).
+            const barWidth = Math.max(0, Math.min(100, b.percentUsed));
+            const over = b.status === 'over';
+            return (
+              <li key={b.id} className="flex flex-col gap-2 py-3" data-status={b.status}>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="font-semibold text-sm text-zinc-900 min-w-0 wrap-break-word">{b.category}</span>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="text-xs text-zinc-500 tabular-nums">Budget</span>
+                    <strong className="text-sm text-zinc-900 tabular-nums">{formatCurrency(b.amount)}</strong>
+                    <button
+                      type="button"
+                      onClick={() => openEdit(b)}
+                      aria-label={`Edit budget ${b.category}`}
+                      className="p-1.5 rounded-lg text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900"
+                    >
+                      <Pencil size={16} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDelete(b.id)}
+                      disabled={deletingId === b.id}
+                      aria-label={`Delete budget ${b.category}`}
+                      className="p-1.5 rounded-lg text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 disabled:opacity-50"
+                    >
+                      {deletingId === b.id ? <span className="text-xs">Deleting...</span> : <Trash2 size={16} />}
+                    </button>
+                  </div>
+                </div>
+                <div
+                  role="progressbar"
+                  aria-label={`${b.category} budget used`}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={barWidth}
+                  aria-valuetext={`${b.percentUsed}% of budget used`}
+                  className="w-full h-2 bg-zinc-100 rounded-full overflow-hidden"
                 >
-                  <Pencil size={16} />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleDelete(b.id)}
-                  disabled={deletingId === b.id}
-                  aria-label={`Delete budget ${b.category}`}
-                  className="p-1.5 rounded-lg text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 disabled:opacity-50"
-                >
-                  {deletingId === b.id ? <span className="text-xs">Deleting...</span> : <Trash2 size={16} />}
-                </button>
-              </div>
-            </li>
-          ))}
+                  <div className={over ? 'h-full bg-zinc-900 rounded-full' : 'h-full bg-zinc-600 rounded-full'} style={{ width: `${barWidth}%` }} />
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs">
+                  <span className="text-zinc-500 tabular-nums">
+                    Spent <strong className="text-zinc-900">{formatCurrency(b.actualSpent)}</strong> · {b.percentUsed}% used
+                  </span>
+                  <span className="text-zinc-500 tabular-nums">
+                    {b.remaining < 0
+                      ? <strong className="text-zinc-900">{formatCurrency(-b.remaining)} overspent</strong>
+                      : <><strong className="text-zinc-900">{formatCurrency(b.remaining)}</strong> left</>}
+                  </span>
+                  <span className="px-2 py-0.5 rounded-full font-semibold bg-zinc-100 text-zinc-700 border border-zinc-200">{STATUS_LABEL[b.status] ?? b.status}</span>
+                </div>
+              </li>
+            );
+          })}
         </ul>
       )}
     </section>

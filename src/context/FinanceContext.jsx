@@ -39,6 +39,9 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
   const [budgetsLoading, setBudgetsLoading] = useState(false);
   const [budgetsError, setBudgetsError] = useState(null);
   const activeBudgetMonth = useRef(null);
+  // Every budget request gets a number; only the newest one may change the list, so neither a switch to another
+  // month nor two refreshes of the same month can finish out of order and show older numbers.
+  const budgetRequestSeq = useRef(0);
   const { invalidateSession } = useAuth();
 
   const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:5000/api';
@@ -118,11 +121,9 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     }
   };
 
-  // The server returns budgets ordered by category key; keep that order after a local insert.
-  const sortBudgets = (list) => [...list].sort((a, b) => (a.categoryKey < b.categoryKey ? -1 : a.categoryKey > b.categoryKey ? 1 : 0));
-
   const dropBudgetsAndEndSession = () => {
     activeBudgetMonth.current = null;
+    budgetRequestSeq.current += 1;   // anything still in flight is now stale
     setBudgets([]);
     setBudgetsMonth(null);
     setBudgetsError(null);
@@ -130,27 +131,35 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     invalidateSession();
   };
 
-  const fetchBudgets = async (month) => {
+  // Loads the month's budgets together with their actual spending (computed by the server from the user's
+  // transactions). silent = refresh in place without blanking the list (used after a save or delete).
+  const loadBudgets = async (month, { silent }) => {
+    const seq = ++budgetRequestSeq.current;
     activeBudgetMonth.current = month;
-    setBudgetsMonth(month);
-    setBudgets([]);            // never show another month's list under this month's heading
-    setBudgetsLoading(true);
+    if (!silent) {
+      setBudgetsMonth(month);
+      setBudgets([]);            // never show another month's list under this month's heading
+      setBudgetsLoading(true);
+    }
     setBudgetsError(null);
     try {
       const res = await fetch(`${API_URL}/budgets?month=${encodeURIComponent(month)}`, { credentials: 'include' });
       if (res.status === 401) return dropBudgetsAndEndSession();
       if (!res.ok) throw new Error('Failed to load budgets');
       const data = await res.json();
-      if (activeBudgetMonth.current !== month) return;   // the user moved on to another month
+      if (budgetRequestSeq.current !== seq) return;       // superseded by a newer request / another month
+      setBudgetsMonth(month);
       setBudgets(data);
     } catch (err) {
-      if (activeBudgetMonth.current !== month) return;
+      if (budgetRequestSeq.current !== seq) return;
       console.error(err);
       setBudgetsError(err.message);
     } finally {
-      if (activeBudgetMonth.current === month) setBudgetsLoading(false);
+      if (budgetRequestSeq.current === seq) setBudgetsLoading(false);
     }
   };
+
+  const fetchBudgets = (month) => loadBudgets(month, { silent: false });
 
   // Creates or updates the budget for (month, category). Throws on failure so the form can show the server's
   // validation message; a 401 ends the session. The list is only touched if that month is still the one shown.
@@ -167,9 +176,9 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     }
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || 'Failed to save budget');
-    if (activeBudgetMonth.current === data.month) {
-      setBudgets(prev => sortBudgets([...prev.filter(b => b.id !== data.id), data]));
-    }
+    // The saved row has no actual-spending fields, and a changed amount changes remaining / percent / status, so
+    // the active month is reloaded from the server instead of merging a half-filled row (no stale derived values).
+    if (activeBudgetMonth.current === data.month) await loadBudgets(data.month, { silent: true });
     return data;
   };
 
@@ -187,6 +196,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
       throw new Error(data.error || 'Failed to delete budget');
     }
     setBudgets(prev => prev.filter(b => b.id !== id));
+    if (activeBudgetMonth.current) await loadBudgets(activeBudgetMonth.current, { silent: true });
   };
 
   useEffect(() => {
