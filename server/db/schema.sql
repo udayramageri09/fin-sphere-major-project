@@ -149,3 +149,25 @@ CREATE TABLE IF NOT EXISTS liability_repayments (
 );
 
 CREATE INDEX IF NOT EXISTS liability_repayments_liability_idx ON liability_repayments (user_id, liability_id, seq DESC);
+
+-- Monthly category budgets: at most one per user + calendar month + category.
+CREATE TABLE IF NOT EXISTS budgets (
+  id         TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 64),
+  user_id    BIGINT NOT NULL REFERENCES users(id),
+  -- The first day of the budget's calendar month (the API speaks 'YYYY-MM'). Never derived from a time zone.
+  month      DATE NOT NULL CHECK (extract(day FROM month) = 1),
+  -- What the user typed (trimmed); shown in the UI.
+  label      TEXT NOT NULL CHECK (label = btrim(label) AND length(label) BETWEEN 1 AND 60),
+  -- The canonical category key, always lower(btrim(label)) (a generated column, so it cannot disagree with the
+  -- label). "Food", "food" and " FOOD " are one budget. A transaction belongs to a budget when
+  -- lower(btrim(transaction.category)) = budgets.category; no other mapping exists (Dining is not Food).
+  category   TEXT GENERATED ALWAYS AS (lower(btrim(label))) STORED,
+  -- Exact money, positive; no transaction-style cap (the "< 1e310" bound only excludes NaN / Infinity).
+  amount     NUMERIC NOT NULL CHECK (amount > 0 AND amount < 1e310),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  -- The database, not application code, guarantees one budget per user / month / category (also under races).
+  CONSTRAINT budgets_user_month_category_unique UNIQUE (user_id, month, category)
+);
+
+CREATE INDEX IF NOT EXISTS budgets_user_month_idx ON budgets (user_id, month);

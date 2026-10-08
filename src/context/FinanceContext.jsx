@@ -1,5 +1,5 @@
 /* eslint-disable react-refresh/only-export-components, react-hooks/exhaustive-deps, react-hooks/set-state-in-effect */
-import { createContext, useContext, useState, useEffect } from 'react';
+import { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { useAuth } from './AuthContext';
 import { summarizeTransactions } from '../utils/finance';
 
@@ -31,6 +31,14 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
   const [emergencyFund, setEmergencyFund] = useState(null);
   const [emergencyFundLoading, setEmergencyFundLoading] = useState(true);
   const [emergencyFundError, setEmergencyFundError] = useState(null);
+  // Budgets use a single-active-month model: `budgets` always belongs to `budgetsMonth`. A response that arrives
+  // after the user switched to another month is ignored (the ref holds the month currently wanted), so a slow
+  // request can never overwrite the list of the month being shown. Nothing is fetched until the UI asks.
+  const [budgets, setBudgets] = useState([]);
+  const [budgetsMonth, setBudgetsMonth] = useState(null);
+  const [budgetsLoading, setBudgetsLoading] = useState(false);
+  const [budgetsError, setBudgetsError] = useState(null);
+  const activeBudgetMonth = useRef(null);
   const { invalidateSession } = useAuth();
 
   const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:5000/api';
@@ -108,6 +116,77 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     } finally {
       setEmergencyFundLoading(false);
     }
+  };
+
+  // The server returns budgets ordered by category key; keep that order after a local insert.
+  const sortBudgets = (list) => [...list].sort((a, b) => (a.categoryKey < b.categoryKey ? -1 : a.categoryKey > b.categoryKey ? 1 : 0));
+
+  const dropBudgetsAndEndSession = () => {
+    activeBudgetMonth.current = null;
+    setBudgets([]);
+    setBudgetsMonth(null);
+    setBudgetsError(null);
+    setBudgetsLoading(false);
+    invalidateSession();
+  };
+
+  const fetchBudgets = async (month) => {
+    activeBudgetMonth.current = month;
+    setBudgetsMonth(month);
+    setBudgets([]);            // never show another month's list under this month's heading
+    setBudgetsLoading(true);
+    setBudgetsError(null);
+    try {
+      const res = await fetch(`${API_URL}/budgets?month=${encodeURIComponent(month)}`, { credentials: 'include' });
+      if (res.status === 401) return dropBudgetsAndEndSession();
+      if (!res.ok) throw new Error('Failed to load budgets');
+      const data = await res.json();
+      if (activeBudgetMonth.current !== month) return;   // the user moved on to another month
+      setBudgets(data);
+    } catch (err) {
+      if (activeBudgetMonth.current !== month) return;
+      console.error(err);
+      setBudgetsError(err.message);
+    } finally {
+      if (activeBudgetMonth.current === month) setBudgetsLoading(false);
+    }
+  };
+
+  // Creates or updates the budget for (month, category). Throws on failure so the form can show the server's
+  // validation message; a 401 ends the session. The list is only touched if that month is still the one shown.
+  const saveBudget = async (payload) => {
+    const res = await fetch(`${API_URL}/budgets`, {
+      method: 'PUT',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (res.status === 401) {
+      dropBudgetsAndEndSession();
+      throw new Error('Session expired');
+    }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Failed to save budget');
+    if (activeBudgetMonth.current === data.month) {
+      setBudgets(prev => sortBudgets([...prev.filter(b => b.id !== data.id), data]));
+    }
+    return data;
+  };
+
+  const deleteBudget = async (id) => {
+    const res = await fetch(`${API_URL}/budgets/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      credentials: 'include'
+    });
+    if (res.status === 401) {
+      dropBudgetsAndEndSession();
+      throw new Error('Session expired');
+    }
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Failed to delete budget');
+    }
+    setBudgets(prev => prev.filter(b => b.id !== id));
   };
 
   useEffect(() => {
@@ -400,6 +479,13 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
       emergencyFundError,
       fetchEmergencyFund,
       saveEmergencyFund,
+      budgets,
+      budgetsMonth,
+      budgetsLoading,
+      budgetsError,
+      fetchBudgets,
+      saveBudget,
+      deleteBudget,
       fetchTransactions,
       addTransaction,
       deleteTransaction,

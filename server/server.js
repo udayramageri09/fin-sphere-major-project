@@ -16,7 +16,8 @@ import {
   listTransactionsByUser, createTransaction, createTransactionsBatch, deleteTransactionByUserAndId,
   listGoalsByUser, createGoal, deleteGoalByUserAndId, addGoalContribution, listGoalContributions,
   listLiabilitiesByUser, createLiability, deleteLiabilityByUserAndId, sumMonthlyPaymentsByUser, repayLiability, listLiabilityRepayments,
-  getEmergencyFundByUser, upsertEmergencyFund
+  getEmergencyFundByUser, upsertEmergencyFund,
+  listBudgetsByUserAndMonth, upsertBudget, deleteBudgetByUserAndId
 } from './db/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -772,6 +773,79 @@ app.delete('/api/liabilities/:id', authenticate, async (req, res) => {
     return res.status(404).json({ error: 'Liability not found' });
   }
   res.json({ message: 'Liability deleted successfully' });
+});
+
+// ── Budgets ────────────────────────────────────────────────────────────────────
+// Server-side authority for /api/budgets. The month is exactly 'YYYY-MM' (checked as text; no Date parsing, so no
+// time zone can shift it). The category is trimmed text of 1-60 characters without NUL; its canonical key
+// (lower-case of the trimmed text) is derived by the database, which also enforces one budget per user / month / key.
+const MONTH_PATTERN = /^[1-9]\d{3}-(0[1-9]|1[0-2])$/;
+const MAX_BUDGET_CATEGORY_LENGTH = 60;
+
+function validMonth(month) {
+  return typeof month === 'string' && MONTH_PATTERN.test(month);
+}
+
+function normalizeBudgetInput(raw) {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return fail('Budget must be an object');
+  }
+  if (!validMonth(raw.month)) return fail('Month must be in YYYY-MM format');
+  if (typeof raw.category !== 'string') return fail('Category must be a string');
+  const category = raw.category.trim();
+  if (category.length === 0) return fail('Category is required');
+  if (category.includes('\u0000')) return fail('Category contains an invalid character');
+  if (category.length > MAX_BUDGET_CATEGORY_LENGTH) return fail(`Category must be ${MAX_BUDGET_CATEGORY_LENGTH} characters or fewer`);
+  const amount = toAmount(raw.amount);
+  if (amount === null) return fail('Amount must be a number');
+  if (amount < 0.005) return fail('Amount must be greater than 0 (minimum 0.01)');
+  return { ok: true, value: { month: raw.month, label: category, amount: roundUncappedAmount(amount) } };
+}
+
+// GET /api/budgets?month=YYYY-MM - the caller's budgets for one month
+app.get('/api/budgets', authenticate, async (req, res) => {
+  if (!validMonth(req.query.month)) {
+    return res.status(400).json({ error: 'Month must be in YYYY-MM format' });
+  }
+  try {
+    res.json(await listBudgetsByUserAndMonth(req.user.id, req.query.month));
+  } catch (err) {
+    respondDbError(res, err, 'Could not load budgets');
+  }
+});
+
+// PUT /api/budgets - create or update the budget for (month, category); nothing is written on a 400
+app.put('/api/budgets', authenticate, async (req, res) => {
+  const result = normalizeBudgetInput(req.body);
+  if (!result.ok) {
+    return res.status(400).json({ error: result.error });
+  }
+  try {
+    const { budget, created } = await upsertBudget({
+      id: randomUUID(), // used only if the row is new; an existing row keeps its id
+      userId: req.user.id, // ownership: always from the verified JWT, never from req.body
+      ...result.value,
+      now: new Date().toISOString()
+    });
+    res.status(created ? 201 : 200).json(budget);
+  } catch (err) {
+    respondDbError(res, err, 'Could not save budget');
+  }
+});
+
+// DELETE /api/budgets/:id - exactly one budget, and only one owned by the caller
+app.delete('/api/budgets/:id', authenticate, async (req, res) => {
+  let removed;
+  try {
+    removed = await deleteBudgetByUserAndId(req.user.id, req.params.id);
+  } catch (err) {
+    return respondDbError(res, err, 'Could not delete budget');
+  }
+  // 404 for both missing and not-yours, so another user's budget is never revealed.
+  if (!removed) {
+    return res.status(404).json({ error: 'Budget not found' });
+  }
+  res.json({ message: 'Budget deleted successfully' });
 });
 
 // ── Emergency fund ─────────────────────────────────────────────────────────────
