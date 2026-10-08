@@ -12,6 +12,7 @@ import cookieParser from 'cookie-parser';
 import bcrypt from 'bcrypt';
 import rateLimit from 'express-rate-limit';
 import { randomUUID } from 'node:crypto';
+import { initDatabase, closeDatabase, createUser, findUserByEmail, normalizeEmail, DuplicateEmailError } from './db/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -575,22 +576,11 @@ const authLimiter = rateLimit({
 // ───────────────────────────────────────────────────────────────────────────────
 
 // --- AUTHENTICATION ---
-const USERS_FILE = path.join(__dirname, 'server_users.json');
-let users = [];
-
-function loadUsers() {
-  try {
-    if (fs.existsSync(USERS_FILE)) {
-      users = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
-    }
-  } catch (err) {
-    console.error('Error loading users:', err);
-  }
-}
-function saveUsers() {
-  fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2), 'utf8');
-}
-loadUsers();
+// Users live in PostgreSQL (see ./db). The previous flat file is only read once, at startup,
+// to import existing accounts; nothing writes to it any more.
+const LEGACY_USERS_FILE = path.join(__dirname, 'server_users.json');
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const MAX_EMAIL_LENGTH = 254;
 
 app.post('/api/auth/register', authLimiter, async (req, res) => {
   const { email, password } = req.body;
@@ -600,18 +590,23 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
   if (typeof email !== 'string' || typeof password !== 'string') {
     return res.status(400).json({ error: 'Email and password must be strings' });
   }
-  // 3. Email format check
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (!emailRegex.test(email)) return res.status(400).json({ error: 'Invalid email format' });
+  // 3. Email format check (on the normalized address, which is also what gets stored)
+  const normalizedEmail = normalizeEmail(email);
+  if (!EMAIL_PATTERN.test(normalizedEmail) || normalizedEmail.length > MAX_EMAIL_LENGTH) {
+    return res.status(400).json({ error: 'Invalid email format' });
+  }
   // 4. Password minimum length
   if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
-  // 5. Duplicate-user check (only after input is known-clean)
-  if (users.find(u => u.email === email)) return res.status(400).json({ error: 'User already exists' });
-  const hashedPassword = await bcrypt.hash(password, 10);
-  const newUser = { id: Date.now(), email, password: hashedPassword };
-  users.push(newUser);
-  saveUsers();
-  res.json({ message: 'User registered successfully' });
+  try {
+    const hashedPassword = await bcrypt.hash(password, 10);
+    // 5. The UNIQUE constraint is the duplicate check, so concurrent registrations cannot both succeed.
+    await createUser(normalizedEmail, hashedPassword);
+    res.json({ message: 'User registered successfully' });
+  } catch (err) {
+    if (err instanceof DuplicateEmailError) return res.status(400).json({ error: 'User already exists' });
+    console.error('Registration failed:', err.message);
+    res.status(500).json({ error: 'Registration failed' });
+  }
 });
 
 app.post('/api/auth/login', authLimiter, async (req, res) => {
@@ -622,13 +617,18 @@ app.post('/api/auth/login', authLimiter, async (req, res) => {
   if (typeof email !== 'string' || typeof password !== 'string') {
     return res.status(400).json({ error: 'Email and password must be strings' });
   }
-  const user = users.find(u => u.email === email);
-  if (!user || !(await bcrypt.compare(password, user.password))) {
-    return res.status(401).json({ error: 'Invalid credentials' });
+  try {
+    const user = await findUserByEmail(normalizeEmail(email));
+    if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '1h' });
+    res.cookie('token', token, { httpOnly: true, secure: isProd, sameSite: isProd ? 'strict' : 'lax', maxAge: 60 * 60 * 1000 });
+    res.json({ message: 'Logged in successfully', user: { id: user.id, email: user.email } });
+  } catch (err) {
+    console.error('Login failed:', err.message);
+    res.status(500).json({ error: 'Login failed' });
   }
-  const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '1h' });
-  res.cookie('token', token, { httpOnly: true, secure: isProd, sameSite: isProd ? 'strict' : 'lax', maxAge: 60 * 60 * 1000 });
-  res.json({ message: 'Logged in successfully', user: { id: user.id, email: user.email } });
 });
 
 app.post('/api/auth/logout', (req, res) => {
@@ -1401,6 +1401,20 @@ Guidelines:
     : 'ML analysis complete. Please configure Groq API key for AI narration.';
   res.json({ reply: fallbackReply });
 });
+
+// Routes only start accepting traffic once the database is ready. If PostgreSQL is
+// missing, unreachable or fails to initialise, refuse to start rather than pretend that
+// accounts can be saved.
+try {
+  await initDatabase({ legacyUsersFile: LEGACY_USERS_FILE });
+} catch (err) {
+  console.error(`FATAL: PostgreSQL initialisation failed: ${err.message}`);
+  console.error('Set DATABASE_URL to a reachable PostgreSQL database (see server/.env.example).');
+  process.exit(1);
+}
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.once(signal, () => { closeDatabase().finally(() => process.exit(0)); });
+}
 
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
