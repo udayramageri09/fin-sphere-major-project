@@ -14,7 +14,7 @@ import { randomUUID } from 'node:crypto';
 import {
   initDatabase, closeDatabase, createUser, findUserByEmail, normalizeEmail, DuplicateEmailError,
   listTransactionsByUser, createTransaction, createTransactionsBatch, deleteTransactionByUserAndId,
-  listGoalsByUser, createGoal, deleteGoalByUserAndId,
+  listGoalsByUser, createGoal, deleteGoalByUserAndId, addGoalContribution, listGoalContributions,
   listLiabilitiesByUser, createLiability, deleteLiabilityByUserAndId, sumMonthlyPaymentsByUser,
   getEmergencyFundByUser, upsertEmergencyFund
 } from './db/index.js';
@@ -417,6 +417,19 @@ function normalizeGoalInput(raw, nowMs = Date.now()) {
   return { ok: true, value: { title, targetAmount, currentAmount, targetDate: raw.targetDate } };
 }
 
+// ── Goal contribution validation ───────────────────────────────────────────────
+// A contribution is a positive amount (finite, > 0, no upper cap), rounded to paise. Only "amount" is read: the
+// client can never submit a new balance, an id, an owner or a timestamp through this endpoint.
+function normalizeContributionInput(raw) {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return fail('Contribution must be an object');
+  }
+  const amount = toAmount(raw.amount);
+  if (amount === null) return fail('Amount must be a number');
+  if (amount < 0.005) return fail('Amount must be greater than 0 (minimum 0.01)');
+  return { ok: true, value: { amount: roundUncappedAmount(amount) } };
+}
+
 // ── Liability validation & normalization ───────────────────────────────────────
 // Server-side authority for POST /api/liabilities. Returns { ok: true, value } or
 // { ok: false, error }; it never reads or returns id, userId or createdAt (the route stamps
@@ -660,6 +673,44 @@ app.delete('/api/goals/:id', authenticate, async (req, res) => {
     return res.status(404).json({ error: 'Goal not found' });
   }
   res.json({ message: 'Goal deleted successfully' });
+});
+
+// POST /api/goals/:id/contributions - add a real contribution to one of the caller's goals
+app.post('/api/goals/:id/contributions', authenticate, async (req, res) => {
+  const result = normalizeContributionInput(req.body);
+  if (!result.ok) {
+    return res.status(400).json({ error: result.error });
+  }
+  let outcome;
+  try {
+    outcome = await addGoalContribution({
+      userId: req.user.id, // ownership: always from the verified JWT, never from req.body
+      goalId: req.params.id,
+      amount: result.value.amount,
+      contributionId: randomUUID(),
+      now: new Date().toISOString()
+    });
+  } catch (err) {
+    return respondDbError(res, err, 'Could not save contribution');
+  }
+  // 404 for both missing and not-yours, exactly like DELETE /api/goals/:id.
+  if (outcome.status === 'not_found') return res.status(404).json({ error: 'Goal not found' });
+  if (outcome.status === 'complete') return res.status(400).json({ error: 'This goal is already complete' });
+  if (outcome.status === 'exceeds') {
+    return res.status(400).json({ error: `Contribution would exceed the goal target (${formatRupees(outcome.remaining)} remaining)` });
+  }
+  res.status(201).json({ goal: outcome.goal, contribution: outcome.contribution });
+});
+
+// GET /api/goals/:id/contributions - the caller's contribution history for one goal, newest first
+app.get('/api/goals/:id/contributions', authenticate, async (req, res) => {
+  try {
+    const contributions = await listGoalContributions(req.user.id, req.params.id);
+    if (contributions === null) return res.status(404).json({ error: 'Goal not found' });
+    res.json(contributions);
+  } catch (err) {
+    respondDbError(res, err, 'Could not load contributions');
+  }
 });
 
 // ── Liabilities ────────────────────────────────────────────────────────────────
