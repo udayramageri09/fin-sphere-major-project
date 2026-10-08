@@ -1,7 +1,7 @@
 """
 health_scorer.py — Financial Health Composite Scorer
 
-Computes 6 standard financial ratios and produces a weighted composite score (0–100).
+Computes standard financial ratios and produces a weighted composite score (0–100).
 Letter grades: A (85+), B (70–84), C (55–69), D (<55)
 
 Ratios:
@@ -11,7 +11,15 @@ Ratios:
   4. Emergency Coverage    = Emergency Fund / Monthly Expenses (months)  [weight: 15%]
   5. Investment Rate       = Investment Credits / Income × 100           [weight: 10%]
   6. Cash Flow Positivity  = Positive Cash Flow Months / Total Months    [weight: 10%]
+
+Ratios 1, 2, 5 and 6 come from the transactions alone. Ratios 3 and 4 need user-supplied
+liabilities / emergency fund, which FinSphere does not store yet. When such an input is
+missing (None), or the denominator cannot be computed, that ratio is OMITTED: it is never
+replaced by a default, and the composite is renormalised over the ratios that exist.
+Missing is not zero: a real 0 counts as supplied and is scored as 0.
 """
+
+import math
 
 import numpy as np
 import pandas as pd
@@ -32,6 +40,25 @@ _BENCHMARKS = {
     'emergency_months':  {'ideal': 6,  'acceptable': 3,  'poor': 1},
     'investment_rate':   {'ideal': 15, 'acceptable': 10, 'poor': 5},
     'positive_cf_rate':  {'ideal': 80, 'acceptable': 60, 'poor': 40},
+}
+
+# Score weights, summing to 1.0 when every ratio is available.
+_WEIGHTS = {
+    'savings_rate':         0.25,
+    'expense_ratio':        0.20,
+    'dti':                  0.20,
+    'emergency_coverage':   0.15,
+    'investment_rate':      0.10,
+    'cash_flow_positivity': 0.10,
+}
+
+_LABELS = {
+    'savings_rate':         'Savings Rate',
+    'expense_ratio':        'Expense Control',
+    'dti':                  'Debt-to-Income',
+    'emergency_coverage':   'Emergency Coverage',
+    'investment_rate':      'Investment Rate',
+    'cash_flow_positivity': 'Cash Flow',
 }
 
 
@@ -66,28 +93,41 @@ def _grade(score: float) -> dict:
     return {'grade': 'D', 'label': 'Needs Work', 'emoji': '🔴'}
 
 
+def _is_supplied(value) -> bool:
+    """True for a real, finite, non-negative number. 0 counts as supplied;
+    None, NaN, infinity, booleans and negative amounts count as missing."""
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value >= 0
+    )
+
+
 def run_health_scorer(
     transactions: list[dict],
-    liabilities: float = 2450000,
-    base_net_worth: float = 4500000,
-    emergency_fund: float = 300000,
-    emergency_target: float = 500000
+    liabilities: Optional[float] = None,
+    emergency_fund: Optional[float] = None
 ) -> dict:
     """
     Main entry point for financial health scoring.
 
+    liabilities / emergency_fund are optional user-supplied amounts. None means "not
+    available" (the matching ratio is omitted); 0 is a real value.
+
     Returns:
     {
-        "composite_score": float (0–100),
+        "composite_score": float (0–100, over the ratios that were available),
         "grade": { grade, label, emoji },
         "ratios": {
             "savings_rate": { value, score, benchmark, status },
             "expense_ratio": { ... },
-            "dti": { ... },
-            "emergency_coverage": { ... },
+            "dti": { ... },                  # omitted when liabilities are unavailable
+            "emergency_coverage": { ... },   # omitted when the emergency fund is unavailable
             "investment_rate": { ... },
             "cash_flow_positivity": { ... }
         },
+        "unavailable_ratios": [str],         # e.g. ["dti", "emergency_coverage"]
         "strengths": [...str],
         "weaknesses": [...str],
         "recommendations": [...str]
@@ -116,26 +156,41 @@ def run_health_scorer(
     # Monthly expense average (for emergency coverage)
     avg_monthly_expenses = float(df[df['amount'] < 0]['amount'].abs().sum() / max(n_months, 1))
 
-    # Ratios
+    # Ratios computed from the transactions alone
     savings_rate = ((total_income - total_expenses) / total_income * 100) if total_income > 0 else 0
     expense_ratio = (total_expenses / total_income * 100) if total_income > 0 else 100
-    annual_income = total_income / max(n_months, 1) * 12
-    dti = (liabilities / annual_income * 100) if annual_income > 0 else 100
-    emergency_months = (emergency_fund / avg_monthly_expenses) if avg_monthly_expenses > 0 else 0
     investment_rate = (investment_credits / total_income * 100) if total_income > 0 else 0
 
-    # Individual scores
+    # Ratios that need user-supplied data. Missing is not zero: without the input, or
+    # without a usable denominator, the ratio is not produced at all.
+    annual_income = total_income / max(n_months, 1) * 12
+    dti = None
+    if _is_supplied(liabilities) and annual_income > 0:
+        dti = liabilities / annual_income * 100
+    emergency_months = None
+    if _is_supplied(emergency_fund) and avg_monthly_expenses > 0:
+        emergency_months = emergency_fund / avg_monthly_expenses
+
+    # Individual scores (only for ratios that exist)
     s_savings   = _score_higher_better(savings_rate, **_BENCHMARKS['savings_rate'])
     s_expense   = _score_lower_better(expense_ratio, **_BENCHMARKS['expense_ratio'])
-    s_dti       = _score_lower_better(dti, **_BENCHMARKS['dti'])
-    s_emergency = _score_higher_better(emergency_months, **_BENCHMARKS['emergency_months'])
+    s_dti       = _score_lower_better(dti, **_BENCHMARKS['dti']) if dti is not None else None
+    s_emergency = _score_higher_better(emergency_months, **_BENCHMARKS['emergency_months']) if emergency_months is not None else None
     s_invest    = _score_higher_better(investment_rate, **_BENCHMARKS['investment_rate'])
     s_cf        = _score_higher_better(positive_cf_rate, **_BENCHMARKS['positive_cf_rate'])
 
-    # Weighted composite
-    weights = [0.25, 0.20, 0.20, 0.15, 0.10, 0.10]
-    scores  = [s_savings, s_expense, s_dti, s_emergency, s_invest, s_cf]
-    composite = float(np.dot(weights, scores))
+    scores = {'savings_rate': s_savings, 'expense_ratio': s_expense}
+    if s_dti is not None:
+        scores['dti'] = s_dti
+    if s_emergency is not None:
+        scores['emergency_coverage'] = s_emergency
+    scores['investment_rate'] = s_invest
+    scores['cash_flow_positivity'] = s_cf
+
+    # Weighted composite, renormalised over the components that exist so it stays a true
+    # 0–100 (with all six present the weights already sum to 1.0, so nothing changes).
+    weight_total = sum(_WEIGHTS[key] for key in scores)
+    composite = float(sum(_WEIGHTS[key] * score for key, score in scores.items()) / weight_total)
 
     def _status(s: float) -> str:
         if s >= 80: return 'good'
@@ -159,52 +214,48 @@ def run_health_scorer(
             'status': _status(s_expense),
             'description': 'Expenses as a share of income'
         },
-        'dti': {
+    }
+    if dti is not None:
+        ratios['dti'] = {
             'value': round(dti, 1),
             'score': round(s_dti, 1),
             'unit': '%',
             'benchmark': f"Ideal: ≤{_BENCHMARKS['dti']['ideal']}%",
             'status': _status(s_dti),
             'description': 'Debt-to-Income ratio (annual)'
-        },
-        'emergency_coverage': {
+        }
+    if emergency_months is not None:
+        ratios['emergency_coverage'] = {
             'value': round(emergency_months, 1),
             'score': round(s_emergency, 1),
             'unit': 'months',
             'benchmark': f"Ideal: ≥{_BENCHMARKS['emergency_months']['ideal']} months",
             'status': _status(s_emergency),
             'description': 'Emergency fund runway'
-        },
-        'investment_rate': {
-            'value': round(investment_rate, 1),
-            'score': round(s_invest, 1),
-            'unit': '%',
-            'benchmark': f"Ideal: ≥{_BENCHMARKS['investment_rate']['ideal']}%",
-            'status': _status(s_invest),
-            'description': 'Investments as share of income'
-        },
-        'cash_flow_positivity': {
-            'value': round(positive_cf_rate, 1),
-            'score': round(s_cf, 1),
-            'unit': '%',
-            'benchmark': f"Ideal: ≥{_BENCHMARKS['positive_cf_rate']['ideal']}%",
-            'status': _status(s_cf),
-            'description': 'Months with positive net cash flow'
         }
+    ratios['investment_rate'] = {
+        'value': round(investment_rate, 1),
+        'score': round(s_invest, 1),
+        'unit': '%',
+        'benchmark': f"Ideal: ≥{_BENCHMARKS['investment_rate']['ideal']}%",
+        'status': _status(s_invest),
+        'description': 'Investments as share of income'
+    }
+    ratios['cash_flow_positivity'] = {
+        'value': round(positive_cf_rate, 1),
+        'score': round(s_cf, 1),
+        'unit': '%',
+        'benchmark': f"Ideal: ≥{_BENCHMARKS['positive_cf_rate']['ideal']}%",
+        'status': _status(s_cf),
+        'description': 'Months with positive net cash flow'
     }
 
-    # Strengths and weaknesses
-    score_map = {
-        'savings_rate': ('Savings Rate', s_savings),
-        'expense_ratio': ('Expense Control', s_expense),
-        'dti': ('Debt-to-Income', s_dti),
-        'emergency_coverage': ('Emergency Coverage', s_emergency),
-        'investment_rate': ('Investment Rate', s_invest),
-        'cash_flow_positivity': ('Cash Flow', s_cf)
-    }
-    sorted_scores = sorted(score_map.items(), key=lambda x: x[1][1], reverse=True)
-    strengths = [f"{name} ({round(sc, 0):.0f}/100)" for _, (name, sc) in sorted_scores if sc >= 70]
-    weaknesses = [f"{name} ({round(sc, 0):.0f}/100)" for _, (name, sc) in sorted_scores if sc < 55]
+    unavailable_ratios = [key for key in ('dti', 'emergency_coverage') if key not in ratios]
+
+    # Strengths and weaknesses (available components only)
+    sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    strengths = [f"{_LABELS[key]} ({round(sc, 0):.0f}/100)" for key, sc in sorted_scores if sc >= 70]
+    weaknesses = [f"{_LABELS[key]} ({round(sc, 0):.0f}/100)" for key, sc in sorted_scores if sc < 55]
 
     # Recommendations
     recommendations = []
@@ -213,15 +264,18 @@ def run_health_scorer(
         recommendations.append(f"Increase savings rate by {shortfall:.1f}% — target ₹{(total_income * shortfall / 100):.0f}/month more in savings")
     if s_expense > 0 and s_expense < 60:
         recommendations.append(f"Expense ratio is {expense_ratio:.1f}%. Trim discretionary spending to reach 70% ratio")
-    if s_dti < 60:
+    if s_dti is not None and s_dti < 60:
         recommendations.append(f"DTI ratio is {dti:.1f}% — above safe threshold. Prioritise debt prepayment")
-    if s_emergency < 60:
+    if s_emergency is not None and s_emergency < 60:
         months_needed = 6 - emergency_months
         recommendations.append(f"Emergency fund covers only {emergency_months:.1f} months. Build ₹{months_needed * avg_monthly_expenses:,.0f} more")
     if s_invest < 50:
         recommendations.append(f"Investment rate is {investment_rate:.1f}%. Allocate at least 15% of income to growth assets")
     if not recommendations:
-        recommendations.append("Financial health is strong — consider tax-loss harvesting and international diversification")
+        if unavailable_ratios:
+            recommendations.append("No issues found in the metrics that could be computed from your transactions")
+        else:
+            recommendations.append("Financial health is strong — consider tax-loss harvesting and international diversification")
 
     grade_info = _grade(composite)
 
@@ -229,6 +283,7 @@ def run_health_scorer(
         'composite_score': round(composite, 1),
         'grade': grade_info,
         'ratios': ratios,
+        'unavailable_ratios': unavailable_ratios,
         'strengths': strengths[:3],
         'weaknesses': weaknesses[:3],
         'recommendations': recommendations,
@@ -236,7 +291,7 @@ def run_health_scorer(
             'total_income_analyzed': round(total_income, 2),
             'total_expenses_analyzed': round(total_expenses, 2),
             'months_analyzed': n_months,
-            'liabilities_used': liabilities,
-            'emergency_fund_used': emergency_fund
+            'liabilities_used': liabilities if dti is not None else None,
+            'emergency_fund_used': emergency_fund if emergency_months is not None else None
         }
     }

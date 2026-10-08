@@ -16,7 +16,7 @@ os.environ['OMP_NUM_THREADS'] = '1'   # Prevent MKL threadpool crash on Anaconda
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Union
 import time
 import traceback
 
@@ -47,7 +47,10 @@ app.add_middleware(
 # ── Pydantic Models ────────────────────────────────────────────────────────────
 
 class Transaction(BaseModel):
-    id: Optional[int] = None
+    # New transactions have UUID string ids; historical ones have numeric ids. The ML
+    # models never use the id, so either form must be accepted (it was int-only, which
+    # made every request containing a UUID id fail with a 422).
+    id: Optional[Union[int, str]] = None
     title: str
     amount: float
     date: str
@@ -57,10 +60,10 @@ class Transaction(BaseModel):
 
 class AnalysisRequest(BaseModel):
     transactions: list[Transaction]
-    liabilities: Optional[float] = 2450000
-    base_net_worth: Optional[float] = 4500000
-    emergency_fund: Optional[float] = 300000
-    emergency_target: Optional[float] = 500000
+    # Optional user-supplied amounts. FinSphere does not store these yet, so they default
+    # to None ("not available"); the ratios that need them are then omitted, never defaulted.
+    liabilities: Optional[float] = None
+    emergency_fund: Optional[float] = None
     n_forecast_months: Optional[int] = 3
 
 
@@ -121,9 +124,7 @@ def full_analysis(req: AnalysisRequest):
         results['health'] = run_health_scorer(
             txns,
             liabilities=req.liabilities,
-            base_net_worth=req.base_net_worth,
-            emergency_fund=req.emergency_fund,
-            emergency_target=req.emergency_target
+            emergency_fund=req.emergency_fund
         )
     except Exception as e:
         errors['health'] = str(e)
@@ -188,9 +189,7 @@ def health_score_only(req: AnalysisRequest):
         return run_health_scorer(
             txns,
             liabilities=req.liabilities,
-            base_net_worth=req.base_net_worth,
-            emergency_fund=req.emergency_fund,
-            emergency_target=req.emergency_target
+            emergency_fund=req.emergency_fund
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

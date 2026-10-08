@@ -1092,14 +1092,12 @@ Keep responses under 3-4 sentences if possible, unless a detailed breakdown is r
 // 6. GET /api/ml/analyze — proxies full ML analysis to Python microservice
 app.get('/api/ml/analyze', authenticate, async (req, res) => {
   try {
-    // Scope ML analysis to the authenticated user's transactions only.
+    // Scope ML analysis to the authenticated user's transactions only. Nothing else about
+    // the user's finances is sent: liabilities and emergency fund do not exist in FinSphere
+    // yet, so the ML service reports the ratios that need them as unavailable.
     const userTransactions = transactions.filter(t => t.userId === req.user.id);
     const payload = {
       transactions: userTransactions,
-      liabilities: 2450000,
-      base_net_worth: 4500000,
-      emergency_fund: 300000,
-      emergency_target: 500000,
       n_forecast_months: 3
     };
 
@@ -1147,8 +1145,22 @@ app.post('/api/plan-chat', authenticate, async (req, res) => {
   const healthScore = health.composite_score ?? 'N/A';
   const healthGrade = health.grade?.grade ?? 'N/A';
   const savingsRate = health.ratios?.savings_rate?.value ?? 'N/A';
-  const dti = health.ratios?.dti?.value ?? 'N/A';
-  const emergencyMonths = health.ratios?.emergency_coverage?.value ?? 'N/A';
+  // dti / emergency_coverage are omitted by the ML service when liabilities / the emergency
+  // fund are unknown. They are then left out of the prompt (no "N/A%" line) and listed as
+  // not analysed, so the advisor says so instead of guessing.
+  const dti = health.ratios?.dti?.value ?? null;
+  const emergencyMonths = health.ratios?.emergency_coverage?.value ?? null;
+  const optionalHealthLines = [
+    dti !== null ? `- Debt-to-Income: ${dti}%  (benchmark: ≤36%)` : null,
+    emergencyMonths !== null ? `- Emergency Coverage: ${emergencyMonths} months (benchmark: ≥6 months)` : null,
+  ].filter(Boolean).map((line) => `${line}\n`).join('');
+  const notAnalysed = [
+    dti === null ? 'Debt-to-Income' : null,
+    emergencyMonths === null ? 'Emergency Coverage' : null,
+  ].filter(Boolean);
+  const notAnalysedLine = notAnalysed.length
+    ? `- Not analysed (no data provided): ${notAnalysed.join(', ')}\n`
+    : '';
 
   const incomeTrend = forecast.insights?.income_momentum ?? 'unknown';
   const expenseTrend = forecast.insights?.expense_momentum ?? 'unknown';
@@ -1169,9 +1181,7 @@ Here are the EXACT ML model outputs you must narrate:
 === FINANCIAL HEALTH SCORER (Rule-Based Ratio Engine) ===
 - Composite Score: ${healthScore}/100 (Grade: ${healthGrade})
 - Savings Rate: ${savingsRate}%  (benchmark: ≥20%)
-- Debt-to-Income: ${dti}%  (benchmark: ≤36%)
-- Emergency Coverage: ${emergencyMonths} months (benchmark: ≥6 months)
-- Strengths: ${(health.strengths || []).join(', ') || 'None identified'}
+${optionalHealthLines}${notAnalysedLine}- Strengths:${(health.strengths || []).join(', ') || 'None identified'}
 - Weaknesses: ${(health.weaknesses || []).join(', ') || 'None identified'}
 
 === LINEAR REGRESSION FORECASTER ===
