@@ -1,5 +1,5 @@
 // PostgreSQL access for FinSphere (pg + parameterized SQL, no ORM).
-// Scope: users, transactions, goals (with their contributions), liabilities and the emergency fund (every domain is in PostgreSQL).
+// Scope: users, transactions, goals (with their contributions), liabilities (with their repayments), the emergency fund and monthly budgets (every domain is in PostgreSQL).
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
@@ -622,6 +622,52 @@ async function importLegacyLiabilities(client, file) {
     await client.query('ROLLBACK');
     throw err;
   }
+}
+
+// ── Monthly category budgets ───────────────────────────────────────────────────
+// API shape: category = the label the user typed, categoryKey = the canonical key (lower(btrim(label))) used to
+// match transactions, month = 'YYYY-MM'. The month is a DATE (first day) in the database; to_char keeps any
+// time-zone conversion out of it.
+const BUDGET_COLUMNS = "id, user_id, to_char(month, 'YYYY-MM') AS month, label, category, amount, created_at, updated_at";
+
+function toBudget(row) {
+  return {
+    id: row.id,
+    userId: Number(row.user_id),
+    month: row.month,
+    category: row.label,
+    categoryKey: row.category,
+    amount: Number(row.amount),
+    createdAt: row.created_at.toISOString(),
+    updatedAt: row.updated_at.toISOString(),
+  };
+}
+
+// The owner's budgets for one month ('YYYY-MM'), ordered by category key (unique per month, so fully deterministic).
+export async function listBudgetsByUserAndMonth(userId, month) {
+  const { rows } = await pool.query(
+    `SELECT ${BUDGET_COLUMNS} FROM budgets WHERE user_id = $1 AND month = ($2 || '-01')::date ORDER BY category`,
+    [userId, month]);
+  return rows.map(toBudget);
+}
+
+// Create-or-update the budget for (user, month, canonical category) in one statement. created_at and id are kept
+// on update; label (display text), amount and updated_at are replaced. Returns { budget, created }.
+export async function upsertBudget({ id, userId, month, label, amount, now }) {
+  const { rows } = await pool.query(
+    `INSERT INTO budgets (id, user_id, month, label, amount, created_at, updated_at)
+     VALUES ($1, $2, ($3 || '-01')::date, $4, $5::numeric, $6::timestamptz, $6::timestamptz)
+     ON CONFLICT (user_id, month, category) DO UPDATE
+       SET label = EXCLUDED.label, amount = EXCLUDED.amount, updated_at = EXCLUDED.updated_at
+     RETURNING ${BUDGET_COLUMNS}, (xmax = 0) AS inserted`,
+    [id, userId, month, label, String(amount), now]);
+  return { budget: toBudget(rows[0]), created: rows[0].inserted };
+}
+
+// Removes exactly one budget, and only one owned by userId (id is the primary key). Returns true if removed.
+export async function deleteBudgetByUserAndId(userId, id) {
+  const { rowCount } = await pool.query('DELETE FROM budgets WHERE user_id = $1 AND id = $2', [userId, String(id)]);
+  return rowCount > 0;
 }
 
 // ── Emergency fund ─────────────────────────────────────────────────────────────
