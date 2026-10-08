@@ -5,6 +5,13 @@ import {
   Trash2, Plus, FileText, Upload, Sparkles, AlertCircle 
 } from 'lucide-react';
 
+// Which analytical classifications each direction can carry (mirrors the server and the database).
+const CLASSIFICATION_OPTIONS = {
+  income: [['income', 'Income'], ['refund', 'Refund'], ['transfer', 'Transfer'], ['unknown', 'Unknown']],
+  expense: [['expense', 'Expense'], ['transfer', 'Transfer'], ['unknown', 'Unknown']],
+};
+const CLASSIFICATION_LABEL = { income: 'Income', expense: 'Expense', refund: 'Refund', transfer: 'Transfer', unknown: 'Unclassified' };
+
 function Transactions() {
   const { 
     transactions, loading, addTransaction, deleteTransaction, parseStatement 
@@ -16,6 +23,8 @@ function Transactions() {
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
   const [type, setType] = useState('expense');
   const [category, setCategory] = useState('Shopping');
+  // Pre-selected to match the direction (visible and changeable); imports and old rows are 'unknown'.
+  const [classification, setClassification] = useState('expense');
   const [formSuccess, setFormSuccess] = useState('');
 
   // Parser state
@@ -53,7 +62,8 @@ function Transactions() {
         amount: parsedAmount,
         date,
         type,
-        category
+        category,
+        classification
       });
       setTitle('');
       setAmount('');
@@ -131,7 +141,12 @@ function Transactions() {
                   <label style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Transaction Type</label>
                   <select 
                     value={type} 
-                    onChange={(e) => setType(e.target.value)}
+                    onChange={(e) => {
+                      const nextType = e.target.value;
+                      setType(nextType);
+                      // Keep the selection if it is still valid for the new direction, otherwise fall back to the matching one.
+                      setClassification((current) => (CLASSIFICATION_OPTIONS[nextType].some(([value]) => value === current) ? current : nextType));
+                    }}
                     style={{ padding: '0.6rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', background: 'var(--surface-color)', color: 'var(--text-primary)' }}
                   >
                     <option value="expense">Expense (-)</option>
@@ -156,6 +171,20 @@ function Transactions() {
                     <option value="General">General</option>
                   </select>
                 </div>
+              </div>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                <label htmlFor="tx-classification" style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Classification</label>
+                <select
+                  id="tx-classification"
+                  value={classification}
+                  onChange={(e) => setClassification(e.target.value)}
+                  style={{ padding: '0.6rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', background: 'var(--surface-color)', color: 'var(--text-primary)' }}
+                >
+                  {CLASSIFICATION_OPTIONS[type].map(([value, label]) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
+                </select>
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
@@ -411,6 +440,11 @@ function Transactions() {
                           <span style={{ fontSize: '0.75rem', background: 'var(--border-color)', padding: '0.1rem 0.4rem', borderRadius: '4px' }}>
                             {t.category || 'General'}
                           </span>
+                          {t.classification && t.classification !== t.type && (
+                            <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                              {CLASSIFICATION_LABEL[t.classification] ?? t.classification}
+                            </span>
+                          )}
                           <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
                             {new Date(t.date).toLocaleDateString('en-IN', { year: 'numeric', month: 'short', day: 'numeric' })}
                           </span>

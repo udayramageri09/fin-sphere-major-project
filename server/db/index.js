@@ -139,7 +139,9 @@ export async function findUserByEmail(email) {
 // Rows come back in the shape the API has always returned: amount as a Number, date as
 // 'YYYY-MM-DD' text (selected with to_char so no time-zone conversion can shift it), and
 // the id as the stored text (historical numeric ids therefore read back as numeric strings).
-const TX_COLUMNS = `id, user_id, title, amount, to_char(date, 'YYYY-MM-DD') AS date, type, category`;
+// NOTE (Issue #61): every total derived from transactions (monthly income, DTI, emergency expenses, budget actuals,
+// dashboard sums) still uses `type` / the sign only. `classification` is stored and returned but not consumed yet.
+const TX_COLUMNS = `id, user_id, title, amount, to_char(date, 'YYYY-MM-DD') AS date, type, category, classification`;
 
 function toTransaction(row) {
   return {
@@ -150,6 +152,7 @@ function toTransaction(row) {
     date: row.date,
     type: row.type,
     category: row.category,
+    classification: row.classification,
   };
 }
 
@@ -164,10 +167,10 @@ export async function listTransactionsByUser(userId) {
 // first, exactly as `[...rows, ...existing]` ordered the old array.
 async function insertTransactions(db, rows) {
   await db.query(
-    `INSERT INTO transactions (id, user_id, title, amount, type, date, category)
-     SELECT id, user_id, title, amount, type, date::date, category
-     FROM unnest($1::text[], $2::bigint[], $3::text[], $4::numeric[], $5::text[], $6::text[], $7::text[])
-          WITH ORDINALITY AS t(id, user_id, title, amount, type, date, category, ord)
+    `INSERT INTO transactions (id, user_id, title, amount, type, date, category, classification)
+     SELECT id, user_id, title, amount, type, date::date, category, classification
+     FROM unnest($1::text[], $2::bigint[], $3::text[], $4::numeric[], $5::text[], $6::text[], $7::text[], $8::text[])
+          WITH ORDINALITY AS t(id, user_id, title, amount, type, date, category, classification, ord)
      ORDER BY ord DESC`,
     [
       rows.map((r) => String(r.id)),
@@ -177,6 +180,7 @@ async function insertTransactions(db, rows) {
       rows.map((r) => r.type),
       rows.map((r) => r.date),
       rows.map((r) => r.category),
+      rows.map((r) => r.classification ?? 'unknown'),   // the table's CHECKs still reject anything else
     ]);
 }
 
@@ -221,7 +225,8 @@ function legacyTransactionRow(t, knownUserIds) {
   if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== t.date) return { reason: 'malformed' };
   // Category: kept verbatim; a missing or blank category is not replaced by 'General' (that is a rule for new input).
   if (typeof t.category !== 'string' || t.category.trim() === '' || hasNul(t.category)) return { reason: 'malformed' };
-  return { row: { id, userId: t.userId, title: t.title, amount, date: t.date, type: t.type, category: t.category } };
+  // Old rows only ever proved their direction, so they are stored as 'unknown'.
+  return { row: { id, userId: t.userId, title: t.title, amount, date: t.date, type: t.type, category: t.category, classification: 'unknown' } };
 }
 
 // One-time import of server_db.json. Same rules as the users import: all-or-nothing, recorded in

@@ -93,6 +93,14 @@ const DECIMAL_PATTERN = /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/;
 
 const fail = (error) => ({ ok: false, error });
 
+// Analytical classification (Issue #59): what a transaction WAS, separate from `type` (its direction and sign).
+// Which classifications each direction may carry; nothing else is coherent, and direction is never inferred from it.
+// Downstream totals (income, DTI, emergency expenses, budget actuals, dashboard sums) do NOT use it yet (Issue #61).
+const CLASSIFICATIONS_BY_TYPE = {
+  income: ['income', 'refund', 'transfer', 'unknown'],
+  expense: ['expense', 'transfer', 'unknown']
+};
+
 function isRealCalendarDate(year, month, day) {
   if (month < 1 || month > 12 || day < 1) return false;
   const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
@@ -146,6 +154,20 @@ function normalizeTransactionInput(raw, nowMs = Date.now()) {
     return fail('Type must be "income" or "expense"');
   }
 
+  // Classification: optional. Omitted/null means 'unknown' (we never assume that a credit is income or a debit an
+  // expense); anything else must be one of the allowed values for this direction. Case-insensitive like `type`.
+  let classification = 'unknown';
+  if (raw.classification !== undefined && raw.classification !== null) {
+    if (typeof raw.classification !== 'string') return fail('Classification must be a string');
+    classification = raw.classification.toLowerCase();
+    if (!['income', 'expense', 'refund', 'transfer', 'unknown'].includes(classification)) {
+      return fail('Classification must be one of: income, expense, refund, transfer, unknown');
+    }
+    if (!CLASSIFICATIONS_BY_TYPE[type].includes(classification)) {
+      return fail(`Classification "${classification}" is not valid for an ${type} transaction (allowed: ${CLASSIFICATIONS_BY_TYPE[type].join(', ')})`);
+    }
+  }
+
   // Date: exact YYYY-MM-DD, real calendar date, at most one day ahead. The limit is
   // UTC today + 1 day: any real local date (UTC-12 .. UTC+14) is at most one day
   // ahead of the UTC date, so users in every timezone pass. Fixed-width ISO strings
@@ -174,7 +196,8 @@ function normalizeTransactionInput(raw, nowMs = Date.now()) {
       amount: type === 'income' ? roundedAmount : -roundedAmount, // sign always follows type
       date: raw.date,
       type,
-      category
+      category,
+      classification
     }
   };
 }
@@ -186,7 +209,9 @@ function normalizeImportedRows(candidates) {
   const rows = [];
   let skipped = 0;
   for (const candidate of candidates) {
-    const result = normalizeTransactionInput(candidate);
+    // Importers only know direction (debit / credit), never meaning: every imported row is 'unknown', whatever the
+    // candidate carries, so nothing a parser or an AI model emits can set a classification.
+    const result = normalizeTransactionInput({ ...candidate, classification: 'unknown' });
     if (!result.ok) {
       skipped++;
       continue;
@@ -1378,7 +1403,7 @@ Here is the financial data that actually exists for this user:
 - Liabilities (saved by the user):${describeLiabilitiesForAssistant(userLiabilities)}
 - Emergency fund (saved by the user): ${describeEmergencyFundForAssistant(emergencyFund)}
 - Monthly budgets for ${budgetMonth} (limits the user set, with their real expense spending that month):${describeBudgetsForAssistant(userBudgets)}
-- Live Transactions (Latest first): ${JSON.stringify(currentContext.recentTransactions)}
+- Live Transactions (Latest first; "classification" is an optional analytical label, "unknown" means not labelled yet - the totals above use each transaction's direction only): ${JSON.stringify(currentContext.recentTransactions)}
 
 NOT available for this user (no such data has been entered or connected): credit score, portfolio holdings or allocation, and net worth (FinSphere has no asset data).
 
