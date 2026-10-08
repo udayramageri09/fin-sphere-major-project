@@ -68,3 +68,23 @@ CREATE TABLE IF NOT EXISTS goals (
 );
 
 CREATE INDEX IF NOT EXISTS goals_user_seq_idx ON goals (user_id, seq DESC);
+
+-- Liabilities. Replaces server_liabilities.json (one-time import at startup, see db/index.js).
+CREATE TABLE IF NOT EXISTS liabilities (
+  -- Insertion order: the API lists newest first (new rows used to be unshifted onto the front).
+  seq                BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  id                 TEXT NOT NULL CHECK (length(id) BETWEEN 1 AND 64),
+  user_id            BIGINT NOT NULL REFERENCES users(id),
+  name               TEXT NOT NULL CHECK (name = btrim(name) AND length(name) BETWEEN 1 AND 120),
+  type               TEXT NOT NULL CHECK (type IN ('home_loan', 'personal_loan', 'vehicle_loan', 'education_loan', 'credit_card', 'other')),
+  -- Exact money / rates. Unconstrained NUMERIC on purpose: liabilities have no upper cap (unlike transactions),
+  -- so any finite JS number (up to ~1.8e308) must be storable. The "< 1e310" bounds only exclude NaN and
+  -- Infinity (PostgreSQL orders NaN above every number and Infinity above every finite one).
+  outstanding_amount NUMERIC NOT NULL CHECK (outstanding_amount > 0 AND outstanding_amount < 1e310),
+  interest_rate      NUMERIC NOT NULL CHECK (interest_rate >= 0 AND interest_rate <= 100),
+  monthly_payment    NUMERIC NOT NULL CHECK (monthly_payment >= 0 AND monthly_payment < 1e310),
+  created_at         TIMESTAMPTZ NOT NULL,
+  CONSTRAINT liabilities_user_id_id_unique UNIQUE (user_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS liabilities_user_seq_idx ON liabilities (user_id, seq DESC);

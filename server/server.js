@@ -3,7 +3,6 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import multer from 'multer';
-import fs from 'fs';
 import XLSX from 'xlsx';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -15,7 +14,8 @@ import { randomUUID } from 'node:crypto';
 import {
   initDatabase, closeDatabase, createUser, findUserByEmail, normalizeEmail, DuplicateEmailError,
   listTransactionsByUser, createTransaction, createTransactionsBatch, deleteTransactionByUserAndId,
-  listGoalsByUser, createGoal, deleteGoalByUserAndId
+  listGoalsByUser, createGoal, deleteGoalByUserAndId,
+  listLiabilitiesByUser, createLiability, deleteLiabilityByUserAndId, sumOutstandingByUser
 } from './db/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -74,44 +74,9 @@ const LEGACY_TRANSACTIONS_FILE = path.join(__dirname, 'server_db.json');
 // to import existing rows; nothing writes to it any more.
 const LEGACY_GOALS_FILE = path.join(__dirname, 'server_goals.json');
 
-// ── Liabilities persistence ────────────────────────────────────────────────────
-// Same reliability pattern as goals (own file, __dirname-based path, safe load, temp file +
-// rename on save, caller rolls back on failure), written as two small generic helpers.
-function readJsonArrayFile(file, label) {
-  if (!fs.existsSync(file)) return [];
-  try {
-    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (!Array.isArray(parsed)) throw new Error(`${label} file is not an array`);
-    // Drop anything that is not a plain object so one bad entry cannot crash later requests.
-    return parsed.filter((row) => row !== null && typeof row === 'object' && !Array.isArray(row));
-  } catch (err) {
-    // Keep the unreadable file for recovery instead of letting the next save overwrite it.
-    console.error(`Error loading ${label}, starting empty:`, err);
-    try {
-      fs.renameSync(file, `${file.replace(/\.json$/, '')}.corrupt-${Date.now()}.json`);
-    } catch (renameErr) {
-      console.error(`Could not set aside the unreadable ${label} file:`, renameErr);
-    }
-    return [];
-  }
-}
-
-// Returns false on failure so the caller can roll back and report an error.
-function writeJsonArrayFile(file, rows, label) {
-  try {
-    const tmpFile = `${file}.tmp`;
-    fs.writeFileSync(tmpFile, JSON.stringify(rows, null, 2), 'utf8');
-    fs.renameSync(tmpFile, file);
-    return true;
-  } catch (err) {
-    console.error(`Error saving ${label}:`, err);
-    return false;
-  }
-}
-
-const LIABILITIES_FILE = path.join(__dirname, 'server_liabilities.json');
-let liabilities = readJsonArrayFile(LIABILITIES_FILE, 'liabilities');
-const saveLiabilities = () => writeJsonArrayFile(LIABILITIES_FILE, liabilities, 'liabilities');
+// Liabilities live in PostgreSQL (see ./db). server_liabilities.json is only read once, at startup,
+// to import existing rows; nothing writes to it any more.
+const LEGACY_LIABILITIES_FILE = path.join(__dirname, 'server_liabilities.json');
 
 // ── Transaction validation & normalization ─────────────────────────────────────
 // The single boundary every persisted transaction passes through: manual POST and
@@ -466,6 +431,7 @@ function normalizeLiabilityInput(raw) {
   if (typeof raw.name !== 'string') return fail('Name must be a string');
   const name = raw.name.trim();
   if (name.length === 0) return fail('Name is required');
+  if (name.includes('\u0000')) return fail('Name contains an invalid character');   // PostgreSQL text cannot hold NUL
   if (name.length > MAX_TITLE_LENGTH) return fail(`Name must be ${MAX_TITLE_LENGTH} characters or fewer`);
 
   if (typeof raw.type !== 'string' || !LIABILITY_TYPES.includes(raw.type)) {
@@ -697,12 +663,16 @@ app.delete('/api/goals/:id', authenticate, async (req, res) => {
 
 // ── Liabilities ────────────────────────────────────────────────────────────────
 // GET /api/liabilities - only the authenticated user's liabilities
-app.get('/api/liabilities', authenticate, (req, res) => {
-  res.json(liabilities.filter(l => l.userId === req.user.id));
+app.get('/api/liabilities', authenticate, async (req, res) => {
+  try {
+    res.json(await listLiabilitiesByUser(req.user.id));
+  } catch (err) {
+    respondDbError(res, err, 'Could not load liabilities');
+  }
 });
 
-// POST /api/liabilities - validate first; nothing is mutated or written on a 400
-app.post('/api/liabilities', authenticate, (req, res) => {
+// POST /api/liabilities - validate first; nothing is written on a 400
+app.post('/api/liabilities', authenticate, async (req, res) => {
   const result = normalizeLiabilityInput(req.body);
   if (!result.ok) {
     return res.status(400).json({ error: result.error });
@@ -715,27 +685,26 @@ app.post('/api/liabilities', authenticate, (req, res) => {
     createdAt: new Date().toISOString()
   };
 
-  liabilities.unshift(liability); // newest first
-  if (!saveLiabilities()) {
-    liabilities.shift(); // roll back so memory never disagrees with the file
-    return res.status(500).json({ error: 'Could not save liability' });
+  try {
+    await createLiability(liability);
+  } catch (err) {
+    return respondDbError(res, err, 'Could not save liability');
   }
   res.status(201).json(liability);
 });
 
 // DELETE /api/liabilities/:id - exactly one liability, and only one owned by the caller
-app.delete('/api/liabilities/:id', authenticate, (req, res) => {
-  const index = liabilities.findIndex(l => l.userId === req.user.id && String(l.id) === String(req.params.id));
-
-  // 404 for both missing and not-yours, so another user's liability is never revealed.
-  if (index === -1) {
-    return res.status(404).json({ error: 'Liability not found' });
+app.delete('/api/liabilities/:id', authenticate, async (req, res) => {
+  let removed;
+  try {
+    removed = await deleteLiabilityByUserAndId(req.user.id, req.params.id);
+  } catch (err) {
+    return respondDbError(res, err, 'Could not delete liability');
   }
 
-  const [removed] = liabilities.splice(index, 1);
-  if (!saveLiabilities()) {
-    liabilities.splice(index, 0, removed); // roll back
-    return res.status(500).json({ error: 'Could not delete liability' });
+  // 404 for both missing and not-yours, so another user's liability is never revealed.
+  if (!removed) {
+    return res.status(404).json({ error: 'Liability not found' });
   }
   res.json({ message: 'Liability deleted successfully' });
 });
@@ -1099,7 +1068,12 @@ app.post('/api/chat', authenticate, async (req, res) => {
   } catch (err) {
     return respondDbError(res, err, 'Could not load goals');
   }
-  const userLiabilities = liabilities.filter(l => l.userId === req.user.id);
+  let userLiabilities;
+  try {
+    userLiabilities = await listLiabilitiesByUser(req.user.id);
+  } catch (err) {
+    return respondDbError(res, err, 'Could not load liabilities');
+  }
 
   // Totals over ALL of this user's recorded transactions (sign decides the side).
   const totalIncome = userTransactions.filter(t => t.amount > 0).reduce((sum, t) => sum + t.amount, 0);
@@ -1220,15 +1194,17 @@ app.get('/api/ml/analyze', authenticate, async (req, res) => {
     } catch (dbErr) {
       return respondDbError(res, dbErr, 'Could not load transactions');   // not an ML-service problem
     }
-    // Total outstanding amount across the user's liabilities. FinSphere has a liabilities
-    // feature, so "no saved liabilities" is a real 0 (not unknown). If the sum overflows to a
-    // non-finite number it cannot be sent truthfully, so it is left out (null = unavailable)
-    // instead of being capped or replaced.
-    let totalLiabilities = liabilities
-      .filter(l => l.userId === req.user.id)
-      .reduce((sum, l) => sum + l.outstandingAmount, 0);
-    if (!Number.isFinite(totalLiabilities)) totalLiabilities = null;
-    else if (totalLiabilities < 1e13) totalLiabilities = Math.round(totalLiabilities * 100) / 100; // drop float noise (0.1 + 0.2)
+    // Total outstanding amount across the user's liabilities (outstanding balances only: no monthly
+    // payment, no interest), summed exactly in the database. FinSphere has a liabilities feature, so
+    // "no saved liabilities" is a real 0 (not unknown). If the exact total is too large for a finite
+    // number it cannot be sent truthfully, so it is left out (null = unavailable) instead of being
+    // capped or replaced. The ML service computes DTI = liabilities / annual income x 100.
+    let totalLiabilities;
+    try {
+      totalLiabilities = await sumOutstandingByUser(req.user.id);
+    } catch (dbErr) {
+      return respondDbError(res, dbErr, 'Could not load liabilities');   // not an ML-service problem
+    }
     const payload = {
       transactions: userTransactions,
       liabilities: totalLiabilities,
@@ -1383,7 +1359,7 @@ Guidelines:
 // missing, unreachable or fails to initialise, refuse to start rather than pretend that
 // accounts can be saved.
 try {
-  await initDatabase({ legacyUsersFile: LEGACY_USERS_FILE, legacyTransactionsFile: LEGACY_TRANSACTIONS_FILE, legacyGoalsFile: LEGACY_GOALS_FILE });
+  await initDatabase({ legacyUsersFile: LEGACY_USERS_FILE, legacyTransactionsFile: LEGACY_TRANSACTIONS_FILE, legacyGoalsFile: LEGACY_GOALS_FILE, legacyLiabilitiesFile: LEGACY_LIABILITIES_FILE });
 } catch (err) {
   console.error(`FATAL: PostgreSQL initialisation failed: ${err.message}`);
   console.error('Set DATABASE_URL to a reachable PostgreSQL database (see server/.env.example).');
