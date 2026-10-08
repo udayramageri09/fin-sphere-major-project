@@ -57,7 +57,7 @@ def generate_plan(
     {
         "plan_title": str,
         "plan_summary": str,
-        "overall_score": float,
+        "overall_score": float | None,   # None when there is no health result
         "steps": [ { step_id, title, description, priority, timeline, ... } ],
         "ml_signals": { ... },
         "generated_at": str
@@ -67,19 +67,24 @@ def generate_plan(
     ml_signals = {}
 
     # ── HEALTH SCORE SIGNALS ─────────────────────────────────────────────────
-    if health and 'composite_score' not in health.get('error', {}):
-        score = health.get('composite_score', 50)
-        grade = health.get('grade', {}).get('grade', 'C')
+    # A health result exists only if it carries a composite score; an error payload or an
+    # empty dict means there is none, so no score is reported and no health rule runs.
+    # Likewise a ratio that is absent (dti / emergency_coverage when the user's liabilities
+    # or emergency fund are unknown) stays None and its rules are skipped: missing data is
+    # never replaced by a default that would trigger a made-up alert.
+    health_score = health.get('composite_score') if health else None
+    if health_score is not None:
+        score = health_score
+        grade = health.get('grade', {}).get('grade')
         ratios = health.get('ratios', {})
         ml_signals['health_score'] = score
         ml_signals['health_grade'] = grade
 
-        savings_rate = ratios.get('savings_rate', {}).get('value', 0)
-        dti = ratios.get('dti', {}).get('value', 100)
-        emergency_months = ratios.get('emergency_coverage', {}).get('value', 0)
-        expense_ratio = ratios.get('expense_ratio', {}).get('value', 100)
+        savings_rate = ratios.get('savings_rate', {}).get('value')
+        dti = ratios.get('dti', {}).get('value')
+        emergency_months = ratios.get('emergency_coverage', {}).get('value')
 
-        if savings_rate < 10:
+        if savings_rate is not None and savings_rate < 10:
             steps.append(_make_step(
                 'HS-01', 'Critical: Savings Rate Below Safe Threshold',
                 f'Your savings rate is {savings_rate:.1f}%, well below the 20% minimum. '
@@ -88,7 +93,7 @@ def generate_plan(
                 f'Increase savings rate to ≥20% (₹{abs(savings_rate - 20):.1f}% gap to close)',
                 'HealthScorer', savings_rate, 'alert'
             ))
-        elif savings_rate < 20:
+        elif savings_rate is not None and savings_rate < 20:
             steps.append(_make_step(
                 'HS-02', 'Improve Savings Rate to 20%+ Target',
                 f'Current savings rate: {savings_rate:.1f}%. The standard benchmark is 20–30%. '
@@ -98,7 +103,7 @@ def generate_plan(
                 'HealthScorer', savings_rate, 'advisory'
             ))
 
-        if dti > 50:
+        if dti is not None and dti > 50:
             steps.append(_make_step(
                 'HS-03', 'Debt-to-Income Ratio Is Dangerously High',
                 f'DTI is {dti:.1f}% (danger zone: >50%). Lenders typically reject above 43%. '
@@ -107,7 +112,7 @@ def generate_plan(
                 'Bring DTI below 36% within 6 months',
                 'HealthScorer', dti, 'alert'
             ))
-        elif dti > 36:
+        elif dti is not None and dti > 36:
             steps.append(_make_step(
                 'HS-04', 'Reduce Debt Load — DTI Above Acceptable',
                 f'DTI is {dti:.1f}%. Acceptable range is ≤36%. Make one extra EMI payment per quarter.',
@@ -116,7 +121,7 @@ def generate_plan(
                 'HealthScorer', dti, 'advisory'
             ))
 
-        if emergency_months < 3:
+        if emergency_months is not None and emergency_months < 3:
             steps.append(_make_step(
                 'HS-05', 'Build Emergency Fund — Coverage Critical',
                 f'Emergency fund covers only {emergency_months:.1f} months. Minimum safe buffer is 3 months. '
@@ -125,7 +130,7 @@ def generate_plan(
                 '3+ months emergency coverage',
                 'HealthScorer', emergency_months, 'advisory'
             ))
-        elif emergency_months < 6:
+        elif emergency_months is not None and emergency_months < 6:
             steps.append(_make_step(
                 'HS-06', 'Strengthen Emergency Fund to 6 Months',
                 f'Emergency fund covers {emergency_months:.1f} months. Target is 6 months for full resilience. '
@@ -243,10 +248,11 @@ def generate_plan(
     else:
         plan_title = "✅ Financial Maintenance Plan — You're on Track"
 
-    score = health.get('composite_score', 50) if health else 50
+    score = health_score  # None when there is no health result: nothing is invented
+    score_text = f"Overall health score: {score:.0f}/100. " if score is not None else ""
     plan_summary = (
         f"ML models analysed your {len(ml_signals)} financial dimensions. "
-        f"Overall health score: {score:.0f}/100. "
+        f"{score_text}"
         f"{len(steps)} action items identified across forecasting, anomaly detection, "
         f"spending behaviour clustering, and ratio analysis."
     )
