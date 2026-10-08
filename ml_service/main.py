@@ -60,9 +60,11 @@ class Transaction(BaseModel):
 
 class AnalysisRequest(BaseModel):
     transactions: list[Transaction]
-    # Optional user-supplied amounts. FinSphere does not store these yet, so they default
-    # to None ("not available"); the ratios that need them are then omitted, never defaulted.
-    liabilities: Optional[float] = None
+    # Optional user-supplied amounts, None = "not available": the ratio that needs it is then omitted,
+    # never defaulted. monthly_debt_payments is the sum of the user's monthly debt payments per month
+    # (0 = a real "no payments"); it drives DTI. emergency_fund is not stored by FinSphere yet.
+    # (A client still sending the old "liabilities" field is accepted and the field is ignored.)
+    monthly_debt_payments: Optional[float] = None
     emergency_fund: Optional[float] = None
     n_forecast_months: Optional[int] = 3
 
@@ -123,7 +125,7 @@ def full_analysis(req: AnalysisRequest):
     try:
         results['health'] = run_health_scorer(
             txns,
-            liabilities=req.liabilities,
+            monthly_debt_payments=req.monthly_debt_payments,
             emergency_fund=req.emergency_fund
         )
     except Exception as e:
@@ -188,7 +190,7 @@ def health_score_only(req: AnalysisRequest):
     try:
         return run_health_scorer(
             txns,
-            liabilities=req.liabilities,
+            monthly_debt_payments=req.monthly_debt_payments,
             emergency_fund=req.emergency_fund
         )
     except Exception as e:

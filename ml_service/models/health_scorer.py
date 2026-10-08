@@ -7,16 +7,22 @@ Letter grades: A (85+), B (70–84), C (55–69), D (<55)
 Ratios:
   1. Savings Rate          = (Income - Expenses) / Income × 100         [weight: 25%]
   2. Expense Ratio         = Expenses / Income × 100 (lower is better)  [weight: 20%]
-  3. Debt-to-Income (DTI)  = Liabilities / Annual Income × 100          [weight: 20%]
+  3. Debt-to-Income (DTI)  = Monthly Debt Payments / Monthly Income × 100 [weight: 20%]
   4. Emergency Coverage    = Emergency Fund / Monthly Expenses (months)  [weight: 15%]
   5. Investment Rate       = Investment Credits / Income × 100           [weight: 10%]
   6. Cash Flow Positivity  = Positive Cash Flow Months / Total Months    [weight: 10%]
 
-Ratios 1, 2, 5 and 6 come from the transactions alone. Ratios 3 and 4 need user-supplied
-liabilities / emergency fund, which FinSphere does not store yet. When such an input is
-missing (None), or the denominator cannot be computed, that ratio is OMITTED: it is never
-replaced by a default, and the composite is renormalised over the ratios that exist.
-Missing is not zero: a real 0 counts as supplied and is scored as 0.
+Ratios 1, 2, 5 and 6 come from the transactions alone. Ratio 3 needs the user's total monthly
+debt payments (the sum of the monthly payments of their saved liabilities); ratio 4 needs an
+emergency fund, which FinSphere does not store yet. When such an input is missing (None), or
+the denominator cannot be computed, that ratio is OMITTED: it is never replaced by a default,
+and the composite is renormalised over the ratios that exist. Missing is not zero: a real 0
+counts as supplied and is scored as 0 (no debt payments -> DTI 0).
+
+DTI is the conventional debt-service ratio: what share of monthly income goes to debt
+payments. Outstanding balances (principal) and interest rates are not part of it.
+Monthly income is the transactions' total income divided by the number of calendar months
+that have any transaction (months with no transactions are not invented).
 """
 
 import math
@@ -36,7 +42,9 @@ _GRADE_THRESHOLDS = [
 _BENCHMARKS = {
     'savings_rate':      {'ideal': 30, 'acceptable': 20, 'poor': 10},
     'expense_ratio':     {'ideal': 50, 'acceptable': 70, 'poor': 85},  # lower is better
-    'dti':               {'ideal': 20, 'acceptable': 36, 'poor': 50},  # lower is better
+    # Lower is better. These are conventional MONTHLY debt-service DTI levels: the 36% guideline
+    # (back-end DTI above ~36% is a strain), lenders' ~43% ceiling, and 50% as a danger zone.
+    'dti':               {'ideal': 20, 'acceptable': 36, 'poor': 50},
     'emergency_months':  {'ideal': 6,  'acceptable': 3,  'poor': 1},
     'investment_rate':   {'ideal': 15, 'acceptable': 10, 'poor': 5},
     'positive_cf_rate':  {'ideal': 80, 'acceptable': 60, 'poor': 40},
@@ -106,14 +114,15 @@ def _is_supplied(value) -> bool:
 
 def run_health_scorer(
     transactions: list[dict],
-    liabilities: Optional[float] = None,
+    monthly_debt_payments: Optional[float] = None,
     emergency_fund: Optional[float] = None
 ) -> dict:
     """
     Main entry point for financial health scoring.
 
-    liabilities / emergency_fund are optional user-supplied amounts. None means "not
-    available" (the matching ratio is omitted); 0 is a real value.
+    monthly_debt_payments / emergency_fund are optional user-supplied amounts. None means "not
+    available" (the matching ratio is omitted); 0 is a real value. monthly_debt_payments is the
+    total of the user's monthly debt payments in rupees per month.
 
     Returns:
     {
@@ -122,7 +131,7 @@ def run_health_scorer(
         "ratios": {
             "savings_rate": { value, score, benchmark, status },
             "expense_ratio": { ... },
-            "dti": { ... },                  # omitted when liabilities are unavailable
+            "dti": { ... },                  # omitted when debt payments or monthly income are unavailable
             "emergency_coverage": { ... },   # omitted when the emergency fund is unavailable
             "investment_rate": { ... },
             "cash_flow_positivity": { ... }
@@ -163,10 +172,12 @@ def run_health_scorer(
 
     # Ratios that need user-supplied data. Missing is not zero: without the input, or
     # without a usable denominator, the ratio is not produced at all.
-    annual_income = total_income / max(n_months, 1) * 12
+    # Monthly income: real income transactions averaged over the months that have transactions.
+    # No months with a valid date -> no monthly income -> no DTI (never income / 1 as a stand-in).
+    monthly_income = (total_income / n_months) if n_months > 0 else 0.0
     dti = None
-    if _is_supplied(liabilities) and annual_income > 0:
-        dti = liabilities / annual_income * 100
+    if _is_supplied(monthly_debt_payments) and monthly_income > 0:
+        dti = monthly_debt_payments / monthly_income * 100
     emergency_months = None
     if _is_supplied(emergency_fund) and avg_monthly_expenses > 0:
         emergency_months = emergency_fund / avg_monthly_expenses
@@ -222,7 +233,7 @@ def run_health_scorer(
             'unit': '%',
             'benchmark': f"Ideal: ≤{_BENCHMARKS['dti']['ideal']}%",
             'status': _status(s_dti),
-            'description': 'Debt-to-Income ratio (annual)'
+            'description': 'Monthly debt payments as a share of monthly income'
         }
     if emergency_months is not None:
         ratios['emergency_coverage'] = {
@@ -265,7 +276,7 @@ def run_health_scorer(
     if s_expense > 0 and s_expense < 60:
         recommendations.append(f"Expense ratio is {expense_ratio:.1f}%. Trim discretionary spending to reach 70% ratio")
     if s_dti is not None and s_dti < 60:
-        recommendations.append(f"DTI ratio is {dti:.1f}% — above safe threshold. Prioritise debt prepayment")
+        recommendations.append(f"Monthly debt payments take {dti:.1f}% of your monthly income — above the safe threshold. Prioritise paying down the highest-interest debt")
     if s_emergency is not None and s_emergency < 60:
         months_needed = 6 - emergency_months
         recommendations.append(f"Emergency fund covers only {emergency_months:.1f} months. Build ₹{months_needed * avg_monthly_expenses:,.0f} more")
@@ -291,7 +302,9 @@ def run_health_scorer(
             'total_income_analyzed': round(total_income, 2),
             'total_expenses_analyzed': round(total_expenses, 2),
             'months_analyzed': n_months,
-            'liabilities_used': liabilities if dti is not None else None,
+            # Inputs the DTI was actually computed from (None when DTI is unavailable).
+            'monthly_debt_payments_used': monthly_debt_payments if dti is not None else None,
+            'monthly_income_used': round(monthly_income, 2) if dti is not None else None,
             'emergency_fund_used': emergency_fund if emergency_months is not None else None
         }
     }

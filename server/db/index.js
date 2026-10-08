@@ -399,11 +399,11 @@ export async function listLiabilitiesByUser(userId) {
   return rows.map(toLiability);
 }
 
-// Total outstanding amount of one user's liabilities (nothing else contributes), summed exactly in SQL.
-// No rows -> 0, a real zero. Returns null if the exact total is too large for a finite number, so the
-// caller can report "unavailable" instead of a capped or fake value.
-export async function sumOutstandingByUser(userId) {
-  const { rows } = await pool.query('SELECT COALESCE(SUM(outstanding_amount), 0)::text AS total FROM liabilities WHERE user_id = $1', [userId]);
+// Total of one user's monthly payments (nothing else contributes: not the outstanding balances, not the
+// rates), summed exactly in SQL. No rows -> 0, a real zero. Returns null if the exact total is too large for
+// a finite number, so the caller can report "unavailable" instead of a capped or fake value.
+export async function sumMonthlyPaymentsByUser(userId) {
+  const { rows } = await pool.query('SELECT COALESCE(SUM(monthly_payment), 0)::text AS total FROM liabilities WHERE user_id = $1', [userId]);
   const total = Number(rows[0].total);
   return Number.isFinite(total) ? total : null;
 }
