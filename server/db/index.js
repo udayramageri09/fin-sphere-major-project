@@ -630,6 +630,9 @@ async function importLegacyLiabilities(client, file) {
 // time-zone conversion out of it.
 const BUDGET_COLUMNS = "id, user_id, to_char(month, 'YYYY-MM') AS month, label, category, amount, created_at, updated_at";
 
+// The same columns, qualified with the table alias for the joined query.
+const BUDGET_COLUMNS_B = "b.id, b.user_id, to_char(b.month, 'YYYY-MM') AS month, b.label, b.category, b.amount, b.created_at, b.updated_at";
+
 function toBudget(row) {
   return {
     id: row.id,
@@ -643,12 +646,43 @@ function toBudget(row) {
   };
 }
 
-// The owner's budgets for one month ('YYYY-MM'), ordered by category key (unique per month, so fully deterministic).
+// The owner's budgets for one month ('YYYY-MM'), each with its real spending, in ONE query:
+//   budgets LEFT JOIN (the owner's expense transactions of that calendar month, summed per canonical category).
+// - Expense rows are identified by type = 'expense' (the table also guarantees their amount is negative), and the
+//   total is negated so actualSpent is a positive spending figure. Income never counts.
+// - A transaction belongs to a budget when lower(btrim(transaction.category)) = budgets.category - the same rule the
+//   budgets use for their own key, with no aliases (Food = FOOD = " food ", but not Foods and not Dining).
+// - The month window is [first day, first day of the next month) on the DATE column: no time zone is involved.
+// - Everything is exact NUMERIC arithmetic; status compares the UNROUNDED values; percentUsed is only rounded for display.
+// Ordered by category key (unique per user / month), so the order is fully deterministic.
 export async function listBudgetsByUserAndMonth(userId, month) {
   const { rows } = await pool.query(
-    `SELECT ${BUDGET_COLUMNS} FROM budgets WHERE user_id = $1 AND month = ($2 || '-01')::date ORDER BY category`,
+    `WITH m AS (SELECT ($2 || '-01')::date AS first_day),
+          spent AS (
+            SELECT lower(btrim(t.category)) AS category, -SUM(t.amount) AS total
+            FROM transactions t, m
+            WHERE t.user_id = $1 AND t.type = 'expense'
+              AND t.date >= m.first_day AND t.date < (m.first_day + INTERVAL '1 month')
+            GROUP BY lower(btrim(t.category)))
+     SELECT ${BUDGET_COLUMNS_B},
+            COALESCE(s.total, 0)::text AS actual_spent,
+            (b.amount - COALESCE(s.total, 0))::text AS remaining,
+            ROUND(COALESCE(s.total, 0) * 100 / b.amount, 2)::text AS percent_used,
+            CASE WHEN COALESCE(s.total, 0) < b.amount THEN 'under'
+                 WHEN COALESCE(s.total, 0) = b.amount THEN 'at'
+                 ELSE 'over' END AS status
+     FROM budgets b CROSS JOIN m
+     LEFT JOIN spent s ON s.category = b.category
+     WHERE b.user_id = $1 AND b.month = m.first_day
+     ORDER BY b.category`,
     [userId, month]);
-  return rows.map(toBudget);
+  return rows.map((row) => ({
+    ...toBudget(row),
+    actualSpent: Number(row.actual_spent),
+    remaining: Number(row.remaining),
+    percentUsed: Number(row.percent_used),
+    status: row.status,
+  }));
 }
 
 // Create-or-update the budget for (user, month, canonical category) in one statement. created_at and id are kept

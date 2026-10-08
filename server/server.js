@@ -802,7 +802,8 @@ function normalizeBudgetInput(raw) {
   return { ok: true, value: { month: raw.month, label: category, amount: roundUncappedAmount(amount) } };
 }
 
-// GET /api/budgets?month=YYYY-MM - the caller's budgets for one month
+// GET /api/budgets?month=YYYY-MM - the caller's budgets for one month, each with actualSpent, remaining,
+// percentUsed and status computed from the caller's real expense transactions of that month
 app.get('/api/budgets', authenticate, async (req, res) => {
   if (!validMonth(req.query.month)) {
     return res.status(400).json({ error: 'Month must be in YYYY-MM format' });
@@ -1262,6 +1263,23 @@ function describeGoalsForAssistant(userGoals) {
   return `\n${lines.join('\n')}`;
 }
 
+// The caller's budgets for one month as assistant context: only configured limits and the real spending figures
+// computed from their transactions. Names are user text, so they are quoted. Capped like the other lists.
+const MAX_BUDGETS_IN_PROMPT = 20;
+function describeBudgetsForAssistant(userBudgets) {
+  if (userBudgets.length === 0) return ' none set';
+  const lines = userBudgets.slice(0, MAX_BUDGETS_IN_PROMPT).map((b) => {
+    const state = b.status === 'over'
+      ? `over budget by ${formatRupees(-b.remaining)}`
+      : b.status === 'at' ? 'exactly at budget' : `under budget, ${formatRupees(b.remaining)} left`;
+    return `  - ${JSON.stringify(b.category)}: ${formatRupees(b.actualSpent)} spent of ${formatRupees(b.amount)} (${b.percentUsed}% used), ${state}`;
+  });
+  if (userBudgets.length > MAX_BUDGETS_IN_PROMPT) {
+    lines.push(`  - (${userBudgets.length - MAX_BUDGETS_IN_PROMPT} more budgets not shown)`);
+  }
+  return `\n${lines.join('\n')}`;
+}
+
 // The caller's own saved emergency fund as assistant context: the amount they entered (and the optional
 // target they chose), never a coverage figure - months of coverage only come from the ML analysis.
 function describeEmergencyFundForAssistant(fund) {
@@ -1319,6 +1337,14 @@ app.post('/api/chat', authenticate, async (req, res) => {
   } catch (err) {
     return respondDbError(res, err, 'Could not load emergency fund');
   }
+  // The calendar month the assistant talks about is the server's current UTC month, and it is named in the prompt.
+  const budgetMonth = new Date().toISOString().slice(0, 7);
+  let userBudgets;
+  try {
+    userBudgets = await listBudgetsByUserAndMonth(req.user.id, budgetMonth);
+  } catch (err) {
+    return respondDbError(res, err, 'Could not load budgets');
+  }
   let userLiabilities;
   try {
     userLiabilities = await listLiabilitiesByUser(req.user.id);
@@ -1351,6 +1377,7 @@ Here is the financial data that actually exists for this user:
 - Savings goals (saved by the user):${describeGoalsForAssistant(userGoals)}
 - Liabilities (saved by the user):${describeLiabilitiesForAssistant(userLiabilities)}
 - Emergency fund (saved by the user): ${describeEmergencyFundForAssistant(emergencyFund)}
+- Monthly budgets for ${budgetMonth} (limits the user set, with their real expense spending that month):${describeBudgetsForAssistant(userBudgets)}
 - Live Transactions (Latest first): ${JSON.stringify(currentContext.recentTransactions)}
 
 NOT available for this user (no such data has been entered or connected): credit score, portfolio holdings or allocation, and net worth (FinSphere has no asset data).
@@ -1359,7 +1386,7 @@ Guidelines:
 1. Base your replies only on the data above. If asked about something listed as not available, say it is not available in FinSphere yet. Never estimate, guess or invent figures for it, and never derive a credit score from transactions.
 2. Be brief, professional, and friendly. Use relevant emojis.
 3. Suggest concrete advice if they are spending too much or their net cash flow is negative.
-4. Let the user know they can update transactions by manual entry or parsing bank statements, manage savings goals and their emergency fund on the Goals page, and record liabilities on the Liabilities page.
+4. Let the user know they can update transactions by manual entry or parsing bank statements, manage savings goals, their emergency fund and monthly budgets on the Goals page, and record liabilities on the Liabilities page.
 
 Keep responses under 3-4 sentences if possible, unless a detailed breakdown is requested.`
   };
@@ -1407,6 +1434,10 @@ Keep responses under 3-4 sentences if possible, unless a detailed breakdown is r
     reply = userLiabilities.length === 0
       ? `You don't have any saved liabilities yet. You can add them from the Liabilities page.`
       : `Your saved liabilities:${describeLiabilitiesForAssistant(userLiabilities)}`;
+  } else if (userMessage.includes('budget')) {
+    reply = userBudgets.length === 0
+      ? `You haven't set any budgets for ${budgetMonth}. You can add them on the Goals page.`
+      : `Your budgets for ${budgetMonth}:${describeBudgetsForAssistant(userBudgets)}`;
   } else if (userMessage.includes('emergency')) {
     reply = emergencyFund
       ? `Your saved emergency fund: ${describeEmergencyFundForAssistant(emergencyFund)}.`
