@@ -1,5 +1,5 @@
 // PostgreSQL access for FinSphere (pg + parameterized SQL, no ORM).
-// Scope today: the users table only.
+// Scope today: users and transactions (goals and liabilities are still JSON files).
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
@@ -9,6 +9,7 @@ import pg from 'pg';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCHEMA_FILE = path.join(__dirname, 'schema.sql');
 const LEGACY_USERS_MIGRATION = 'import_users_json_v1';
+const LEGACY_TRANSACTIONS_MIGRATION = 'import_transactions_json_v1';
 // Arbitrary constant: serializes schema setup/migration across concurrently starting instances.
 const INIT_LOCK_ID = 703939;
 
@@ -37,7 +38,7 @@ function toUser(row) {
 
 // Creates the pool, applies the schema and runs the one-time legacy users import.
 // Throws (never swallows) so the caller can refuse to start.
-export async function initDatabase({ env = process.env, legacyUsersFile } = {}) {
+export async function initDatabase({ env = process.env, legacyUsersFile, legacyTransactionsFile } = {}) {
   if (!env.DATABASE_URL) throw new Error('DATABASE_URL is not set');
   pool = new pg.Pool({ connectionString: env.DATABASE_URL, ssl: sslConfig(env), max: 10, connectionTimeoutMillis: 10_000 });
   // An error on an idle client must not crash the process; the next query reports a real failure.
@@ -49,6 +50,8 @@ export async function initDatabase({ env = process.env, legacyUsersFile } = {}) 
     try {
       await client.query(fs.readFileSync(SCHEMA_FILE, 'utf8'));
       if (legacyUsersFile) await importLegacyUsers(client, legacyUsersFile);
+      // After users: transactions reference them.
+      if (legacyTransactionsFile) await importLegacyTransactions(client, legacyTransactionsFile);
     } finally {
       await client.query('SELECT pg_advisory_unlock($1)', [INIT_LOCK_ID]);
     }
@@ -126,6 +129,131 @@ export async function createUser(email, passwordHash) {
 export async function findUserByEmail(email) {
   const { rows } = await pool.query('SELECT id, email, password_hash FROM users WHERE email = $1', [email]);
   return rows.length ? toUser(rows[0]) : null;
+}
+
+// ── Transactions ───────────────────────────────────────────────────────────────
+// Rows come back in the shape the API has always returned: amount as a Number, date as
+// 'YYYY-MM-DD' text (selected with to_char so no time-zone conversion can shift it), and
+// the id as the stored text (historical numeric ids therefore read back as numeric strings).
+const TX_COLUMNS = `id, user_id, title, amount, to_char(date, 'YYYY-MM-DD') AS date, type, category`;
+
+function toTransaction(row) {
+  return {
+    id: row.id,
+    userId: Number(row.user_id),
+    title: row.title,
+    amount: Number(row.amount),   // NUMERIC(14,2): at most 14 digits, so the double is exact to the paisa
+    date: row.date,
+    type: row.type,
+    category: row.category,
+  };
+}
+
+// Newest first, like the old in-memory list (new rows were unshifted onto the front).
+export async function listTransactionsByUser(userId) {
+  const { rows } = await pool.query(`SELECT ${TX_COLUMNS} FROM transactions WHERE user_id = $1 ORDER BY seq DESC`, [userId]);
+  return rows.map(toTransaction);
+}
+
+// Inserts `rows` (already validated; shape {id, userId, title, amount, date, type, category}) in one
+// statement, so either all land or none do. The first element gets the highest seq, i.e. it is listed
+// first, exactly as `[...rows, ...existing]` ordered the old array.
+async function insertTransactions(db, rows) {
+  await db.query(
+    `INSERT INTO transactions (id, user_id, title, amount, type, date, category)
+     SELECT id, user_id, title, amount, type, date::date, category
+     FROM unnest($1::text[], $2::bigint[], $3::text[], $4::numeric[], $5::text[], $6::text[], $7::text[])
+          WITH ORDINALITY AS t(id, user_id, title, amount, type, date, category, ord)
+     ORDER BY ord DESC`,
+    [
+      rows.map((r) => String(r.id)),
+      rows.map((r) => r.userId),
+      rows.map((r) => r.title),
+      rows.map((r) => r.amount.toFixed(2)),
+      rows.map((r) => r.type),
+      rows.map((r) => r.date),
+      rows.map((r) => r.category),
+    ]);
+}
+
+export const createTransaction = (tx) => insertTransactions(pool, [tx]);
+
+export async function createTransactionsBatch(rows) {
+  if (rows.length > 0) await insertTransactions(pool, rows);
+}
+
+// Removes exactly one row: the owner's first match in list order. The owner is part of the
+// lookup, so another user's row with the same id can never be touched. Returns true if a row was removed.
+export async function deleteTransactionByUserAndId(userId, id) {
+  const { rowCount } = await pool.query(
+    `DELETE FROM transactions
+     WHERE seq = (SELECT seq FROM transactions WHERE user_id = $1 AND id = $2 ORDER BY seq DESC LIMIT 1)
+       AND user_id = $1`,
+    [userId, String(id)]);
+  return rowCount > 0;
+}
+
+// Decides whether one server_db.json record can become a database row WITHOUT being changed.
+// Historical data is never rewritten to make it fit: id, userId, title, signed amount, type, date and
+// category are stored exactly as they were. A record that cannot be stored as-is (or that breaks the
+// table's invariants) is skipped and counted, never repaired. The one representation step is an
+// id that was a JSON number, which is stored as its decimal text (7 -> '7'); that is how every id is stored.
+function legacyTransactionRow(t, knownUserIds) {
+  if (t === null || typeof t !== 'object' || Array.isArray(t)) return { reason: 'malformed' };
+  if (t.userId === undefined || t.userId === null) return { reason: 'no owner' };
+  if (!Number.isSafeInteger(t.userId) || !knownUserIds.has(t.userId)) return { reason: 'unknown owner' };
+  const hasNul = (v) => v.includes('\u0000');   // PostgreSQL text cannot hold NUL
+  const id = typeof t.id === 'number' ? (Number.isFinite(t.id) ? String(t.id) : '') : t.id;
+  if (typeof id !== 'string' || id.length < 1 || id.length > 64 || hasNul(id)) return { reason: 'malformed' };
+  // Title: must already be trimmed and 1-120 characters (the table's constraint); not trimmed here.
+  if (typeof t.title !== 'string' || t.title.length < 1 || t.title.length > 120 || t.title !== t.title.trim() || hasNul(t.title)) return { reason: 'malformed' };
+  // Amount: already a number with at most 2 decimals, non-zero, within NUMERIC(14,2); not rounded here.
+  const amount = t.amount;
+  if (typeof amount !== 'number' || !Number.isFinite(amount) || Math.abs(amount) < 0.01 || Math.abs(amount) >= 1e12 || Number(amount.toFixed(2)) !== amount) return { reason: 'malformed' };
+  // Type: exactly 'income' or 'expense' (not case-folded), and the sign must already agree with it.
+  if (!((t.type === 'income' && amount > 0) || (t.type === 'expense' && amount < 0))) return { reason: 'malformed' };
+  if (typeof t.date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(t.date)) return { reason: 'malformed' };
+  const parsed = new Date(`${t.date}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== t.date) return { reason: 'malformed' };
+  // Category: kept verbatim; a missing or blank category is not replaced by 'General' (that is a rule for new input).
+  if (typeof t.category !== 'string' || t.category.trim() === '' || hasNul(t.category)) return { reason: 'malformed' };
+  return { row: { id, userId: t.userId, title: t.title, amount, date: t.date, type: t.type, category: t.category } };
+}
+
+// One-time import of server_db.json. Same rules as the users import: all-or-nothing, recorded in
+// schema_migrations so it never runs twice, an unreadable file refuses startup, and a record that
+// cannot be stored exactly as it is (see legacyTransactionRow) is skipped with a logged count (never its contents). Ids and owners are kept
+// exactly; the file's order is kept (its first element is the newest and is listed first).
+// Records with no owner were never served by any endpoint, so skipping them loses nothing visible.
+async function importLegacyTransactions(client, file) {
+  const done = await client.query('SELECT 1 FROM schema_migrations WHERE name = $1', [LEGACY_TRANSACTIONS_MIGRATION]);
+  if (done.rowCount > 0) return;
+
+  let legacy = [];
+  if (fs.existsSync(file)) {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));   // corrupt file: throw, do not mark as migrated
+    if (!Array.isArray(parsed)) throw new Error('legacy transactions file is not an array');
+    legacy = parsed;
+  }
+
+  await client.query('BEGIN');
+  try {
+    const knownUserIds = new Set((await client.query('SELECT id FROM users')).rows.map((r) => Number(r.id)));
+    const rows = [];
+    const skipped = { 'no owner': 0, 'unknown owner': 0, malformed: 0 };
+    for (const t of legacy) {
+      const result = legacyTransactionRow(t, knownUserIds);
+      if (result.row) rows.push(result.row); else skipped[result.reason]++;
+    }
+    if (rows.length > 0) await insertTransactions(client, rows);
+    await client.query('INSERT INTO schema_migrations (name) VALUES ($1)', [LEGACY_TRANSACTIONS_MIGRATION]);
+    await client.query('COMMIT');
+    const skippedTotal = skipped['no owner'] + skipped['unknown owner'] + skipped.malformed;
+    console.log(`Legacy transactions import: ${rows.length} imported, ${skippedTotal} skipped (${skipped['no owner']} without an owner, ${skipped['unknown owner']} with an unknown owner, ${skipped.malformed} malformed).`);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  }
 }
 
 export async function closeDatabase() {

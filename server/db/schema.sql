@@ -22,3 +22,30 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
   name       TEXT PRIMARY KEY,
   applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Transactions. Replaces server_db.json (one-time import at startup, see db/index.js).
+CREATE TABLE IF NOT EXISTS transactions (
+  -- Internal insertion order and primary key. The API lists newest first, and a bulk import
+  -- keeps its own file order, so ordering is by this column rather than by date.
+  seq      BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  -- The public id, stored as text: new rows are UUIDs, historical rows are numeric-looking
+  -- (e.g. 1789492582865) and are kept exactly as they were. It is deliberately NOT unique:
+  -- legacy imports produced repeated ids, and deleting by id removes exactly one owned row.
+  id       TEXT NOT NULL CHECK (length(id) BETWEEN 1 AND 64),
+  user_id  BIGINT NOT NULL REFERENCES users(id),
+  title    TEXT NOT NULL CHECK (title = btrim(title) AND length(title) BETWEEN 1 AND 120),
+  -- Exact money: NUMERIC, never floating point. Signed (income > 0, expense < 0).
+  amount   NUMERIC(14, 2) NOT NULL,
+  type     TEXT NOT NULL CHECK (type IN ('income', 'expense')),
+  date     DATE NOT NULL,
+  category TEXT NOT NULL DEFAULT 'General' CHECK (length(btrim(category)) > 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- The sign always follows the type, and zero is not a transaction.
+  CONSTRAINT transactions_sign_matches_type CHECK (
+    (type = 'income' AND amount > 0) OR (type = 'expense' AND amount < 0)
+  )
+);
+
+-- Owner lookups (list, delete by id) and newest-first listing.
+CREATE INDEX IF NOT EXISTS transactions_user_seq_idx ON transactions (user_id, seq DESC);
+CREATE INDEX IF NOT EXISTS transactions_user_id_idx ON transactions (user_id, id);
