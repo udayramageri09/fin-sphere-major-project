@@ -216,4 +216,11 @@ def generate_plan_endpoint(req: PlanRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, log_level="info")
+    # This service has no authentication: Express is the trust boundary. It binds to the loopback interface by
+    # default so a developer machine does not expose it to the network. To reach it from another host or container
+    # set ML_SERVICE_HOST (e.g. 0.0.0.0) AND restrict access with a private network or firewall. Auto-reload is a
+    # development convenience and is off unless ML_SERVICE_RELOAD=true.
+    host = os.environ.get("ML_SERVICE_HOST", "127.0.0.1")
+    port = int(os.environ.get("ML_SERVICE_PORT", "8000"))
+    reload = os.environ.get("ML_SERVICE_RELOAD", "false").lower() == "true"
+    uvicorn.run("main:app", host=host, port=port, reload=reload, log_level="info")

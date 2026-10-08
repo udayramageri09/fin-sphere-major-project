@@ -27,6 +27,7 @@ No model files are stored; every model is fitted on the user's own data at reque
 * [ML architecture](docs/ML_ARCHITECTURE.md): components, data flow, trust boundary, the assistant's role
 * [ML evaluation](docs/ML_EVALUATION.md): measured results and known limitations
 * [Financial logic](docs/FINANCIAL_LOGIC.md): how income, spending, refunds, transfers, DTI and budgets are computed
+* [Security and deployment](docs/SECURITY_DEPLOYMENT.md): required environment, CORS, cookies, limits, and why the ML service must stay private
 * [Evaluation suite](ml_service/evaluation/README.md) and its [generated report](ml_service/evaluation/results/EVALUATION_REPORT.md)
 
 ## Running

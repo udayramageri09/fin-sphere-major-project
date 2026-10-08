@@ -17,7 +17,6 @@ Notes found during the audit:
 
 - **forecaster**: the month index is the position among months that HAVE transactions, so a missing calendar month is collapsed (see the missing_months benchmark)
 - **forecaster**: R2 is in-sample, not a held-out accuracy
-- **forecaster**: statsmodels is listed in requirements.txt but is not imported anywhere
 - **anomaly_detector**: contamination = min(0.15, max(1/n, 0.05)): it ALWAYS flags a fixed share (>= 5%, >= 1 row) of the rows, even in a clean dataset
 - **anomaly_detector**: no fraud labels exist, so detection quality can only be measured on synthetic injected anomalies
 - **clustering**: k is not selected from the data: it is always 3

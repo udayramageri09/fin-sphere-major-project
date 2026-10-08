@@ -10,6 +10,7 @@ import jwt from 'jsonwebtoken';
 import cookieParser from 'cookie-parser';
 import bcrypt from 'bcrypt';
 import rateLimit from 'express-rate-limit';
+import helmet from 'helmet';
 import { randomUUID } from 'node:crypto';
 import {
   initDatabase, closeDatabase, createUser, findUserByEmail, normalizeEmail, DuplicateEmailError,
@@ -39,6 +40,10 @@ if (JWT_SECRET.length < 32) {
 
 const isProd = process.env.NODE_ENV === 'production';
 
+// Tokens are signed and accepted with HS256 only, so a token can never choose its own algorithm.
+const JWT_ALGORITHM = 'HS256';
+const JWT_VERIFY_OPTIONS = { algorithms: [JWT_ALGORITHM] };
+
 // ── Authentication Middleware ──────────────────────────────────────────────────
 // Reads the JWT from the httpOnly cookie set at login, verifies it, and attaches
 // the decoded identity to req.user.  Returns 401 for missing / invalid / expired tokens.
@@ -46,7 +51,7 @@ function authenticate(req, res, next) {
   const token = req.cookies.token;
   if (!token) return res.status(401).json({ error: 'Authentication required' });
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, JWT_SECRET, JWT_VERIFY_OPTIONS);
     req.user = { id: decoded.id, email: decoded.email };
     next();
   } catch {
@@ -55,17 +60,56 @@ function authenticate(req, res, next) {
 }
 // ───────────────────────────────────────────────────────────────────────────────
 
-app.use(cors({ origin: 'http://localhost:5173', credentials: true }));
-app.use(express.json());
+// ── Deployment configuration (environment-driven; see docs/SECURITY_DEPLOYMENT.md) ──────────────────────────────
+// CORS_ORIGINS: comma-separated list of the exact frontend origins allowed to call this API with cookies.
+//   Unset in development -> only the Vite dev server (http://localhost:5173).
+//   Unset in production  -> NO cross-origin browser access (same-origin and non-browser clients still work).
+//   A wildcard is refused: it can never be combined with credentials.
+const configuredOrigins = (process.env.CORS_ORIGINS ?? '').split(',').map((o) => o.trim().replace(/\/+$/, '')).filter(Boolean);
+if (configuredOrigins.includes('*')) {
+  console.error('FATAL: CORS_ORIGINS must list explicit origins; "*" is not allowed with credentials.');
+  process.exit(1);
+}
+const allowedOrigins = configuredOrigins.length > 0 ? configuredOrigins : (isProd ? [] : ['http://localhost:5173']);
+if (isProd && allowedOrigins.length === 0) {
+  console.warn('WARNING: CORS_ORIGINS is not set; browsers on other origins cannot call this API. Set it to your frontend origin.');
+}
+
+// TRUST_PROXY: how many reverse-proxy hops sit in front of this server (e.g. 1 on Render / behind one load
+// balancer). Without it req.ip is the proxy's address, so every client shares one rate-limit bucket. A bare
+// "true" is refused because it would let any client choose its own IP through X-Forwarded-For.
+if (process.env.TRUST_PROXY !== undefined && process.env.TRUST_PROXY !== '') {
+  const hops = process.env.TRUST_PROXY.trim();
+  if (hops.toLowerCase() === 'true') {
+    console.error('FATAL: TRUST_PROXY must be a hop count (e.g. 1) or a subnet list, not "true".');
+    process.exit(1);
+  }
+  app.set('trust proxy', /^\d+$/.test(hops) ? Number(hops) : hops);
+}
+
+app.use(helmet());   // security headers; also removes X-Powered-By
+app.use(cors({ origin: allowedOrigins, credentials: true }));
+// Largest JSON body accepted (pasted statement text, chat and plan-chat). Stated explicitly rather than relying on
+// the library default; larger requests are answered 413.
+app.use(express.json({ limit: '100kb' }));
 app.use(cookieParser());
 
 // Set up multer for file uploads using memory storage for zero-footprint.
 // Limit: 5 MB — generous upper bound for any real-world bank statement
 // (typical PDF/Excel statements are 50–500 KB). Blocks pathological uploads
 // before they consume server memory or reach the parsing logic.
+const STATEMENT_EXTENSIONS = ['.csv', '.txt', '.xls', '.xlsx'];
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 } // 5 MB
+  limits: { fileSize: 5 * 1024 * 1024, files: 1, fields: 5, parts: 6 }, // 5 MB, one file, no more than a few text fields
+  // Only the formats the UI offers; anything else is refused before it is buffered or parsed.
+  fileFilter: (req, file, cb) => {
+    const name = (file.originalname ?? '').toLowerCase();
+    if (STATEMENT_EXTENSIONS.some((ext) => name.endsWith(ext))) return cb(null, true);
+    const err = new Error('Unsupported file type');
+    err.code = 'UNSUPPORTED_FILE_TYPE';
+    cb(err);
+  }
 });
 
 // Transactions live in PostgreSQL (see ./db). server_db.json is only read once, at startup,
@@ -531,6 +575,33 @@ const authLimiter = rateLimit({
   legacyHeaders: false,   // Disable deprecated X-RateLimit-* headers
   message: { error: 'Too many attempts. Please try again in 15 minutes.' }
 });
+
+// Per-user limits for the endpoints that are expensive (an LLM call, a file parse, the ML service). They run after
+// authenticate, so the bucket is the signed-in user, not an IP address; ordinary reads are not limited.
+const perUserLimiter = (max, what) => rateLimit({
+  windowMs: 60 * 1000,
+  max,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `user:${req.user.id}`,
+  message: { error: `Too many ${what} requests. Please wait a minute and try again.` }
+});
+const chatLimiter = perUserLimiter(30, 'assistant');
+// Statement uploads: 10 per minute per user. FINSPHERE_TEST_UPLOAD_LIMIT exists ONLY so automated parser tests,
+// which upload dozens of fixtures in seconds, can run below the limit. It is read from the process environment at
+// startup (never from a request) and is ignored whenever NODE_ENV is "production".
+const DEFAULT_UPLOAD_LIMIT = 10;
+let uploadLimit = DEFAULT_UPLOAD_LIMIT;
+if (process.env.FINSPHERE_TEST_UPLOAD_LIMIT) {
+  if (isProd) {
+    console.warn('WARNING: FINSPHERE_TEST_UPLOAD_LIMIT is ignored in production.');
+  } else if (/^[1-9]\d{0,6}$/.test(process.env.FINSPHERE_TEST_UPLOAD_LIMIT)) {
+    uploadLimit = Number(process.env.FINSPHERE_TEST_UPLOAD_LIMIT);
+    console.warn(`WARNING: statement upload rate limit raised to ${uploadLimit}/min by FINSPHERE_TEST_UPLOAD_LIMIT (test use only).`);
+  }
+}
+const parseLimiter = perUserLimiter(uploadLimit, 'statement upload');
+const mlLimiter = perUserLimiter(10, 'analysis');
 // ───────────────────────────────────────────────────────────────────────────────
 
 // --- AUTHENTICATION ---
@@ -580,7 +651,7 @@ app.post('/api/auth/login', authLimiter, async (req, res) => {
     if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
-    const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '1h' });
+    const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { algorithm: JWT_ALGORITHM, expiresIn: '1h' });
     res.cookie('token', token, { httpOnly: true, secure: isProd, sameSite: isProd ? 'strict' : 'lax', maxAge: 60 * 60 * 1000 });
     res.json({ message: 'Logged in successfully', user: { id: user.id, email: user.email } });
   } catch (err) {
@@ -598,7 +669,7 @@ app.get('/api/auth/verify', (req, res) => {
   const token = req.cookies.token;
   if (!token) return res.status(401).json({ error: 'Not authenticated' });
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, JWT_SECRET, JWT_VERIFY_OPTIONS);
     res.json({ user: decoded });
   } catch (err) {
     res.status(401).json({ error: 'Invalid token' });
@@ -972,7 +1043,7 @@ app.get('/api/liabilities/:id/repayments', authenticate, async (req, res) => {
 // upload.single() is called programmatically (not as inline middleware) so that
 // Multer's LIMIT_FILE_SIZE error can be caught here and returned as a clean
 // 413 JSON response before any parsing logic executes.
-app.post('/api/transactions/parse-statement', authenticate, (req, res, next) => {
+app.post('/api/transactions/parse-statement', authenticate, parseLimiter, (req, res, next) => {
   upload.single('statementFile')(req, res, (err) => {
     if (err) {
       if (err.code === 'LIMIT_FILE_SIZE') {
@@ -981,6 +1052,9 @@ app.post('/api/transactions/parse-statement', authenticate, (req, res, next) => 
         });
       }
       // Unexpected multer error — pass to Express error handler
+      if (err.code === 'UNSUPPORTED_FILE_TYPE') {
+        return res.status(400).json({ error: 'Unsupported file type. Upload a .csv, .txt, .xls or .xlsx statement.' });
+      }
       return next(err);
     }
     next();
@@ -1336,7 +1410,7 @@ function describeLiabilitiesForAssistant(userLiabilities) {
 // transactions (and totals derived from them), their own saved goals and their own saved
 // liabilities. Credit score and portfolio data do not exist in FinSphere, so they are declared
 // unavailable instead of being filled in.
-app.post('/api/chat', authenticate, async (req, res) => {
+app.post('/api/chat', authenticate, chatLimiter, async (req, res) => {
   const { messages } = req.body;
   if (!messages || !Array.isArray(messages)) {
     return res.status(400).json({ error: 'Messages array is required' });
@@ -1501,7 +1575,7 @@ Keep responses under 3-4 sentences if possible, unless a detailed breakdown is r
 });
 
 // 6. GET /api/ml/analyze — proxies full ML analysis to Python microservice
-app.get('/api/ml/analyze', authenticate, async (req, res) => {
+app.get('/api/ml/analyze', authenticate, mlLimiter, async (req, res) => {
   try {
     // Scope ML analysis to the authenticated user's own data only (ownership always comes
     // from req.user.id, never from the client). Besides transactions, the only other real
@@ -1568,7 +1642,7 @@ app.get('/api/ml/analyze', authenticate, async (req, res) => {
 // Authentication is enforced. mlContext is client-provided state derived from /api/ml/analyze
 // (which is now scoped to the authenticated user). Full server-side re-validation of mlContext
 // is a follow-up task (tracked separately; a redesign of the plan-chat architecture is required).
-app.post('/api/plan-chat', authenticate, async (req, res) => {
+app.post('/api/plan-chat', authenticate, chatLimiter, async (req, res) => {
   const { messages, mlContext } = req.body;
   if (!messages || !Array.isArray(messages)) {
     return res.status(400).json({ error: 'Messages array is required' });
@@ -1682,6 +1756,18 @@ Guidelines:
     ? `${plan.plan_summary} The ML models identified ${plan.step_count || 0} action items for you.`
     : 'ML analysis complete. Please configure Groq API key for AI narration.';
   res.json({ reply: fallbackReply });
+});
+
+// Last-resort error handler: always JSON, never a stack trace, and nothing from the request body is logged.
+// (Without it Express answers body-parser and multer failures with an HTML page that includes the stack
+// trace whenever NODE_ENV is not "production".)
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  if (err?.type === 'entity.too.large') return res.status(413).json({ error: 'Request body too large.' });
+  if (err?.type === 'entity.parse.failed') return res.status(400).json({ error: 'Invalid JSON body.' });
+  if (err?.name === 'MulterError') return res.status(400).json({ error: 'Invalid file upload.' });
+  console.error('Unhandled request error:', err?.code ?? err?.name ?? 'unknown');
+  res.status(500).json({ error: 'Internal server error' });
 });
 
 // Routes only start accepting traffic once the database is ready. If PostgreSQL is
