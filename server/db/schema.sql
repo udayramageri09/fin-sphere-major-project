@@ -49,3 +49,22 @@ CREATE TABLE IF NOT EXISTS transactions (
 -- Owner lookups (list, delete by id) and newest-first listing.
 CREATE INDEX IF NOT EXISTS transactions_user_seq_idx ON transactions (user_id, seq DESC);
 CREATE INDEX IF NOT EXISTS transactions_user_id_idx ON transactions (user_id, id);
+
+-- Savings goals. Replaces server_goals.json (one-time import at startup, see db/index.js).
+CREATE TABLE IF NOT EXISTS goals (
+  -- Insertion order: the API lists newest first (new rows used to be unshifted onto the front).
+  seq            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  id             TEXT NOT NULL CHECK (length(id) BETWEEN 1 AND 64),
+  user_id        BIGINT NOT NULL REFERENCES users(id),
+  title          TEXT NOT NULL CHECK (title = btrim(title) AND length(title) BETWEEN 1 AND 120),
+  -- Exact money. Unconstrained NUMERIC on purpose: goals have no upper cap (unlike transactions), and any
+  -- finite JS number (up to ~1.8e308) must be storable. The upper bound below only excludes NaN / Infinity
+  -- (PostgreSQL orders NaN above every number and Infinity above every finite one).
+  target_amount  NUMERIC NOT NULL CHECK (target_amount > 0 AND target_amount < 1e310),
+  current_amount NUMERIC NOT NULL CHECK (current_amount >= 0 AND current_amount <= target_amount),
+  target_date    DATE NOT NULL,
+  created_at     TIMESTAMPTZ NOT NULL,
+  CONSTRAINT goals_user_id_id_unique UNIQUE (user_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS goals_user_seq_idx ON goals (user_id, seq DESC);
