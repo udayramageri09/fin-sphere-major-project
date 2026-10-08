@@ -12,7 +12,10 @@ import cookieParser from 'cookie-parser';
 import bcrypt from 'bcrypt';
 import rateLimit from 'express-rate-limit';
 import { randomUUID } from 'node:crypto';
-import { initDatabase, closeDatabase, createUser, findUserByEmail, normalizeEmail, DuplicateEmailError } from './db/index.js';
+import {
+  initDatabase, closeDatabase, createUser, findUserByEmail, normalizeEmail, DuplicateEmailError,
+  listTransactionsByUser, createTransaction, createTransactionsBatch, deleteTransactionByUserAndId
+} from './db/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -62,45 +65,12 @@ const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024 } // 5 MB
 });
 
-// Prepopulated transactions list in memory (resets on server restart for simplicity, 
-// but we can persist it to a local JSON file to make it real and persistent!)
-const DATA_FILE = path.join(__dirname, 'server_db.json');
-let transactions = [];
-
-const defaultTransactions = [
-  { id: 1, title: 'Amazon Shopping', amount: -2450.00, date: '2026-05-05', type: 'expense', category: 'Shopping' },
-  { id: 2, title: 'Salary Deposit', amount: 185000.00, date: '2026-05-01', type: 'income', category: 'Salary' },
-  { id: 3, title: 'Coffee Shop', amount: -350.00, date: '2026-04-30', type: 'expense', category: 'Food' },
-  { id: 4, title: 'Stock Dividend', amount: 4500.00, date: '2026-04-28', type: 'income', category: 'Investment' },
-];
-
-function loadTransactions() {
-  try {
-    if (fs.existsSync(DATA_FILE)) {
-      const raw = fs.readFileSync(DATA_FILE, 'utf8');
-      transactions = JSON.parse(raw);
-    } else {
-      transactions = [...defaultTransactions];
-      saveTransactions();
-    }
-  } catch (err) {
-    console.error('Error loading transactions, using defaults:', err);
-    transactions = [...defaultTransactions];
-  }
-}
-
-function saveTransactions() {
-  try {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(transactions, null, 2), 'utf8');
-  } catch (err) {
-    console.error('Error saving transactions:', err);
-  }
-}
-
-loadTransactions();
+// Transactions live in PostgreSQL (see ./db). server_db.json is only read once, at startup,
+// to import existing rows; nothing writes to it any more.
+const LEGACY_TRANSACTIONS_FILE = path.join(__dirname, 'server_db.json');
 
 // ── Goals persistence ──────────────────────────────────────────────────────────
-// Same JSON-file approach as transactions, in its own file so it never touches the
+// Own JSON file (transactions and users have moved to PostgreSQL), in its own file so it never touches the
 // transaction or user data. Path is __dirname-based, so it is the same file no matter
 // where the server is started from.
 const GOALS_FILE = path.join(__dirname, 'server_goals.json');
@@ -214,6 +184,8 @@ function normalizeTransactionInput(raw, nowMs = Date.now()) {
   if (typeof raw.title !== 'string') return fail('Title must be a string');
   const title = raw.title.trim();
   if (title.length === 0) return fail('Title is required');
+  // PostgreSQL text cannot hold a NUL character, so it is refused here instead of failing at save time.
+  if (title.includes('\u0000')) return fail('Title contains an invalid character');
   if (title.length > MAX_TITLE_LENGTH) {
     return fail(`Title must be ${MAX_TITLE_LENGTH} characters or fewer`);
   }
@@ -260,6 +232,7 @@ function normalizeTransactionInput(raw, nowMs = Date.now()) {
   if (raw.category !== undefined && raw.category !== null) {
     if (typeof raw.category !== 'string') return fail('Category must be a string');
     category = raw.category.trim() || 'General';
+    if (category.includes('\u0000')) return fail('Category contains an invalid character');
   }
 
   return {
@@ -648,17 +621,25 @@ app.get('/api/auth/verify', (req, res) => {
 });
 // ----------------------
 
+// A database failure is logged without query text or row values and answered generically.
+function respondDbError(res, err, message) {
+  console.error(`${message}:`, err.code ?? err.message);
+  return res.status(500).json({ error: message });
+}
+
 // 1. GET /api/transactions
-app.get('/api/transactions', authenticate, (req, res) => {
-  // Return only the authenticated user's transactions.
-  // Orphaned transactions (no userId) are intentionally excluded.
-  const userTransactions = transactions.filter(t => t.userId === req.user.id);
-  res.json(userTransactions);
+app.get('/api/transactions', authenticate, async (req, res) => {
+  // Only the authenticated user's transactions (the owner is part of the query).
+  try {
+    res.json(await listTransactionsByUser(req.user.id));
+  } catch (err) {
+    respondDbError(res, err, 'Could not load transactions');
+  }
 });
 
 // 2. POST /api/transactions (Manual Entry)
-app.post('/api/transactions', authenticate, (req, res) => {
-  // Validate before touching in-memory state or the persistence file.
+app.post('/api/transactions', authenticate, async (req, res) => {
+  // Validate before touching the database.
   const result = normalizeTransactionInput(req.body);
   if (!result.ok) {
     return res.status(400).json({ error: result.error });
@@ -670,30 +651,33 @@ app.post('/api/transactions', authenticate, (req, res) => {
     ...result.value
   };
 
-  transactions.unshift(newTransaction); // Add to beginning
-  saveTransactions();
+  try {
+    await createTransaction(newTransaction);
+  } catch (err) {
+    return respondDbError(res, err, 'Could not save transaction');
+  }
   res.status(201).json(newTransaction);
 });
 
 // 3. DELETE /api/transactions/:id
-app.delete('/api/transactions/:id', authenticate, (req, res) => {
+app.delete('/api/transactions/:id', authenticate, async (req, res) => {
   // The route param is an opaque identifier. New rows have UUID string IDs; historical
-  // rows have numeric IDs, so both sides are compared as strings (no parseInt, which
-  // would read "123abc" as 123). The ownership test is part of the lookup, so another
-  // user's row with the same ID can never match, and exactly one owned row is removed
-  // even if legacy data repeats an ID.
-  const index = transactions.findIndex(
-    t => t.userId === req.user.id && String(t.id) === String(req.params.id)
-  );
+  // rows have numeric IDs, stored as text, so the comparison is always on strings (no
+  // parseInt, which would read "123abc" as 123). The ownership test is part of the query,
+  // so another user's row with the same ID can never match, and exactly one owned row is
+  // removed even if legacy data repeats an ID.
+  let removed;
+  try {
+    removed = await deleteTransactionByUserAndId(req.user.id, req.params.id);
+  } catch (err) {
+    return respondDbError(res, err, 'Could not delete transaction');
+  }
 
   // Return 404 for both non-existent and non-owned transactions.
   // This avoids revealing the existence of another user's record.
-  if (index === -1) {
+  if (!removed) {
     return res.status(404).json({ error: 'Transaction not found' });
   }
-
-  transactions.splice(index, 1);
-  saveTransactions();
   res.json({ message: 'Transaction deleted successfully' });
 });
 
@@ -897,8 +881,11 @@ app.post('/api/transactions/parse-statement', authenticate, (req, res, next) => 
           const { rows: savedRows, skipped: invalidRows } = normalizeImportedRows(parsedTxns);
           const skipped = parserSkipped + invalidRows;
           if (savedRows.length > 0) {
-            transactions = [...savedRows, ...transactions];
-            saveTransactions();
+            try {
+              await createTransactionsBatch(savedRows); // one statement: all accepted rows or none
+            } catch (dbErr) {
+              return respondDbError(res, dbErr, 'Could not save transactions');
+            }
             return res.json({ success: true, count: savedRows.length, skipped, transactions: savedRows });
           }
           return res.status(400).json({
@@ -995,8 +982,11 @@ Return only the valid JSON array, like: [{"title": "Salary", "amount": 50000, "d
           const { rows, skipped } = normalizeImportedRows(candidates);
 
           if (rows.length > 0) {
-            transactions = [...rows, ...transactions];
-            saveTransactions();
+            try {
+              await createTransactionsBatch(rows); // one statement: all accepted rows or none
+            } catch (dbErr) {
+              return respondDbError(res, dbErr, 'Could not save transactions');
+            }
             return res.json({ success: true, count: rows.length, skipped, transactions: rows });
           }
           // No valid rows from the AI: fall through to the rule-based parser below.
@@ -1053,8 +1043,11 @@ Return only the valid JSON array, like: [{"title": "Salary", "amount": 50000, "d
       const { rows: savedRows, skipped: invalidRows } = normalizeImportedRows(parsedTxns);
       const skipped = parserSkipped + invalidRows;
       if (savedRows.length > 0) {
-        transactions = [...savedRows, ...transactions];
-        saveTransactions();
+        try {
+          await createTransactionsBatch(savedRows); // one statement: all accepted rows or none
+        } catch (dbErr) {
+          return respondDbError(res, dbErr, 'Could not save transactions');
+        }
         return res.json({
           success: true,
           count: savedRows.length,
@@ -1124,8 +1117,13 @@ app.post('/api/chat', authenticate, async (req, res) => {
   }
 
   // Scope financial context to the authenticated user only.
-  // None of the global transactions / goals / liabilities arrays is sent to the AI.
-  const userTransactions = transactions.filter(t => t.userId === req.user.id);
+  // Nothing belonging to other users is ever read or sent to the AI.
+  let userTransactions;
+  try {
+    userTransactions = await listTransactionsByUser(req.user.id);
+  } catch (err) {
+    return respondDbError(res, err, 'Could not load transactions');
+  }
   const userGoals = goals.filter(g => g.userId === req.user.id);
   const userLiabilities = liabilities.filter(l => l.userId === req.user.id);
 
@@ -1242,7 +1240,12 @@ app.get('/api/ml/analyze', authenticate, async (req, res) => {
     // from req.user.id, never from the client). Besides transactions, the only other real
     // input is the user's saved liabilities. The emergency fund does not exist in FinSphere
     // yet, so it is not sent and the ML service reports that ratio as unavailable.
-    const userTransactions = transactions.filter(t => t.userId === req.user.id);
+    let userTransactions;
+    try {
+      userTransactions = await listTransactionsByUser(req.user.id);
+    } catch (dbErr) {
+      return respondDbError(res, dbErr, 'Could not load transactions');   // not an ML-service problem
+    }
     // Total outstanding amount across the user's liabilities. FinSphere has a liabilities
     // feature, so "no saved liabilities" is a real 0 (not unknown). If the sum overflows to a
     // non-finite number it cannot be sent truthfully, so it is left out (null = unavailable)
@@ -1406,7 +1409,7 @@ Guidelines:
 // missing, unreachable or fails to initialise, refuse to start rather than pretend that
 // accounts can be saved.
 try {
-  await initDatabase({ legacyUsersFile: LEGACY_USERS_FILE });
+  await initDatabase({ legacyUsersFile: LEGACY_USERS_FILE, legacyTransactionsFile: LEGACY_TRANSACTIONS_FILE });
 } catch (err) {
   console.error(`FATAL: PostgreSQL initialisation failed: ${err.message}`);
   console.error('Set DATABASE_URL to a reachable PostgreSQL database (see server/.env.example).');
