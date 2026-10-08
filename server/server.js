@@ -1238,12 +1238,23 @@ Keep responses under 3-4 sentences if possible, unless a detailed breakdown is r
 // 6. GET /api/ml/analyze — proxies full ML analysis to Python microservice
 app.get('/api/ml/analyze', authenticate, async (req, res) => {
   try {
-    // Scope ML analysis to the authenticated user's transactions only. Nothing else about
-    // the user's finances is sent: liabilities and emergency fund do not exist in FinSphere
-    // yet, so the ML service reports the ratios that need them as unavailable.
+    // Scope ML analysis to the authenticated user's own data only (ownership always comes
+    // from req.user.id, never from the client). Besides transactions, the only other real
+    // input is the user's saved liabilities. The emergency fund does not exist in FinSphere
+    // yet, so it is not sent and the ML service reports that ratio as unavailable.
     const userTransactions = transactions.filter(t => t.userId === req.user.id);
+    // Total outstanding amount across the user's liabilities. FinSphere has a liabilities
+    // feature, so "no saved liabilities" is a real 0 (not unknown). If the sum overflows to a
+    // non-finite number it cannot be sent truthfully, so it is left out (null = unavailable)
+    // instead of being capped or replaced.
+    let totalLiabilities = liabilities
+      .filter(l => l.userId === req.user.id)
+      .reduce((sum, l) => sum + l.outstandingAmount, 0);
+    if (!Number.isFinite(totalLiabilities)) totalLiabilities = null;
+    else if (totalLiabilities < 1e13) totalLiabilities = Math.round(totalLiabilities * 100) / 100; // drop float noise (0.1 + 0.2)
     const payload = {
       transactions: userTransactions,
+      liabilities: totalLiabilities,
       n_forecast_months: 3
     };
 
