@@ -462,11 +462,12 @@ export async function listLiabilitiesByUser(userId) {
   return rows.map(toLiability);
 }
 
-// Total of one user's monthly payments (nothing else contributes: not the outstanding balances, not the
-// rates), summed exactly in SQL. No rows -> 0, a real zero. Returns null if the exact total is too large for
+// Total of one user's monthly payments on debts that are still owed (outstanding_amount > 0: a fully repaid
+// liability keeps its row but no longer has a payment due). Nothing else contributes: not the balances, not the
+// rates, not the repayments. Summed exactly in SQL. No rows -> 0, a real zero. Returns null if the exact total is too large for
 // a finite number, so the caller can report "unavailable" instead of a capped or fake value.
 export async function sumMonthlyPaymentsByUser(userId) {
-  const { rows } = await pool.query('SELECT COALESCE(SUM(monthly_payment), 0)::text AS total FROM liabilities WHERE user_id = $1', [userId]);
+  const { rows } = await pool.query('SELECT COALESCE(SUM(monthly_payment), 0)::text AS total FROM liabilities WHERE user_id = $1 AND outstanding_amount > 0', [userId]);
   const total = Number(rows[0].total);
   return Number.isFinite(total) ? total : null;
 }
@@ -502,6 +503,66 @@ export async function deleteLiabilityByUserAndId(userId, id) {
        AND user_id = $1`,
     [userId, String(id)]);
   return rowCount > 0;
+}
+
+// ── Liability repayments ───────────────────────────────────────────────────────
+const REPAYMENT_COLUMNS = 'id, user_id, liability_id, amount, created_at';
+
+function toRepayment(row) {
+  return {
+    id: row.id,
+    userId: Number(row.user_id),
+    liabilityId: row.liability_id,
+    amount: Number(row.amount),
+    createdAt: row.created_at.toISOString(),
+  };
+}
+
+// Records one repayment and lowers the liability's outstanding balance by exactly that amount, atomically:
+//   1. BEGIN, then lock the owner's liability row (SELECT ... FOR UPDATE). Concurrent repayments to the same
+//      liability queue here, so each sees the balance left by the previous one and none can take it below 0.
+//   2. "Is it already paid off" and "does the repayment exceed the balance" are tested in exact NUMERIC arithmetic.
+//   3. Insert the repayment row, reduce the balance, COMMIT. Any failure rolls both back.
+// Returns { status: 'ok', liability, repayment } | { status: 'not_found' } (missing or not the owner's) |
+// { status: 'paid_off' } | { status: 'exceeds', outstanding } (nothing is stored). The liability is never deleted.
+export async function repayLiability({ userId, liabilityId, amount, repaymentId, now }) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const locked = await client.query(
+      `SELECT outstanding_amount, outstanding_amount = 0 AS paid_off, $3::numeric > outstanding_amount AS exceeds
+       FROM liabilities WHERE user_id = $1 AND id = $2 FOR UPDATE`,
+      [userId, String(liabilityId), String(amount)]);
+    if (locked.rowCount === 0) { await client.query('ROLLBACK'); return { status: 'not_found' }; }
+    const { paid_off: paidOff, exceeds, outstanding_amount: outstanding } = locked.rows[0];
+    if (paidOff) { await client.query('ROLLBACK'); return { status: 'paid_off' }; }
+    if (exceeds) { await client.query('ROLLBACK'); return { status: 'exceeds', outstanding: Number(outstanding) }; }
+    const inserted = await client.query(
+      `INSERT INTO liability_repayments (id, user_id, liability_id, amount, created_at)
+       VALUES ($1, $2, $3, $4::numeric, $5::timestamptz) RETURNING ${REPAYMENT_COLUMNS}`,
+      [repaymentId, userId, String(liabilityId), String(amount), now]);
+    const updated = await client.query(
+      `UPDATE liabilities SET outstanding_amount = outstanding_amount - $3::numeric
+       WHERE user_id = $1 AND id = $2 RETURNING ${LIABILITY_COLUMNS}`,
+      [userId, String(liabilityId), String(amount)]);
+    await client.query('COMMIT');
+    return { status: 'ok', liability: toLiability(updated.rows[0]), repayment: toRepayment(inserted.rows[0]) };
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch { /* the original error is what matters */ }
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// The owner's repayments toward one liability, newest first; null if the liability is missing or not theirs.
+export async function listLiabilityRepayments(userId, liabilityId) {
+  const owned = await pool.query('SELECT 1 FROM liabilities WHERE user_id = $1 AND id = $2', [userId, String(liabilityId)]);
+  if (owned.rowCount === 0) return null;
+  const { rows } = await pool.query(
+    `SELECT ${REPAYMENT_COLUMNS} FROM liability_repayments WHERE user_id = $1 AND liability_id = $2 ORDER BY seq DESC`,
+    [userId, String(liabilityId)]);
+  return rows.map(toRepayment);
 }
 
 // Whether one server_liabilities.json record can become a row WITHOUT being changed. Nothing is trimmed,

@@ -34,13 +34,18 @@ const labelClass = 'text-xs font-medium text-zinc-500';
 const EMPTY_FORM = { name: '', type: '', outstandingAmount: '', interestRate: '', monthlyPayment: '' };
 
 function Liabilities() {
-  const { liabilities, liabilitiesLoading, liabilitiesError, fetchLiabilities, addLiability, deleteLiability } = useFinance();
+  const { liabilities, liabilitiesLoading, liabilitiesError, fetchLiabilities, addLiability, deleteLiability, addLiabilityRepayment } = useFinance();
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState(EMPTY_FORM);
   const [formError, setFormError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [actionError, setActionError] = useState('');
   const [deletingId, setDeletingId] = useState(null);
+  // Only one liability has its repayment form open at a time.
+  const [repayingId, setRepayingId] = useState(null);
+  const [repaymentAmount, setRepaymentAmount] = useState('');
+  const [repaymentError, setRepaymentError] = useState('');
+  const [isRepaying, setIsRepaying] = useState(false);
 
   const updateField = (field) => (e) => setForm((prev) => ({ ...prev, [field]: e.target.value }));
 
@@ -67,6 +72,28 @@ function Liabilities() {
       setFormError(err.message);
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const openRepayment = (id) => {
+    setRepayingId(id);
+    setRepaymentAmount('');
+    setRepaymentError('');
+  };
+
+  // The server is the authority (positive amount, never more than the outstanding balance); its message is shown as-is.
+  const handleRepay = async (e, liabilityId) => {
+    e.preventDefault();
+    setRepaymentError('');
+    setIsRepaying(true);
+    try {
+      await addLiabilityRepayment(liabilityId, toNumberOrNull(repaymentAmount));
+      setRepayingId(null);
+      setRepaymentAmount('');
+    } catch (err) {
+      setRepaymentError(err.message);
+    } finally {
+      setIsRepaying(false);
     }
   };
 
@@ -223,6 +250,7 @@ function Liabilities() {
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
           {liabilities.map((l) => {
             const { label, icon: Icon } = typeInfo(l.type);
+            const paidOff = l.outstandingAmount === 0;
             return (
               <div key={l.id} className="glass-panel p-6 flex flex-col gap-4 min-w-0">
                 <div className="flex items-start justify-between gap-3">
@@ -233,6 +261,7 @@ function Liabilities() {
                     <div className="min-w-0">
                       <h3 className="text-lg font-semibold text-zinc-900 wrap-break-word">{l.name}</h3>
                       <span className="text-sm text-zinc-500">{label}</span>
+                      {paidOff && <span className="ml-2 px-2 py-0.5 rounded-full text-xs font-semibold bg-zinc-100 text-zinc-700 border border-zinc-200">Paid off</span>}
                     </div>
                   </div>
                   <button
@@ -256,9 +285,53 @@ function Liabilities() {
                   </div>
                   <div className="flex justify-between gap-3">
                     <span className="text-zinc-500">Monthly payment</span>
-                    <strong className="text-zinc-900 text-right wrap-break-word min-w-0">{formatCurrency(l.monthlyPayment)}</strong>
+                    {paidOff
+                      ? <strong className="text-zinc-900 text-right">None due</strong>
+                      : <strong className="text-zinc-900 text-right wrap-break-word min-w-0">{formatCurrency(l.monthlyPayment)}</strong>}
                   </div>
                 </div>
+                {!paidOff && repayingId !== l.id && (
+                  <button
+                    type="button"
+                    onClick={() => openRepayment(l.id)}
+                    aria-label={`Add repayment to ${l.name}`}
+                    className="self-start px-3 py-1 rounded-lg text-xs font-semibold text-zinc-700 border border-zinc-200 bg-white hover:bg-zinc-100"
+                  >
+                    Add repayment
+                  </button>
+                )}
+                {!paidOff && repayingId === l.id && (
+                  <form onSubmit={(e) => handleRepay(e, l.id)} className="flex flex-col gap-2 p-3 rounded-xl bg-zinc-50 border border-zinc-200">
+                    <label htmlFor={`repayment-${l.id}`} className={labelClass}>Repayment (₹)</label>
+                    <input
+                      id={`repayment-${l.id}`}
+                      type="number"
+                      required
+                      min="0.01"
+                      step="0.01"
+                      value={repaymentAmount}
+                      onChange={(e) => setRepaymentAmount(e.target.value)}
+                      className={inputClass}
+                    />
+                    {repaymentError && errorBox(repaymentError)}
+                    <div className="flex gap-2">
+                      <button
+                        type="submit"
+                        disabled={isRepaying}
+                        className="px-3 py-1.5 rounded-xl text-xs font-medium bg-zinc-900 text-white hover:bg-zinc-800 disabled:opacity-60 disabled:cursor-not-allowed"
+                      >
+                        {isRepaying ? 'Saving...' : 'Add'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setRepayingId(null)}
+                        className="px-3 py-1.5 rounded-xl text-xs font-medium text-zinc-700 border border-zinc-200 bg-white hover:bg-zinc-100"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </form>
+                )}
               </div>
             );
           })}

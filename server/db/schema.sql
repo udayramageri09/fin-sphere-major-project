@@ -80,12 +80,24 @@ CREATE TABLE IF NOT EXISTS liabilities (
   -- Exact money / rates. Unconstrained NUMERIC on purpose: liabilities have no upper cap (unlike transactions),
   -- so any finite JS number (up to ~1.8e308) must be storable. The "< 1e310" bounds only exclude NaN and
   -- Infinity (PostgreSQL orders NaN above every number and Infinity above every finite one).
-  outstanding_amount NUMERIC NOT NULL CHECK (outstanding_amount > 0 AND outstanding_amount < 1e310),
+  -- 0 means fully repaid (see liability_repayments); a new liability is still validated as > 0 by the API.
+  outstanding_amount NUMERIC NOT NULL,
   interest_rate      NUMERIC NOT NULL CHECK (interest_rate >= 0 AND interest_rate <= 100),
   monthly_payment    NUMERIC NOT NULL CHECK (monthly_payment >= 0 AND monthly_payment < 1e310),
   created_at         TIMESTAMPTZ NOT NULL,
   CONSTRAINT liabilities_user_id_id_unique UNIQUE (user_id, id)
 );
+
+-- A repaid liability keeps its row with outstanding_amount = 0, so the balance rule is >= 0. Databases created
+-- before repayments existed carry the old unnamed "> 0" check; replace it once (idempotent on every start).
+ALTER TABLE liabilities DROP CONSTRAINT IF EXISTS liabilities_outstanding_amount_check;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'liabilities_outstanding_nonnegative' AND conrelid = 'liabilities'::regclass) THEN
+    ALTER TABLE liabilities ADD CONSTRAINT liabilities_outstanding_nonnegative CHECK (outstanding_amount >= 0 AND outstanding_amount < 1e310);
+  END IF;
+END
+$$;
 
 CREATE INDEX IF NOT EXISTS liabilities_user_seq_idx ON liabilities (user_id, seq DESC);
 
@@ -119,3 +131,21 @@ CREATE TABLE IF NOT EXISTS goal_contributions (
 );
 
 CREATE INDEX IF NOT EXISTS goal_contributions_goal_idx ON goal_contributions (user_id, goal_id, seq DESC);
+
+-- Repayments toward a liability. liabilities.outstanding_amount is the running balance (no history is invented for
+-- balances that existed before) and every row here is one later, real repayment. A repayment and the balance
+-- reduction are written in one transaction (see repayLiability).
+CREATE TABLE IF NOT EXISTS liability_repayments (
+  -- Insertion order: history is listed newest first, deterministically.
+  seq          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  id           TEXT NOT NULL UNIQUE CHECK (length(id) BETWEEN 1 AND 64),
+  user_id      BIGINT NOT NULL,
+  liability_id TEXT NOT NULL,
+  -- Exact money, positive only; no cap (the "< 1e310" bound only excludes NaN / Infinity).
+  amount       NUMERIC NOT NULL CHECK (amount > 0 AND amount < 1e310),
+  created_at   TIMESTAMPTZ NOT NULL,
+  -- Ties a repayment to a liability owned by the same user; deleting the liability removes its history.
+  CONSTRAINT liability_repayments_liability_fk FOREIGN KEY (user_id, liability_id) REFERENCES liabilities (user_id, id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS liability_repayments_liability_idx ON liability_repayments (user_id, liability_id, seq DESC);
