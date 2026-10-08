@@ -138,6 +138,45 @@ function saveGoals() {
 
 loadGoals();
 
+// ── Liabilities persistence ────────────────────────────────────────────────────
+// Same reliability pattern as goals (own file, __dirname-based path, safe load, temp file +
+// rename on save, caller rolls back on failure), written as two small generic helpers.
+function readJsonArrayFile(file, label) {
+  if (!fs.existsSync(file)) return [];
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (!Array.isArray(parsed)) throw new Error(`${label} file is not an array`);
+    // Drop anything that is not a plain object so one bad entry cannot crash later requests.
+    return parsed.filter((row) => row !== null && typeof row === 'object' && !Array.isArray(row));
+  } catch (err) {
+    // Keep the unreadable file for recovery instead of letting the next save overwrite it.
+    console.error(`Error loading ${label}, starting empty:`, err);
+    try {
+      fs.renameSync(file, `${file.replace(/\.json$/, '')}.corrupt-${Date.now()}.json`);
+    } catch (renameErr) {
+      console.error(`Could not set aside the unreadable ${label} file:`, renameErr);
+    }
+    return [];
+  }
+}
+
+// Returns false on failure so the caller can roll back and report an error.
+function writeJsonArrayFile(file, rows, label) {
+  try {
+    const tmpFile = `${file}.tmp`;
+    fs.writeFileSync(tmpFile, JSON.stringify(rows, null, 2), 'utf8');
+    fs.renameSync(tmpFile, file);
+    return true;
+  } catch (err) {
+    console.error(`Error saving ${label}:`, err);
+    return false;
+  }
+}
+
+const LIABILITIES_FILE = path.join(__dirname, 'server_liabilities.json');
+let liabilities = readJsonArrayFile(LIABILITIES_FILE, 'liabilities');
+const saveLiabilities = () => writeJsonArrayFile(LIABILITIES_FILE, liabilities, 'liabilities');
+
 // ── Transaction validation & normalization ─────────────────────────────────────
 // The single boundary every persisted transaction passes through: manual POST and
 // all three statement-import parsers. normalizeTransactionInput() returns either
@@ -426,10 +465,10 @@ function toAmount(raw) {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
-// Goals have no upper cap, so unlike roundToPaise() this must also cope with huge values
-// (String(n) uses exponent form from 1e21, which that helper cannot handle). From 1e13
-// up a double cannot hold paise anyway, so the value is already as precise as it gets.
-const roundGoalAmount = (n) => (n >= 1e13 ? n : roundToPaise(n));
+// Goals and liabilities have no upper cap, so unlike roundToPaise() this must also cope with
+// huge values (String(n) uses exponent form from 1e21, which that helper cannot handle).
+// From 1e13 up a double cannot hold paise anyway, so the value is already as precise as it gets.
+const roundUncappedAmount = (n) => (n >= 1e13 ? n : roundToPaise(n));
 
 function normalizeGoalInput(raw, nowMs = Date.now()) {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
@@ -448,13 +487,13 @@ function normalizeGoalInput(raw, nowMs = Date.now()) {
   const target = toAmount(raw.targetAmount);
   if (target === null) return fail('Target amount must be a number');
   if (target < 0.005) return fail('Target amount must be greater than 0 (minimum 0.01)');
-  const targetAmount = roundGoalAmount(target);
+  const targetAmount = roundUncappedAmount(target);
 
   // Current amount: omitted means 0; otherwise 0 <= current <= target
   const current = raw.currentAmount === undefined ? 0 : toAmount(raw.currentAmount);
   if (current === null) return fail('Current amount must be a number');
   if (current < 0) return fail('Current amount cannot be negative');
-  const currentAmount = current < 0.005 ? 0 : roundGoalAmount(current);
+  const currentAmount = current < 0.005 ? 0 : roundUncappedAmount(current);
   if (currentAmount > targetAmount) return fail('Current amount cannot exceed the target amount');
 
   // Target date: exact YYYY-MM-DD, a real calendar date, not in the past. "Past" is judged
@@ -470,6 +509,48 @@ function normalizeGoalInput(raw, nowMs = Date.now()) {
   if (raw.targetDate < today) return fail('Target date cannot be in the past');
 
   return { ok: true, value: { title, targetAmount, currentAmount, targetDate: raw.targetDate } };
+}
+
+// ── Liability validation & normalization ───────────────────────────────────────
+// Server-side authority for POST /api/liabilities. Returns { ok: true, value } or
+// { ok: false, error }; it never reads or returns id, userId or createdAt (the route stamps
+// those), so ownership cannot come from the request body. Every field is required: a
+// missing interest rate or payment is rejected rather than defaulted to a made-up 0.
+const LIABILITY_TYPES = ['home_loan', 'personal_loan', 'vehicle_loan', 'education_loan', 'credit_card', 'other'];
+
+function normalizeLiabilityInput(raw) {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return fail('Liability must be an object');
+  }
+
+  if (typeof raw.name !== 'string') return fail('Name must be a string');
+  const name = raw.name.trim();
+  if (name.length === 0) return fail('Name is required');
+  if (name.length > MAX_TITLE_LENGTH) return fail(`Name must be ${MAX_TITLE_LENGTH} characters or fewer`);
+
+  if (typeof raw.type !== 'string' || !LIABILITY_TYPES.includes(raw.type)) {
+    return fail(`Type must be one of: ${LIABILITY_TYPES.join(', ')}`);
+  }
+
+  // Outstanding amount: finite and > 0, no upper cap (unlike transactions), rounded to paise
+  const outstanding = toAmount(raw.outstandingAmount);
+  if (outstanding === null) return fail('Outstanding amount must be a number');
+  if (outstanding < 0.005) return fail('Outstanding amount must be greater than 0 (minimum 0.01)');
+  const outstandingAmount = roundUncappedAmount(outstanding);
+
+  // Interest rate: percent per year, 0..100, stored as given
+  const interestRate = toAmount(raw.interestRate);
+  if (interestRate === null) return fail('Interest rate must be a number');
+  if (interestRate < 0) return fail('Interest rate cannot be negative');
+  if (interestRate > 100) return fail('Interest rate cannot exceed 100');
+
+  // Monthly payment: finite and >= 0 (0 is a real value, e.g. no fixed payment)
+  const payment = toAmount(raw.monthlyPayment);
+  if (payment === null) return fail('Monthly payment must be a number');
+  if (payment < 0) return fail('Monthly payment cannot be negative');
+  const monthlyPayment = payment < 0.005 ? 0 : roundUncappedAmount(payment);
+
+  return { ok: true, value: { name, type: raw.type, outstandingAmount, interestRate, monthlyPayment } };
 }
 // ───────────────────────────────────────────────────────────────────────────────
 
@@ -659,6 +740,51 @@ app.delete('/api/goals/:id', authenticate, (req, res) => {
     return res.status(500).json({ error: 'Could not delete goal' });
   }
   res.json({ message: 'Goal deleted successfully' });
+});
+
+// ── Liabilities ────────────────────────────────────────────────────────────────
+// GET /api/liabilities - only the authenticated user's liabilities
+app.get('/api/liabilities', authenticate, (req, res) => {
+  res.json(liabilities.filter(l => l.userId === req.user.id));
+});
+
+// POST /api/liabilities - validate first; nothing is mutated or written on a 400
+app.post('/api/liabilities', authenticate, (req, res) => {
+  const result = normalizeLiabilityInput(req.body);
+  if (!result.ok) {
+    return res.status(400).json({ error: result.error });
+  }
+
+  const liability = {
+    id: randomUUID(),
+    userId: req.user.id, // ownership stamp: always from the verified JWT, never from req.body
+    ...result.value,
+    createdAt: new Date().toISOString()
+  };
+
+  liabilities.unshift(liability); // newest first
+  if (!saveLiabilities()) {
+    liabilities.shift(); // roll back so memory never disagrees with the file
+    return res.status(500).json({ error: 'Could not save liability' });
+  }
+  res.status(201).json(liability);
+});
+
+// DELETE /api/liabilities/:id - exactly one liability, and only one owned by the caller
+app.delete('/api/liabilities/:id', authenticate, (req, res) => {
+  const index = liabilities.findIndex(l => l.userId === req.user.id && String(l.id) === String(req.params.id));
+
+  // 404 for both missing and not-yours, so another user's liability is never revealed.
+  if (index === -1) {
+    return res.status(404).json({ error: 'Liability not found' });
+  }
+
+  const [removed] = liabilities.splice(index, 1);
+  if (!saveLiabilities()) {
+    liabilities.splice(index, 0, removed); // roll back
+    return res.status(500).json({ error: 'Could not delete liability' });
+  }
+  res.json({ message: 'Liability deleted successfully' });
 });
 
 // 4. POST /api/transactions/parse-statement
@@ -952,7 +1078,8 @@ Return only the valid JSON array, like: [{"title": "Salary", "amount": 50000, "d
 
 // ₹ with Indian grouping, at most 2 decimals, and a leading minus for negatives.
 const formatRupees = (n) => {
-  const rounded = Math.round(n * 100) / 100 || 0; // also normalizes -0
+  // Values this large have no paise to round (and n * 100 would overflow to Infinity).
+  const rounded = Math.abs(n) >= 1e13 ? n : Math.round(n * 100) / 100 || 0; // also normalizes -0
   return `${rounded < 0 ? '-' : ''}₹${Math.abs(rounded).toLocaleString('en-IN')}`;
 };
 
@@ -972,10 +1099,23 @@ function describeGoalsForAssistant(userGoals) {
   return `\n${lines.join('\n')}`;
 }
 
+// Same idea for the caller's own saved liabilities (names are user text, so they are quoted).
+const MAX_LIABILITIES_IN_PROMPT = 20;
+function describeLiabilitiesForAssistant(userLiabilities) {
+  if (userLiabilities.length === 0) return ' none saved yet';
+  const lines = userLiabilities.slice(0, MAX_LIABILITIES_IN_PROMPT).map((l) =>
+    `  - ${JSON.stringify(l.name)} (${String(l.type).replace(/_/g, ' ')}): ${formatRupees(l.outstandingAmount)} outstanding, ${l.interestRate}% interest per year, ${formatRupees(l.monthlyPayment)} monthly payment`
+  );
+  if (userLiabilities.length > MAX_LIABILITIES_IN_PROMPT) {
+    lines.push(`  - (${userLiabilities.length - MAX_LIABILITIES_IN_PROMPT} more liabilities not shown)`);
+  }
+  return `\n${lines.join('\n')}`;
+}
+
 // 5. POST /api/chat
 // The assistant may only state facts that exist for the authenticated user: their own
-// transactions (and totals derived from them) and their own saved goals. Credit score,
-// liabilities and portfolio data do not exist in FinSphere, so they are declared
+// transactions (and totals derived from them), their own saved goals and their own saved
+// liabilities. Credit score and portfolio data do not exist in FinSphere, so they are declared
 // unavailable instead of being filled in.
 app.post('/api/chat', authenticate, async (req, res) => {
   const { messages } = req.body;
@@ -984,9 +1124,10 @@ app.post('/api/chat', authenticate, async (req, res) => {
   }
 
   // Scope financial context to the authenticated user only.
-  // Neither the global transactions array nor the global goals array is sent to the AI.
+  // None of the global transactions / goals / liabilities arrays is sent to the AI.
   const userTransactions = transactions.filter(t => t.userId === req.user.id);
   const userGoals = goals.filter(g => g.userId === req.user.id);
+  const userLiabilities = liabilities.filter(l => l.userId === req.user.id);
 
   // Totals over ALL of this user's recorded transactions (sign decides the side).
   const totalIncome = userTransactions.filter(t => t.amount > 0).reduce((sum, t) => sum + t.amount, 0);
@@ -1011,15 +1152,16 @@ Here is the financial data that actually exists for this user:
 - Net cash flow (total income minus total expenses): ${formatRupees(currentContext.netCashFlow)}
 - Number of recorded transactions: ${currentContext.transactionCount}
 - Savings goals (saved by the user):${describeGoalsForAssistant(userGoals)}
+- Liabilities (saved by the user):${describeLiabilitiesForAssistant(userLiabilities)}
 - Live Transactions (Latest first): ${JSON.stringify(currentContext.recentTransactions)}
 
-NOT available for this user (no such data has been entered or connected): credit score, liabilities or loans, portfolio holdings or allocation, and net worth.
+NOT available for this user (no such data has been entered or connected): credit score, portfolio holdings or allocation, and net worth (FinSphere has no asset data).
 
 Guidelines:
 1. Base your replies only on the data above. If asked about something listed as not available, say it is not available in FinSphere yet. Never estimate, guess or invent figures for it, and never derive a credit score from transactions.
 2. Be brief, professional, and friendly. Use relevant emojis.
 3. Suggest concrete advice if they are spending too much or their net cash flow is negative.
-4. Let the user know they can update transactions by manual entry or parsing bank statements, and manage savings goals on the Goals page.
+4. Let the user know they can update transactions by manual entry or parsing bank statements, manage savings goals on the Goals page, and record liabilities on the Liabilities page.
 
 Keep responses under 3-4 sentences if possible, unless a detailed breakdown is requested.`
   };
@@ -1063,6 +1205,10 @@ Keep responses under 3-4 sentences if possible, unless a detailed breakdown is r
 
   if (userMessage.includes('hello') || userMessage.includes('hi')) {
     reply = `Hi there! 👋 I am your FinFlow AI assistant. How can I assist you with your budget or transactions today?`;
+  } else if (userMessage.includes('liabilit') || userMessage.includes('loan') || userMessage.includes('debt')) {
+    reply = userLiabilities.length === 0
+      ? `You don't have any saved liabilities yet. You can add them from the Liabilities page.`
+      : `Your saved liabilities:${describeLiabilitiesForAssistant(userLiabilities)}`;
   } else if (userMessage.includes('credit score') || userMessage.includes('credit')) {
     reply = `I don't have a credit score for you. FinSphere isn't connected to any credit bureau, and I won't estimate one from your transactions.`;
   } else if (userMessage.includes('goal') || userMessage.includes('saving')) {
@@ -1072,7 +1218,7 @@ Keep responses under 3-4 sentences if possible, unless a detailed breakdown is r
   } else if (userMessage.includes('portfolio') || userMessage.includes('mutual') || userMessage.includes('stock')) {
     reply = `I don't have any portfolio or investment holdings data for you, so I can't describe an allocation.`;
   } else if (userMessage.includes('net worth') || userMessage.includes('wealth') || userMessage.includes('balance')) {
-    reply = `I can't work out your net worth because FinSphere doesn't have your assets or liabilities. From your recorded transactions, your net cash flow (total income minus total expenses) is ${formatRupees(currentContext.netCashFlow)}. 💰`;
+    reply = `I can't work out your net worth because FinSphere doesn't have your assets. From your recorded transactions, your net cash flow (total income minus total expenses) is ${formatRupees(currentContext.netCashFlow)}. 💰`;
   } else if (userMessage.includes('spend') || userMessage.includes('expense') || userMessage.includes('cost')) {
     reply = `Across your ${currentContext.transactionCount} recorded transactions, your total expenses come to ${formatRupees(currentContext.totalExpenses)}. Try to keep an eye on non-essential expenditures! 📉`;
   } else if (userMessage.includes('income') || userMessage.includes('salary') || userMessage.includes('earn')) {
@@ -1083,7 +1229,7 @@ Keep responses under 3-4 sentences if possible, unless a detailed breakdown is r
     // Pick a random recent transaction to talk about (scoped to the authenticated user)
     const randomTx = userTransactions[Math.floor(Math.random() * userTransactions.length)];
     const txDetail = randomTx ? `For example, I see a recent transaction for "${randomTx.title}" of ${formatRupees(Math.abs(randomTx.amount))}.` : '';
-    reply = `I can help you review your finances! ${txDetail} Ask me about your spending, income, savings goals, or how to import statements! 💡`;
+    reply = `I can help you review your finances! ${txDetail} Ask me about your spending, income, savings goals, liabilities, or how to import statements! 💡`;
   }
 
   res.json({ reply });
