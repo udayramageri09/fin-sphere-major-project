@@ -42,7 +42,7 @@ The plan generator runs last and consumes the other four outputs. If one model t
 ## 3. The Express / FastAPI trust boundary
 
 * **Express is the security boundary.** It authenticates the caller, derives the owner from the verified JWT, validates and normalises every write, and decides which rows are sent to the ML service.
-* **FastAPI has no authentication.** `ml_service/main.py` says so in a comment; it restricts browser origins with CORS (`localhost:5173` and `localhost:5000`) but does not check who is calling. It trusts whatever transactions it receives. In any deployment it must be reachable only from the API, not from the internet.
+* **FastAPI has no authentication.** `ml_service/main.py` says so in a comment; it restricts browser origins with CORS (`localhost:5173` and `localhost:5000`) but does not check who is calling. It trusts whatever transactions it receives. In any deployment it must be reachable only from the API, not from the internet (see [SECURITY_DEPLOYMENT.md](SECURITY_DEPLOYMENT.md)); `python main.py` now binds to `127.0.0.1` unless `ML_SERVICE_HOST` is set.
 * The ML service never reads the database and never stores anything.
 * `POST /api/plan-chat` receives the ML results (`mlContext`) **from the client** and narrates them. The server does not re-validate that context (a code comment records this as a known follow-up). `/api/ml/analyze` itself is fully server-derived.
 

@@ -58,7 +58,7 @@ def audit() -> list:
          'training': 'none persisted: it is re-fitted on the user\'s history on every request; no model file, no dataset',
          'randomness': 'none (closed-form least squares)', 'min_history': '1 month (constant mean), 2+ months for a fitted line; predictions are clamped at 0',
          'notes': ['the month index is the position among months that HAVE transactions, so a missing calendar month is collapsed (see the missing_months benchmark)',
-                   'R2 is in-sample, not a held-out accuracy', 'statsmodels is listed in requirements.txt but is not imported anywhere']},
+                   'R2 is in-sample, not a held-out accuracy']},
         {'component': 'anomaly_detector', 'file': 'models/anomaly.py', 'class': 'trained unsupervised ML, fitted per request (transductive: it scores the same rows it is fitted on)',
          'algorithm': 'sklearn IsolationForest (100 trees) on StandardScaler-scaled [abs_amount, day_of_week, day_of_month]',
          'inputs': 'every transaction regardless of classification (intentional: unusual money movement, not only spending)',
