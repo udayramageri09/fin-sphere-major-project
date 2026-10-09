@@ -2,6 +2,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import './Plans.css';
 import { useFinance } from '../context/FinanceContext';
+import { buildChatHistory } from '../utils/chatHistory';
 import {
   Brain, Send, Mic, MicOff, RefreshCw, AlertTriangle, CheckCircle,
   TrendingUp, TrendingDown, Minus, Activity, Target, Shield,
@@ -185,10 +186,11 @@ export default function Plans() {
     setIsThinking(true);
 
     try {
-      const history = messages
-        .filter(m => m.sender !== 'system')
-        .map(m => ({ role: m.sender === 'bot' ? 'assistant' : 'user', content: m.text }));
-      history.push({ role: 'user', content: text });
+      // Bounded to the server's chat contract (last 12 user/assistant turns, each at most 2000 characters).
+      const history = buildChatHistory(
+        messages.map(m => ({ role: m.sender === 'bot' ? 'assistant' : 'user', content: m.text })),
+        text
+      );
 
       const res = await fetch(`${API}/plan-chat`, {
         method: 'POST',

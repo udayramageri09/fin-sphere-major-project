@@ -643,21 +643,31 @@ async function importLegacyLiabilities(client, file) {
 // Classification-aware totals over ALL of one user's transactions, in one query, as exact NUMERIC (see the semantics
 // above): income, spending (gross expenses - refunds, floored at 0), net (income - spending), and how many rows are still
 // 'unknown' (counted by direction until classified).
-export async function getTransactionTotalsByUser(userId) {
+// `month` ('YYYY-MM', optional) limits the totals to that calendar month of transaction dates; the rule is the same
+// either way, and net spending is floored once for the period that was asked for.
+export async function getTransactionTotalsByUser(userId, { month } = {}) {
+  if (month !== undefined && !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error('month must be YYYY-MM');
+  // $2 is the first day of the month, or NULL for all-time; the query text stays constant either way.
   const { rows } = await pool.query(
     `WITH x AS (
        SELECT COUNT(*)::int AS n,
               COUNT(*) FILTER (WHERE classification = 'unknown')::int AS unknown_n,
+              COUNT(*) FILTER (WHERE classification = 'transfer')::int AS transfer_n,
               COALESCE(SUM(abs(amount)) FILTER (WHERE classification = 'income' OR (classification = 'unknown' AND type = 'income')), 0) AS income,
               COALESCE(SUM(abs(amount)) FILTER (WHERE classification = 'expense' OR (classification = 'unknown' AND type = 'expense')), 0) AS gross,
               COALESCE(SUM(abs(amount)) FILTER (WHERE classification = 'refund'), 0) AS refunds
-       FROM transactions WHERE user_id = $1)
-     SELECT n, unknown_n, income::text AS income, GREATEST(gross - refunds, 0)::text AS spending,
-            (income - GREATEST(gross - refunds, 0))::text AS net
+       FROM transactions
+       WHERE user_id = $1 AND ($2::date IS NULL OR (date >= $2::date AND date < $2::date + INTERVAL '1 month')))
+     SELECT n, unknown_n, transfer_n, income::text AS income, gross::text AS gross, refunds::text AS refunds,
+            GREATEST(gross - refunds, 0)::text AS spending, (income - GREATEST(gross - refunds, 0))::text AS net
      FROM x`,
-    [userId]);
+    [userId, month === undefined ? null : `${month}-01`]);
   const r = rows[0];
-  return { count: r.n, unknownCount: r.unknown_n, totalIncome: Number(r.income), totalSpending: Number(r.spending), netCashFlow: Number(r.net) };
+  return {
+    count: r.n, unknownCount: r.unknown_n, transferCount: r.transfer_n,
+    totalIncome: Number(r.income), grossSpending: Number(r.gross), refunds: Number(r.refunds),
+    totalSpending: Number(r.spending), netCashFlow: Number(r.net),
+  };
 }
 
 // ── Monthly category budgets ───────────────────────────────────────────────────
