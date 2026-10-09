@@ -433,25 +433,29 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     }
   };
 
+  // Sends the bounded chat history (src/utils/chatHistory.js) and resolves to the reply text. Failures reject with a
+  // message that can be shown to the user as-is; the caller keeps such messages out of later history.
   const sendMessageToBot = async (messages) => {
+    let res;
     try {
-      const res = await fetch(`${API_URL}/chat`, {
+      res = await fetch(`${API_URL}/chat`, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages })
       });
-      if (res.status === 401) {
-        invalidateSession();
-        throw new Error('Session expired');
-      }
-      if (!res.ok) throw new Error('Failed to fetch AI chat response');
-      const data = await res.json();
-      return data.reply;
-    } catch (err) {
-      console.error(err);
-      return 'Sorry, I am having trouble connecting to my cognitive backend right now. Please try again! 🤖';
+    } catch {
+      throw new Error("I couldn't reach the FinSphere server. Please check your connection and try again.");
     }
+    if (res.status === 401) {
+      invalidateSession();
+      throw new Error('Your session has expired. Please sign in again.');
+    }
+    if (res.status === 429) throw new Error("You're sending messages quickly. Please wait a minute and try again.");
+    if (res.status === 400) throw new Error("I couldn't process that message. Please rephrase it and try again.");
+    const data = res.ok ? await res.json().catch(() => null) : null;
+    if (!data || typeof data.reply !== 'string') throw new Error('Something went wrong on our side. Please try again.');
+    return data.reply;
   };
 
   // Derive Stats classification-aware (see src/utils/finance.js): totalIncome and totalExpenses are all-time

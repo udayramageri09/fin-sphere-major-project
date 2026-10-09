@@ -6,6 +6,14 @@ import { AnimatedAvatar } from './AnimatedAvatar';
 import './AIAvatar.css';
 import { useFinance } from '../context/FinanceContext';
 import { useAvatarActions } from '../hooks/useAvatarActions';
+import { parseAssistantInput } from '../utils/assistantIntent';
+import { buildChatHistory, CHAT_CONTENT_MAX } from '../utils/chatHistory';
+
+const WELCOME = "Hi! I'm your FinSphere assistant. Ask about your own money, like \"How much did I spend this month?\" or \"How is my budget?\". To go somewhere, say \"Open transactions\" or \"Go to budgets\".";
+const HINTS = ['How am I doing this month?', 'How much did I spend?', 'How is my budget?', 'Open transactions'];
+
+// The short assistant line recorded for a navigation, so the transcript (and later follow-ups) show what happened.
+const navigationNote = (navigation) => (navigation.type === 'scroll' ? `Scrolling ${navigation.target}.` : `Opening ${navigation.label}.`);
 
 function Loader() {
   const { progress } = useProgress();
@@ -14,14 +22,21 @@ function Loader() {
 
 function AIAvatar() {
   const { sendMessageToBot } = useFinance();
-  const { executeCommand } = useAvatarActions();
+  const { performNavigation } = useAvatarActions();
 
   const [isOpen, setIsOpen] = useState(false);
   const [isThinking, setIsThinking] = useState(false);
-  const [messages, setMessages] = useState([
-    { id: 1, text: "Hi! I'm your FinSphere AI assistant. Ask me anything or say 'show transactions', 'where is credit score', etc. to navigate!", sender: 'bot' }
-  ]);
+  // `local` messages (welcome, connection errors, the circle-to-ask prompt) are shown but never sent as history.
+  const [messages, setMessages] = useState([{ id: 1, text: WELCOME, sender: 'bot', local: true }]);
   const [input, setInput] = useState('');
+  // Refs give the send pipeline the latest state even when it is called from the speech-recognition callback.
+  const messagesRef = useRef(messages);
+  const isOpenRef = useRef(isOpen);
+  const busyRef = useRef(false);
+  const idRef = useRef(1);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
+  useEffect(() => { isOpenRef.current = isOpen; }, [isOpen]);
+  const nextId = () => { idRef.current += 1; return idRef.current; };
 
   // Snippet state
   const [isSnipping, setIsSnipping] = useState(false);
@@ -129,8 +144,8 @@ function AIAvatar() {
     setIsSnipping(false);
     setIsOpen(true);
     setMessages(prev => [...prev,
-      { id: Date.now(), isSnippet: true, text: "Area circled on screen", sender: 'user' },
-      { id: Date.now() + 1, text: "I see you circled an area. What would you like to know about it?", sender: 'bot' }
+      { id: nextId(), isSnippet: true, local: true, text: "Area circled on screen", sender: 'user' },
+      { id: nextId(), local: true, text: "I see you circled an area. What would you like to know about it?", sender: 'bot' }
     ]);
   };
 
@@ -142,8 +157,63 @@ function AIAvatar() {
   };
 
   // ──────────────────────────────────────────────
-  // Voice & Text Sending
+  // One send pipeline for typed text, voice transcripts and hint chips (Issue #69)
+  //   question            -> answered from the user's own data; no navigation
+  //   navigation command  -> performed, and recorded in the transcript ("Opening Budgets.")
+  //   question + command  -> answered first, then the requested navigation happens
   // ──────────────────────────────────────────────
+  const showBubble = (text, ms = 3000) => {
+    if (speechTimeoutRef.current) clearTimeout(speechTimeoutRef.current);
+    setSpeech(text);
+    speechTimeoutRef.current = setTimeout(() => setSpeech(null), ms);
+  };
+
+  const handleSendText = async (rawText) => {
+    const text = typeof rawText === 'string' ? rawText.trim() : '';
+    if (!text || busyRef.current) return;
+    setInput('');
+
+    const prior = messagesRef.current;
+    const previousUserText = [...prior].reverse().find((m) => m.sender === 'user' && !m.local)?.text ?? '';
+    const { question, navigation } = parseAssistantInput(text, { previousUserText });
+    const userMsg = { id: nextId(), text, sender: 'user' };
+
+    if (!question) {
+      // Navigation only: no assistant call, but the turn is kept so "why?" / "show me" have context afterwards.
+      const note = navigationNote(navigation);
+      setMessages((prev) => [...prev, userMsg, { id: nextId(), text: note, sender: 'bot' }]);
+      performNavigation(navigation);
+      if (!isOpenRef.current) showBubble(note);
+      return;
+    }
+
+    busyRef.current = true;
+    setMessages((prev) => [...prev, userMsg]);
+    setIsOpen(true);
+    setIsThinking(true);
+    const history = buildChatHistory(
+      prior.filter((m) => !m.local).map((m) => ({ role: m.sender === 'bot' ? 'assistant' : 'user', content: m.text })),
+      question
+    );
+    try {
+      const reply = await sendMessageToBot(history);
+      setMessages((prev) => [...prev, { id: nextId(), text: reply, sender: 'bot' }]);
+    } catch (err) {
+      setMessages((prev) => [...prev, { id: nextId(), text: err.message, sender: 'bot', local: true }]);
+    } finally {
+      setIsThinking(false);
+      busyRef.current = false;
+    }
+    // The explicit navigation request is honoured after the answer, even if the answer could not be fetched.
+    if (navigation) {
+      setMessages((prev) => [...prev, { id: nextId(), text: navigationNote(navigation), sender: 'bot' }]);
+      performNavigation(navigation);
+    }
+  };
+
+  const sendRef = useRef(handleSendText);
+  useEffect(() => { sendRef.current = handleSendText; });
+
   const startListening = useCallback(() => {
     if (!voiceSupported) return;
     const SpeechRecognition = window.webkitSpeechRecognition || window.SpeechRecognition;
@@ -156,62 +226,20 @@ function AIAvatar() {
     recognition.onresult = (event) => {
       const transcript = event.results[0][0].transcript;
       setIsListening(false);
-      const handled = executeCommand(transcript);
-      if (handled) {
-        setIsOpen(false);
-        setSpeech(`"${transcript}" 🎤`);
-        if (speechTimeoutRef.current) clearTimeout(speechTimeoutRef.current);
-        speechTimeoutRef.current = setTimeout(() => setSpeech(null), 3000);
-      } else {
-        setIsOpen(true);
-        setInput(transcript);
-        setTimeout(() => handleSendText(transcript), 200);
-      }
+      // Same pipeline as typed text: no separate command handling for voice.
+      sendRef.current(transcript);
     };
     recognition.onerror = () => setIsListening(false);
     recognition.onend = () => setIsListening(false);
 
     recognitionRef.current = recognition;
     recognition.start();
-  }, [voiceSupported, executeCommand]);
+  }, [voiceSupported]);
 
   const stopListening = useCallback(() => {
     if (recognitionRef.current) recognitionRef.current.stop();
     setIsListening(false);
   }, []);
-
-  async function handleSendText(text) {
-    if (!text.trim() || isThinking) return;
-    setInput('');
-
-    const handled = executeCommand(text);
-    if (handled) {
-      setIsOpen(false);
-      return;
-    }
-
-    const newMsg = { id: Date.now(), text, sender: 'user' };
-    setMessages(prev => [...prev, newMsg]);
-    setIsThinking(true);
-
-    try {
-      const history = messages
-        .filter(m => !m.isSnippet)
-        .map(m => ({ role: m.sender === 'bot' ? 'assistant' : 'user', content: m.text }));
-      history.push({ role: 'user', content: text });
-      const reply = await sendMessageToBot(history);
-      setMessages(prev => [...prev, { id: Date.now() + 1, text: reply, sender: 'bot' }]);
-    } catch (err) {
-      console.error(err);
-      setMessages(prev => [...prev, {
-        id: Date.now() + 1,
-        text: "Oops! I encountered an error connecting to my backend. Please verify your connection.",
-        sender: 'bot'
-      }]);
-    } finally {
-      setIsThinking(false);
-    }
-  }
 
   const handleSend = async (e) => {
     e.preventDefault();
@@ -282,7 +310,7 @@ function AIAvatar() {
             </div>
             <div>
               <span className="ai-title">FinSphere Assistant</span>
-              <div className="ai-subtitle">Ask me anything or give commands!</div>
+              <div className="ai-subtitle">Answers from your own financial data</div>
             </div>
           </div>
           <button className="close-btn" onClick={() => setIsOpen(false)}>
@@ -292,9 +320,9 @@ function AIAvatar() {
 
         {/* Command hints */}
         <div className="command-hints">
-          <span className="hint-chip" onClick={() => handleSendText('show transactions')}>📊 Transactions</span>
-          <span className="hint-chip" onClick={() => handleSendText('where is credit score')}>⭐ Credit Score</span>
-          <span className="hint-chip" onClick={() => handleSendText('show portfolio')}>📈 Portfolio</span>
+          {HINTS.map((hint) => (
+            <span key={hint} className="hint-chip" onClick={() => handleSendText(hint)}>{hint}</span>
+          ))}
         </div>
 
         <div className="ai-chat-body" id="ai-chat-body">
@@ -322,7 +350,8 @@ function AIAvatar() {
         <form className="ai-chat-input" onSubmit={handleSend}>
           <input
             type="text"
-            placeholder="Ask or command me..."
+            placeholder="Ask about your money, or say “open budgets”…"
+            maxLength={CHAT_CONTENT_MAX}
             value={input}
             onChange={(e) => setInput(e.target.value)}
           />

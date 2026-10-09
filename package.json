@@ -8,7 +8,9 @@
     "server": "node server/server.js",
     "build": "vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:assistant": "node --test tests/assistantIntent.test.mjs",
+    "test:copilot": "node tests/financialCopilot.test.mjs"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.7",
@@ -32,6 +34,7 @@
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^17.5.0",
+    "jsdom": "^29.1.1",
     "postcss": "^8.5.26",
     "tailwindcss": "^4.3.3",
     "vite": "^5.4.11"

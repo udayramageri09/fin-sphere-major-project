@@ -1405,173 +1405,248 @@ function describeLiabilitiesForAssistant(userLiabilities) {
   return `\n${lines.join('\n')}`;
 }
 
+// ── Assistant chat contract (Issue #69) ───────────────────────────────────────────────────────────────────────
+// POST /api/chat and /api/plan-chat accept { messages: [{ role, content }] }: 1-20 items, role "user" or "assistant"
+// only (never "system" or anything else), content a non-empty string of at most 2000 characters, and the last item
+// from the user. Anything else is answered 400; it is never reinterpreted. Only the most recent 12 turns are sent to
+// the language model. History is conversational context, never a source of financial facts.
+const CHAT_MAX_MESSAGES = 20;
+const CHAT_MAX_CONTENT = 2000;
+const CHAT_HISTORY_TURNS = 12;
+const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+
+// Returns an error message, or null when `messages` is a valid conversation.
+function validateChatMessages(messages) {
+  if (!Array.isArray(messages)) return 'messages must be an array';
+  if (messages.length < 1 || messages.length > CHAT_MAX_MESSAGES) return `messages must contain 1-${CHAT_MAX_MESSAGES} items`;
+  for (const m of messages) {
+    if (!isPlainObject(m)) return 'each message must be an object';
+    if (Object.keys(m).some((k) => k !== 'role' && k !== 'content')) return 'a message may only have role and content';
+    if (m.role !== 'user' && m.role !== 'assistant') return 'message role must be "user" or "assistant"';
+    if (typeof m.content !== 'string' || m.content.trim() === '') return 'message content must be a non-empty string';
+    if (m.content.length > CHAT_MAX_CONTENT) return `message content must be at most ${CHAT_MAX_CONTENT} characters`;
+  }
+  if (messages[messages.length - 1].role !== 'user') return 'the last message must be from the user';
+  return null;
+}
+const recentTurns = (messages) => messages.slice(-CHAT_HISTORY_TURNS).map(({ role, content }) => ({ role, content: content.trim() }));
+
+// ── Deterministic assistant (used when no language model is configured, or the call fails) ────────────────────
+// Every answer is built only from the server-side context below; nothing is guessed. Topics are matched on whole
+// words ("high" is not "hi", "remaining" is not "main"). A message with no topic of its own ("why?", "tell me more",
+// "how did you calculate that?") continues the most recent user topic in the bounded history.
+const FALLBACK_TOPICS = [
+  ['credit', /\b(?:credit\s+score|cibil|credit\s+rating)\b/],
+  ['portfolio', /\b(?:portfolio|stocks?|shares|mutual\s+funds?|holdings)\b/],
+  ['networth', /\b(?:net\s+worth|wealth)\b/],
+  ['emergency', /\bemergency\b/],
+  ['budget', /\bbudgets?\b/],
+  ['liabilities', /\b(?:liabilit(?:y|ies)|loans?|debts?|emis?)\b/],
+  ['goals', /\bgoals?\b/],
+  ['income', /\b(?:income|salary|earn|earned|earnings?|received)\b/],
+  ['spending', /\b(?:spend|spent|spending|expenses?|costs?|refunds?)\b/],
+  ['cashflow', /\b(?:cash\s*flow|how\s+am\s+i\s+doing|doing\s+financially|overview|summary|summari[sz]e|balance|savings?)\b/],
+  ['statement', /\b(?:statements?|upload|import)\b/],
+];
+const GREETING = /^\s*(?:hi|hello|hey|namaste|good\s+(?:morning|afternoon|evening))(?:\s+(?:there|finsphere))?[\s!.,]*$/i;
+const ASKS_CALCULATION = /\b(?:calculat\w*|comput\w*|work(?:ed)?\s+(?:that|it|this)\s+out|formula|how\s+did\s+you\s+get)\b/i;
+const ASKS_WHY = /^\s*(?:why|how\s+come)\b/i;
+
+function fallbackTopic(text) {
+  const lower = text.toLowerCase();
+  return FALLBACK_TOPICS.find(([, re]) => re.test(lower))?.[0] ?? null;
+}
+
+function fallbackReply(history, ctx) {
+  const last = history[history.length - 1].content;
+  if (GREETING.test(last)) {
+    return 'Hi! 👋 Ask me about your spending, income, savings goals, budgets, liabilities, emergency fund or cash flow.';
+  }
+  let topic = fallbackTopic(last);
+  let continued = false;
+  if (!topic) {
+    // Follow-up: continue the most recent earlier USER topic (assistant text is never used as a fact source).
+    for (let i = history.length - 2; i >= 0 && !topic; i--) {
+      if (history[i].role === 'user') topic = fallbackTopic(history[i].content);
+    }
+    continued = Boolean(topic);
+  }
+  if (!topic) {
+    return "I'm not sure which figure you mean. I can answer from your recorded data about your spending, income, savings goals, budgets, liabilities, emergency fund and cash flow.";
+  }
+  const explain = ASKS_CALCULATION.test(last) || ASKS_WHY.test(last);
+  const m = ctx.monthTotals, all = ctx.allTotals, month = ctx.month;
+  const provisional = m.unknownCount > 0
+    ? ` ${m.unknownCount} of this month's transactions are not classified yet and are counted by their direction, so treat the figures as provisional.`
+    : '';
+  const lead = continued && ASKS_WHY.test(last) ? 'I can only explain this from your recorded figures. ' : '';
+  const spendingRule = 'Spending = expenses (plus unclassified money going out) minus refunds, never below ₹0 for the period; transfers are not counted.';
+  const incomeRule = 'Income = transactions classified as income plus unclassified money coming in; refunds and transfers are not income.';
+  let reply;
+  switch (topic) {
+    case 'credit':
+      reply = "I don't have a credit score for you. FinSphere isn't connected to any credit bureau, and I won't estimate one from your transactions.";
+      break;
+    case 'portfolio':
+      reply = "I don't have any portfolio or investment holdings data for you, so I can't describe an allocation or returns.";
+      break;
+    case 'networth':
+      reply = `I can't work out your net worth because FinSphere doesn't have your assets. From your recorded transactions, your net cash flow (total income minus total spending, refunds and transfers handled as described) is ${formatRupees(all.netCashFlow)}.`;
+      break;
+    case 'emergency':
+      reply = ctx.emergencyFund
+        ? `Your saved emergency fund: ${describeEmergencyFundForAssistant(ctx.emergencyFund)}.`
+        : "You haven't set up an emergency fund yet. You can add it on the Goals page.";
+      break;
+    case 'budget':
+      reply = ctx.budgets.length === 0
+        ? `You haven't set any budgets for ${month}. You can add them on the Goals page.`
+        : `Your budgets for ${month}:${describeBudgetsForAssistant(ctx.budgets)}`;
+      if (explain && ctx.budgets.length) reply += `\nEach budget's spending is that category's expenses minus its refunds in ${month} (never below ₹0); transfers are not counted.`;
+      break;
+    case 'liabilities':
+      reply = ctx.liabilities.length === 0
+        ? "You don't have any saved liabilities yet. You can add them on the Liabilities page."
+        : `Your saved liabilities:${describeLiabilitiesForAssistant(ctx.liabilities)}`;
+      break;
+    case 'goals':
+      reply = ctx.goals.length === 0
+        ? "You don't have any saved goals yet. You can add one on the Goals page."
+        : `Your saved goals:${describeGoalsForAssistant(ctx.goals)}`;
+      break;
+    case 'income':
+      reply = `This month (${month}) your income is ${formatRupees(m.totalIncome)}. Across all ${all.count} recorded transactions it is ${formatRupees(all.totalIncome)}.${provisional}`;
+      if (explain) reply += ` ${incomeRule}`;
+      break;
+    case 'spending':
+      reply = `This month (${month}) your spending is ${formatRupees(m.totalSpending)}: ${formatRupees(m.grossSpending)} of expenses minus ${formatRupees(m.refunds)} of refunds. Across all ${all.count} recorded transactions it is ${formatRupees(all.totalSpending)}.${provisional}`;
+      if (explain) reply += ` ${spendingRule}`;
+      break;
+    case 'cashflow': {
+      const over = ctx.budgets.filter((b) => b.status === 'over').length;
+      const budgetLine = ctx.budgets.length ? ` ${over} of your ${ctx.budgets.length} budgets for ${month} ${over === 1 ? 'is' : 'are'} over the limit.` : '';
+      reply = `This month (${month}): income ${formatRupees(m.totalIncome)}, spending ${formatRupees(m.totalSpending)}, net cash flow ${formatRupees(m.netCashFlow)}.${budgetLine}${provisional} Your overall health score comes from the analysis on the Plans page.`;
+      if (explain) reply += ` Net cash flow = income minus spending. ${incomeRule} ${spendingRule}`;
+      break;
+    }
+    case 'statement':
+      reply = 'You can import transactions on the Transactions page, by pasting statement text or uploading a .csv, .txt, .xls or .xlsx file.';
+      break;
+    default:
+      reply = "I'm not sure which figure you mean.";
+  }
+  return lead + reply;
+}
+
 // 5. POST /api/chat
-// The assistant may only state facts that exist for the authenticated user: their own
-// transactions (and totals derived from them), their own saved goals and their own saved
-// liabilities. Credit score and portfolio data do not exist in FinSphere, so they are declared
-// unavailable instead of being filled in.
+// The assistant may only state facts that exist for the authenticated user, all loaded here on the server: their
+// own transactions and the classification-aware totals derived from them (all-time and for the current month),
+// goals, liabilities, emergency fund and this month's budgets. Credit score, portfolio and net worth do not exist in
+// FinSphere, so they are declared unavailable instead of being filled in.
 app.post('/api/chat', authenticate, chatLimiter, async (req, res) => {
-  const { messages } = req.body;
-  if (!messages || !Array.isArray(messages)) {
-    return res.status(400).json({ error: 'Messages array is required' });
-  }
+  const invalid = validateChatMessages(req.body?.messages);
+  if (invalid) return res.status(400).json({ error: invalid });
+  const history = recentTurns(req.body.messages);
 
-  // Scope financial context to the authenticated user only.
-  // Nothing belonging to other users is ever read or sent to the AI.
-  let userTransactions;
   try {
-    userTransactions = await listTransactionsByUser(req.user.id);
-  } catch (err) {
-    return respondDbError(res, err, 'Could not load transactions');
-  }
-  let userGoals;
-  try {
-    userGoals = await listGoalsByUser(req.user.id);
-  } catch (err) {
-    return respondDbError(res, err, 'Could not load goals');
-  }
-  let emergencyFund;
-  try {
-    emergencyFund = await getEmergencyFundByUser(req.user.id);
-  } catch (err) {
-    return respondDbError(res, err, 'Could not load emergency fund');
-  }
-  // The calendar month the assistant talks about is the server's current UTC month, and it is named in the prompt.
-  const budgetMonth = new Date().toISOString().slice(0, 7);
-  let userBudgets;
-  try {
-    userBudgets = await listBudgetsByUserAndMonth(req.user.id, budgetMonth);
-  } catch (err) {
-    return respondDbError(res, err, 'Could not load budgets');
-  }
-  let userLiabilities;
-  try {
-    userLiabilities = await listLiabilitiesByUser(req.user.id);
-  } catch (err) {
-    return respondDbError(res, err, 'Could not load liabilities');
-  }
+    // Scope financial context to the authenticated user only. Nothing belonging to other users is read.
+    // The month the assistant talks about is the server's current UTC month (the same month used for budgets).
+    const month = new Date().toISOString().slice(0, 7);
+    let userTransactions, userGoals, emergencyFund, userBudgets, userLiabilities, allTotals, monthTotals;
+    try {
+      [userTransactions, userGoals, emergencyFund, userBudgets, userLiabilities, allTotals, monthTotals] = await Promise.all([
+        listTransactionsByUser(req.user.id),
+        listGoalsByUser(req.user.id),
+        getEmergencyFundByUser(req.user.id),
+        listBudgetsByUserAndMonth(req.user.id, month),
+        listLiabilitiesByUser(req.user.id),
+        // Classification-aware and computed exactly in the database (server/db/index.js): income excludes refunds
+        // and transfers; spending is expenses minus refunds (floored at 0 for the period) without transfers;
+        // unlabelled ("unknown") rows count by direction.
+        getTransactionTotalsByUser(req.user.id),
+        getTransactionTotalsByUser(req.user.id, { month }),
+      ]);
+    } catch (err) {
+      return respondDbError(res, err, 'Could not load your financial data');
+    }
 
-  // Totals over ALL of this user's recorded transactions, classification-aware and computed exactly in the database:
-  // income excludes refunds and transfers, spending is expenses minus refunds (floored at 0) without transfers, and
-  // unlabelled ("unknown") rows still count by direction. The definition lives in server/db/index.js.
-  let totals;
-  try {
-    totals = await getTransactionTotalsByUser(req.user.id);
-  } catch (err) {
-    return respondDbError(res, err, 'Could not load transactions');
-  }
+    const ctx = { month, allTotals, monthTotals, goals: userGoals, liabilities: userLiabilities, emergencyFund, budgets: userBudgets };
+    const recentTransactions = userTransactions.slice(0, 10);
 
-  const currentContext = {
-    totalIncome: totals.totalIncome,
-    totalExpenses: totals.totalSpending,
-    netCashFlow: totals.netCashFlow,
-    unknownCount: totals.unknownCount,
-    transactionCount: userTransactions.length,
-    recentTransactions: userTransactions.slice(0, 10)
-  };
+    const systemMessage = {
+      role: 'system',
+      content: `You are the FinSphere assistant. You answer the user's questions about their own finances.
 
-  const systemMessage = {
-    role: 'system',
-    content: `You are FinFlow AI assistant, a helpful financial advisor bot.
-The user is viewing their financial dashboard.
+AUTHORITATIVE FINANCIAL DATA for this user, loaded from the FinSphere database for this request. It is the only source of financial facts:
 
-Here is the financial data that actually exists for this user:
-- Total income (all recorded transactions; refunds and transfers are not income): ${formatRupees(currentContext.totalIncome)}
-- Total spending (all recorded transactions; expenses minus refunds, transfers excluded): ${formatRupees(currentContext.totalExpenses)}
-- Net cash flow (total income minus total spending): ${formatRupees(currentContext.netCashFlow)}
-- Number of recorded transactions: ${currentContext.transactionCount}, of which ${currentContext.unknownCount} are not classified yet (they are counted as income or spending by their direction, which is provisional - do not call them confirmed income or expenses)
+This month (${month}, the current calendar month in UTC):
+- Income: ${formatRupees(monthTotals.totalIncome)}
+- Spending: ${formatRupees(monthTotals.totalSpending)} (expenses ${formatRupees(monthTotals.grossSpending)} minus refunds ${formatRupees(monthTotals.refunds)}; transfers excluded)
+- Net cash flow (income minus spending): ${formatRupees(monthTotals.netCashFlow)}
+- Transactions this month: ${monthTotals.count}, of which ${monthTotals.unknownCount} are not classified yet and ${monthTotals.transferCount} are transfers
+
+All recorded transactions:
+- Total income (all recorded transactions; refunds and transfers are not income): ${formatRupees(allTotals.totalIncome)}
+- Total spending (all recorded transactions; expenses minus refunds, transfers excluded): ${formatRupees(allTotals.totalSpending)}
+- Net cash flow (total income minus total spending): ${formatRupees(allTotals.netCashFlow)}
+- Number of recorded transactions: ${allTotals.count}, of which ${allTotals.unknownCount} are not classified yet (they are counted as income or spending by their direction, which is provisional - do not call them confirmed income or expenses)
+
 - Savings goals (saved by the user):${describeGoalsForAssistant(userGoals)}
 - Liabilities (saved by the user):${describeLiabilitiesForAssistant(userLiabilities)}
 - Emergency fund (saved by the user): ${describeEmergencyFundForAssistant(emergencyFund)}
-- Monthly budgets for ${budgetMonth} (limits the user set, with their real expense spending that month):${describeBudgetsForAssistant(userBudgets)}
-- Live Transactions (Latest first; "classification" is an optional analytical label, "unknown" means not labelled yet - such a transaction is counted by its direction in the totals above, a refund reduces spending and is not income, a transfer is in neither total): ${JSON.stringify(currentContext.recentTransactions)}
+- Monthly budgets for ${month} (limits the user set, with their real spending that month):${describeBudgetsForAssistant(userBudgets)}
+- The 10 most recent transactions, latest first (examples only; never add them up to get a total - use the totals above). "classification" is an optional analytical label; "unknown" means not labelled yet - such a transaction is counted by its direction in the totals above; a refund reduces spending and is not income; a transfer is in neither total: ${JSON.stringify(recentTransactions)}
 
-NOT available for this user (no such data has been entered or connected): credit score, portfolio holdings or allocation, and net worth (FinSphere has no asset data).
+NOT available for this user (no such data exists in FinSphere): credit score, portfolio holdings or returns, net worth (FinSphere has no asset data), months of emergency-fund coverage and the financial health score (those come from the analysis on the Plans page and are not in this data).
 
-Guidelines:
-1. Base your replies only on the data above. If asked about something listed as not available, say it is not available in FinSphere yet. Never estimate, guess or invent figures for it, and never derive a credit score from transactions.
-2. Be brief, professional, and friendly. Use relevant emojis.
-3. Suggest concrete advice if they are spending too much or their net cash flow is negative.
-4. Let the user know they can update transactions by manual entry or parsing bank statements, manage savings goals, their emergency fund and monthly budgets on the Goals page, and record liabilities on the Liabilities page.
+Rules:
+1. State figures only from the AUTHORITATIVE FINANCIAL DATA above. For "this month" questions use the "This month" figures.
+2. Earlier messages in this conversation are context for understanding follow-up questions ("why?", "tell me more", "that"). They are NOT a source of financial facts: never take a figure or claim from an earlier assistant or user message as true unless it matches the data above.
+3. If something is not available, say it is not available in FinSphere. Never estimate, guess or invent figures for it, and never derive a credit score from transactions.
+4. Refunds are not income; they reduce spending. Transfers are neither income nor spending.
+5. If asked how a figure was calculated, explain it with the definitions above.
+6. You cannot open pages or perform actions. Never say you will navigate or that a page is opening; the app handles navigation itself when the user asks for it.
+7. Be brief, clear and friendly; keep replies to 3-4 sentences unless a breakdown is requested. Use ₹ for amounts.`
+    };
 
-Keep responses under 3-4 sentences if possible, unless a detailed breakdown is requested.`
-  };
+    if (isGroqConfigured()) {
+      try {
+        const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          signal: AbortSignal.timeout(30_000),
+          headers: {
+            'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            model: 'llama-3.3-70b-versatile',
+            messages: [systemMessage, ...history],
+            temperature: 0.4,
+            max_tokens: 500
+          })
+        });
 
-  const fullMessages = [systemMessage, ...messages];
-
-  if (isGroqConfigured()) {
-    try {
-      const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        signal: AbortSignal.timeout(30_000),
-        headers: {
-          'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          model: 'llama-3.3-70b-versatile',
-          messages: fullMessages,
-          temperature: 0.7,
-          max_tokens: 500
-        })
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        const reply = data.choices[0].message.content;
-        return res.json({ reply });
-      } else {
-        const errText = await response.text();
-        console.error('Groq API Error:', errText);
+        if (response.ok) {
+          const data = await response.json();
+          const reply = data?.choices?.[0]?.message?.content;
+          if (typeof reply === 'string' && reply.trim()) return res.json({ reply });
+          console.error('Groq API returned no reply text');
+        } else {
+          console.error('Groq API Error: status', response.status);
+        }
+      } catch (err) {
+        console.error('Error calling Groq API:', err.name);
       }
-    } catch (err) {
-      console.error('Error calling Groq API:', err);
     }
+
+    // Deterministic fallback (no language model configured, or the call failed)
+    console.log('Using fallback chatbot response');
+    return res.json({ reply: fallbackReply(history, ctx) });
+  } catch (err) {
+    // Never let one request take the process down; nothing from the request is logged.
+    console.error('Chat request failed:', err?.name ?? 'unknown');
+    if (!res.headersSent) return res.status(500).json({ error: 'Could not answer right now' });
   }
-
-  // Fallback chatbot responses (if Groq is not configured or fails)
-  console.log('Using fallback chatbot response');
-  const userMessage = messages[messages.length - 1].content.toLowerCase();
-  let reply = '';
-
-  if (userMessage.includes('hello') || userMessage.includes('hi')) {
-    reply = `Hi there! 👋 I am your FinFlow AI assistant. How can I assist you with your budget or transactions today?`;
-  } else if (userMessage.includes('liabilit') || userMessage.includes('loan') || userMessage.includes('debt')) {
-    reply = userLiabilities.length === 0
-      ? `You don't have any saved liabilities yet. You can add them from the Liabilities page.`
-      : `Your saved liabilities:${describeLiabilitiesForAssistant(userLiabilities)}`;
-  } else if (userMessage.includes('budget')) {
-    reply = userBudgets.length === 0
-      ? `You haven't set any budgets for ${budgetMonth}. You can add them on the Goals page.`
-      : `Your budgets for ${budgetMonth}:${describeBudgetsForAssistant(userBudgets)}`;
-  } else if (userMessage.includes('emergency')) {
-    reply = emergencyFund
-      ? `Your saved emergency fund: ${describeEmergencyFundForAssistant(emergencyFund)}.`
-      : `You haven't set up an emergency fund yet. You can add it on the Goals page.`;
-  } else if (userMessage.includes('credit score') || userMessage.includes('credit')) {
-    reply = `I don't have a credit score for you. FinSphere isn't connected to any credit bureau, and I won't estimate one from your transactions.`;
-  } else if (userMessage.includes('goal') || userMessage.includes('saving')) {
-    reply = userGoals.length === 0
-      ? `You don't have any saved goals yet. You can add one from the Goals page.`
-      : `Your saved goals:${describeGoalsForAssistant(userGoals)}`;
-  } else if (userMessage.includes('portfolio') || userMessage.includes('mutual') || userMessage.includes('stock')) {
-    reply = `I don't have any portfolio or investment holdings data for you, so I can't describe an allocation.`;
-  } else if (userMessage.includes('net worth') || userMessage.includes('wealth') || userMessage.includes('balance')) {
-    reply = `I can't work out your net worth because FinSphere doesn't have your assets. From your recorded transactions, your net cash flow (total income minus total spending, refunds and transfers handled as described in your totals) is ${formatRupees(currentContext.netCashFlow)}. 💰`;
-  } else if (userMessage.includes('spend') || userMessage.includes('expense') || userMessage.includes('cost')) {
-    reply = `Across your ${currentContext.transactionCount} recorded transactions, your total spending (expenses minus refunds, transfers excluded) comes to ${formatRupees(currentContext.totalExpenses)}. Try to keep an eye on non-essential expenditures! 📉`;
-  } else if (userMessage.includes('income') || userMessage.includes('salary') || userMessage.includes('earn')) {
-    reply = `Across your ${currentContext.transactionCount} recorded transactions, your total income (refunds and transfers excluded) comes to ${formatRupees(currentContext.totalIncome)}. 💵`;
-  } else if (userMessage.includes('statement') || userMessage.includes('upload') || userMessage.includes('parse')) {
-    reply = `You can easily parse bank statements by going to the 'All Transactions' tab, pasting your bank statement logs, or uploading a statement text file! I'll auto-extract all of them. 📂`;
-  } else {
-    // Pick a random recent transaction to talk about (scoped to the authenticated user)
-    const randomTx = userTransactions[Math.floor(Math.random() * userTransactions.length)];
-    const txDetail = randomTx ? `For example, I see a recent transaction for "${randomTx.title}" of ${formatRupees(Math.abs(randomTx.amount))}.` : '';
-    reply = `I can help you review your finances! ${txDetail} Ask me about your spending, income, savings goals, liabilities, or how to import statements! 💡`;
-  }
-
-  res.json({ reply });
 });
 
 // 6. GET /api/ml/analyze — proxies full ML analysis to Python microservice
@@ -1643,17 +1718,22 @@ app.get('/api/ml/analyze', authenticate, mlLimiter, async (req, res) => {
 // (which is now scoped to the authenticated user). Full server-side re-validation of mlContext
 // is a follow-up task (tracked separately; a redesign of the plan-chat architecture is required).
 app.post('/api/plan-chat', authenticate, chatLimiter, async (req, res) => {
-  const { messages, mlContext } = req.body;
-  if (!messages || !Array.isArray(messages)) {
-    return res.status(400).json({ error: 'Messages array is required' });
+  const { messages, mlContext } = req.body ?? {};
+  const invalid = validateChatMessages(messages);
+  if (invalid) return res.status(400).json({ error: invalid });
+  if (mlContext !== undefined && mlContext !== null && !isPlainObject(mlContext)) {
+    return res.status(400).json({ error: 'mlContext must be an object' });
   }
-
-  // Build a tightly constrained system prompt from ML data
-  const health = mlContext?.health || {};
-  const forecast = mlContext?.forecast || {};
-  const anomalies = mlContext?.anomalies || {};
-  const clusters = mlContext?.clusters || {};
-  const plan = mlContext?.plan || {};
+  try {
+  // Build a tightly constrained system prompt from ML data. mlContext is still client-supplied (see above); these
+  // guards only stop a malformed shape from throwing, they do not make it trusted.
+  const section = (v) => (isPlainObject(v) ? v : {});
+  const strings = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string' || typeof x === 'number').map(String) : []);
+  const health = section(mlContext?.health);
+  const forecast = section(mlContext?.forecast);
+  const anomalies = section(mlContext?.anomalies);
+  const clusters = section(mlContext?.clusters);
+  const plan = section(mlContext?.plan);
 
   const healthScore = health.composite_score ?? 'N/A';
   const healthGrade = health.grade?.grade ?? 'N/A';
@@ -1680,10 +1760,11 @@ app.post('/api/plan-chat', authenticate, chatLimiter, async (req, res) => {
   const projectedSavings = forecast.insights?.projected_savings_3m ?? 'N/A';
 
   const anomalyCount = anomalies.total_flagged ?? 0;
-  const topAnomaly = anomalies.anomalies?.[0]?.title ?? 'None';
+  const topAnomaly = (Array.isArray(anomalies.anomalies) && isPlainObject(anomalies.anomalies[0]) ? anomalies.anomalies[0].title : null) ?? 'None';
 
   const dominantCluster = clusters.insights?.dominant_cluster ?? 'unknown';
-  const planSteps = (plan.steps || []).map((s, i) => `${i+1}. [${s.priority.toUpperCase()}] ${s.title}: ${s.description}`).join('\n');
+  const planSteps = (Array.isArray(plan.steps) ? plan.steps.filter(isPlainObject) : [])
+    .map((s, i) => `${i+1}. [${String(s.priority ?? 'info').toUpperCase()}] ${String(s.title ?? '')}: ${String(s.description ?? '')}`).join('\n');
 
   const systemPrompt = `You are the FinFlow AI Plan Advisor. Your ONLY job is to NARRATE and EXPLAIN the results 
 produced by our ML models to the user in a conversational way. You must NOT invent, assume, 
@@ -1694,8 +1775,8 @@ Here are the EXACT ML model outputs you must narrate:
 === FINANCIAL HEALTH SCORER (Rule-Based Ratio Engine) ===
 - Composite Score: ${healthScore}/100 (Grade: ${healthGrade})
 - Savings Rate: ${savingsRate}%  (benchmark: ≥20%)
-${optionalHealthLines}${notAnalysedLine}- Strengths:${(health.strengths || []).join(', ') || 'None identified'}
-- Weaknesses: ${(health.weaknesses || []).join(', ') || 'None identified'}
+${optionalHealthLines}${notAnalysedLine}- Strengths:${strings(health.strengths).join(', ') || 'None identified'}
+- Weaknesses: ${strings(health.weaknesses).join(', ') || 'None identified'}
 
 === LINEAR REGRESSION FORECASTER ===
 - Income Trend: ${incomeTrend}
@@ -1722,7 +1803,7 @@ Guidelines:
 
   const fullMessages = [
     { role: 'system', content: systemPrompt },
-    ...messages
+    ...recentTurns(messages)
   ];
 
   if (isGroqConfigured()) {
@@ -1744,18 +1825,23 @@ Guidelines:
 
       if (response.ok) {
         const data = await response.json();
-        return res.json({ reply: data.choices[0].message.content });
+        const reply = data?.choices?.[0]?.message?.content;
+        if (typeof reply === 'string' && reply.trim()) return res.json({ reply });
       }
     } catch (err) {
-      console.error('Groq plan-chat error:', err);
+      console.error('Groq plan-chat error:', err.name);
     }
   }
 
   // Fallback: summarise plan without LLM
-  const fallbackReply = plan.plan_summary
-    ? `${plan.plan_summary} The ML models identified ${plan.step_count || 0} action items for you.`
+  const fallbackReply = typeof plan.plan_summary === 'string' && plan.plan_summary
+    ? `${plan.plan_summary} The ML models identified ${Number(plan.step_count) || 0} action items for you.`
     : 'ML analysis complete. Please configure Groq API key for AI narration.';
   res.json({ reply: fallbackReply });
+  } catch (err) {
+    console.error('Plan chat request failed:', err?.name ?? 'unknown');
+    if (!res.headersSent) res.status(500).json({ error: 'Could not answer right now' });
+  }
 });
 
 // Last-resort error handler: always JSON, never a stack trace, and nothing from the request body is logged.
