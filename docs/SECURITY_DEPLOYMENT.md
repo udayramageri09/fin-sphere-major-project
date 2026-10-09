@@ -70,6 +70,18 @@ Statement parsing uses SheetJS (`xlsx`). The npm registry copy (0.18.5) has know
 
 `npm audit --omit=dev`: 0 vulnerabilities in the API (`server/`) and in the frontend (root). Re-run before each release. `ml_service/requirements.txt` uses minimum versions (`>=`) rather than pins and has no automated vulnerability scan; pin and scan it in CI for a real deployment.
 
-## 10. Known remaining risks
+## 10. Confirmed assistant actions (Issue #73, Phase 1)
+
+When the assistant adds a transaction or a goal contribution, the chat message never writes anything by itself:
+
+* **Server-issued proposals.** The server stores a proposal (the validated payload, the resolved goal id and an exact preview) in `assistant_action_proposals`, owned by the signed-in user. The payload and ownership stay server-side.
+* **The client confirms only a proposal id.** `POST /api/assistant/actions/:id/confirm` and `/cancel` take the id from the URL; any request body is ignored, so a client cannot alter the amount, title, goal or owner.
+* **Short-lived and single-use.** A proposal lives about 3 minutes (judged by the database clock) and can be executed once. Confirmation first does an atomic `pending` to `executing` update, so of any number of simultaneous confirmations exactly one runs. Confirming again returns the stored result and never writes twice.
+* **Ownership.** Another user's proposal id behaves as not found (404), the same as a missing one.
+* **Rate limiting.** Confirm and cancel share a per-user limit of 30 requests per minute.
+* **Same validation as manual writes.** Execution calls the existing validators and owner-scoped database helpers, including the row lock that re-checks a goal's target at execution time.
+* **Known limitation.** If the process or database fails after a proposal is claimed but before its result is saved, the proposal stays in `executing`. It fails safe (it is never replayed automatically, so nothing can be written twice), but the user sees "already being processed" until it is asked for again.
+
+## 11. Known remaining risks
 
 See the final section of the Issue #67 report; in short: ML service isolation is a deployment responsibility, in-memory rate limits, no CSRF token beyond SameSite, no parser sandbox, CDN-hosted `xlsx` tarball, no Python vulnerability scanning, and Python `main.py` still labels clustering "KMeans" (wording only).

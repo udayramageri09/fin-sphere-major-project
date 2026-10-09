@@ -789,6 +789,141 @@ export async function upsertEmergencyFund({ userId, currentAmount, targetAmount,
   return toEmergencyFund(rows[0]);
 }
 
+// ── Assistant action proposals (Issue #73) ─────────────────────────────────────────────────────────────────────────
+// A proposal is what the assistant WOULD do, stored in its validated form and executed only after the user confirms.
+// Every statement is owner-scoped and every expiry decision uses the database clock (now()), so the app server's clock
+// can never extend or shorten a confirmation window. Statuses: draft | pending | executing | executed | failed |
+// cancelled | expired (see schema.sql). At most one draft/pending proposal exists per user.
+function toProposal(row) {
+  return {
+    id: row.id,
+    userId: Number(row.user_id),
+    kind: row.kind,
+    status: row.status,
+    payload: row.payload,
+    summary: row.summary,
+    display: row.display,
+    result: row.result,
+    expiresAt: row.expires_at.toISOString(),
+    expired: row.expired,
+  };
+}
+
+// The user's open (draft or pending) proposal, or null. Lapsed ones are marked expired first.
+export async function getActiveProposal(userId) {
+  await pool.query(
+    `UPDATE assistant_action_proposals SET status = 'expired', updated_at = now()
+     WHERE user_id = $1 AND status IN ('draft', 'pending') AND expires_at <= now()`,
+    [userId]);
+  const { rows } = await pool.query(
+    `SELECT id, user_id, kind, status, payload, summary, display, result, expires_at, (expires_at <= now()) AS expired
+     FROM assistant_action_proposals WHERE user_id = $1 AND status IN ('draft', 'pending')
+     ORDER BY created_at DESC LIMIT 1`,
+    [userId]);
+  return rows.length ? toProposal(rows[0]) : null;
+}
+
+// Stores a new open proposal and cancels whatever was open before, in one transaction.
+export async function replaceActiveProposal({ id, userId, kind, status, payload, summary, display, ttlSeconds }) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `UPDATE assistant_action_proposals SET status = 'expired', updated_at = now()
+       WHERE user_id = $1 AND status IN ('draft', 'pending') AND expires_at <= now()`,
+      [userId]);
+    await client.query(
+      `UPDATE assistant_action_proposals SET status = 'cancelled', updated_at = now()
+       WHERE user_id = $1 AND status IN ('draft', 'pending')`,
+      [userId]);
+    const { rows } = await client.query(
+      `INSERT INTO assistant_action_proposals (id, user_id, kind, payload, summary, display, status, expires_at, created_at, updated_at)
+       VALUES ($1, $2, $3, $4::jsonb, $5, $6::jsonb, $7, now() + make_interval(secs => $8::double precision), now(), now())
+       RETURNING id, user_id, kind, status, payload, summary, display, result, expires_at, (expires_at <= now()) AS expired`,
+      [id, userId, kind, JSON.stringify(payload), summary, JSON.stringify(display), status, ttlSeconds]);
+    await client.query('COMMIT');
+    return toProposal(rows[0]);
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch { /* the original error is what matters */ }
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// One proposal by id, only if it is the user's (a missing id and someone else's id are indistinguishable).
+export async function getProposalByUserAndId(userId, id) {
+  const { rows } = await pool.query(
+    `SELECT id, user_id, kind, status, payload, summary, display, result, expires_at, (expires_at <= now()) AS expired
+     FROM assistant_action_proposals WHERE user_id = $1 AND id = $2`,
+    [userId, String(id)]);
+  return rows.length ? toProposal(rows[0]) : null;
+}
+
+// THE replay guard: only a pending, unexpired proposal of this user can move to 'executing', and the UPDATE is
+// atomic, so exactly one of any number of simultaneous confirmations gets the row back. Everyone else gets null.
+export async function claimProposal(userId, id) {
+  const { rows } = await pool.query(
+    `UPDATE assistant_action_proposals SET status = 'executing', updated_at = now()
+     WHERE id = $1 AND user_id = $2 AND status = 'pending' AND expires_at > now()
+     RETURNING id, user_id, kind, status, payload, summary, display, result, expires_at, (expires_at <= now()) AS expired`,
+    [String(id), userId]);
+  return rows.length ? toProposal(rows[0]) : null;
+}
+
+// Records the outcome of a claimed proposal ('executed' with what was stored, or 'failed' with the reason).
+export async function finishProposal(userId, id, status, result) {
+  const { rows } = await pool.query(
+    `UPDATE assistant_action_proposals SET status = $3, result = $4::jsonb, updated_at = now()
+     WHERE id = $1 AND user_id = $2 AND status = 'executing'
+     RETURNING id`,
+    [String(id), userId, status, JSON.stringify(result)]);
+  return rows.length > 0;
+}
+
+// Cancels an open proposal. Returns true if it was open (draft or pending) and is now cancelled.
+export async function cancelProposal(userId, id) {
+  const { rowCount } = await pool.query(
+    `UPDATE assistant_action_proposals SET status = 'cancelled', updated_at = now()
+     WHERE id = $1 AND user_id = $2 AND status IN ('draft', 'pending')`,
+    [String(id), userId]);
+  return rowCount > 0;
+}
+
+// Marks a pending proposal whose window has passed as expired (so it reads as expired from now on).
+export async function expireProposal(userId, id) {
+  const { rowCount } = await pool.query(
+    `UPDATE assistant_action_proposals SET status = 'expired', updated_at = now()
+     WHERE id = $1 AND user_id = $2 AND status IN ('draft', 'pending') AND expires_at <= now()`,
+    [String(id), userId]);
+  return rowCount > 0;
+}
+
+// What adding `amount` to one of the user's goals would do, computed in exact NUMERIC (never floating point):
+// the balance after, the room left, and whether the goal is already complete or the amount would overshoot.
+// Read-only: the locked check inside addGoalContribution stays the authority when the contribution is executed.
+export async function previewGoalContribution(userId, goalId, amount) {
+  const { rows } = await pool.query(
+    `SELECT title, target_amount::text AS target, current_amount::text AS current,
+            (current_amount + $3::numeric)::text AS after,
+            (target_amount - current_amount)::text AS remaining,
+            (current_amount >= target_amount) AS complete,
+            ((current_amount + $3::numeric) > target_amount) AS exceeds
+     FROM goals WHERE user_id = $1 AND id = $2`,
+    [userId, String(goalId), String(amount)]);
+  if (rows.length === 0) return null;
+  const r = rows[0];
+  return {
+    title: r.title,
+    target: Number(r.target),
+    current: Number(r.current),
+    after: Number(r.after),
+    remaining: Number(r.remaining),
+    complete: r.complete,
+    exceeds: r.exceeds,
+  };
+}
+
 export async function closeDatabase() {
   if (pool) await pool.end();
   pool = null;

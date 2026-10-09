@@ -485,3 +485,53 @@
   .ai-orb-button, .ai-chat-panel, .bot-speech-bubble { transition: none; animation: none; }
   .voice-btn.listening, .thinking-dot, .voice-stage { animation: none; }
 }
+
+/* ─── Confirmation card: the exact preview of a proposed action (Issue #73) ─── */
+.action-card {
+  margin: 0 1rem 0.75rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid #fcd34d;
+  background: #fffbeb;
+  border-radius: 14px;
+  text-align: left;
+}
+.action-card--compact {
+  margin: 0.25rem 0 0.25rem;
+  width: 100%;
+  box-sizing: border-box;
+}
+.action-card-title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: #92400e;
+  margin-bottom: 0.4rem;
+}
+.action-card-rows { margin: 0; }
+.action-card-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.12rem 0;
+  font-size: 0.85rem;
+}
+.action-card-row dt { color: var(--text-secondary, #52525b); }
+.action-card-row dd { margin: 0; font-weight: 600; color: var(--text-primary, #09090b); text-align: right; overflow-wrap: anywhere; }
+.action-card-buttons { display: flex; gap: 0.5rem; margin-top: 0.6rem; }
+.action-card-btn {
+  flex: 1;
+  min-height: 40px;
+  border-radius: 10px;
+  border: 1px solid var(--border-color, #e4e4e7);
+  background: white;
+  color: var(--text-primary, #09090b);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.action-card-btn:hover:not(:disabled) { background: #f4f4f5; }
+.action-card-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.action-card-btn:focus-visible { outline: 3px solid #2563eb; outline-offset: 2px; }
+.action-card-btn--confirm { background: #18181b; color: white; border-color: #18181b; }
+.action-card-btn--confirm:hover:not(:disabled) { background: #27272a; }

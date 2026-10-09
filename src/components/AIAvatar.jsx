@@ -1,12 +1,14 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { X, Send, Image as ImageIcon, Mic, MicOff, Keyboard } from 'lucide-react';
 import FinancialCompanion from './FinancialCompanion';
+import ActionConfirmationCard from './ActionConfirmationCard';
 import './AIAvatar.css';
 import { useFinance } from '../context/FinanceContext';
 import { useAvatarActions } from '../hooks/useAvatarActions';
 import { useVoiceSession } from '../hooks/useVoiceSession';
 import { parseAssistantInput } from '../utils/assistantIntent';
 import { buildChatHistory, CHAT_CONTENT_MAX } from '../utils/chatHistory';
+import { parseConfirmation } from '../utils/actionConfirmation';
 import { createPulse, deriveCompanionState, companionLabel, PULSE_MS, NAVIGATION_PULSE_MS } from '../utils/companionState';
 
 const WELCOME = "Hi! I'm your FinSphere assistant. Ask about your own money, like \"How much did I spend this month?\" or \"How is my budget?\". To go somewhere, say \"Open transactions\" or \"Go to budgets\".";
@@ -16,7 +18,7 @@ const HINTS = ['How am I doing this month?', 'How much did I spend?', 'How is my
 const navigationNote = (navigation) => (navigation.type === 'scroll' ? `Scrolling ${navigation.target}.` : `Opening ${navigation.label}.`);
 
 function AIAvatar() {
-  const { sendMessageToBot } = useFinance();
+  const { sendAssistantMessage, confirmAssistantAction, cancelAssistantAction } = useFinance();
   const { performNavigation } = useAvatarActions();
 
   const [isOpen, setIsOpen] = useState(false);
@@ -31,7 +33,7 @@ function AIAvatar() {
   const idRef = useRef(1);
   useEffect(() => { messagesRef.current = messages; }, [messages]);
   useEffect(() => { isOpenRef.current = isOpen; }, [isOpen]);
-  const nextId = () => { idRef.current += 1; return idRef.current; };
+  const nextId = useCallback(() => { idRef.current += 1; return idRef.current; }, []);
 
   // Snippet state
   const [isSnipping, setIsSnipping] = useState(false);
@@ -59,12 +61,40 @@ function AIAvatar() {
     setPulse(next);
     pulseTimerRef.current = setTimeout(() => { pulseTimerRef.current = null; setPulse(null); }, durationMs);
   }, []);
+  const clearPulse = useCallback(() => {
+    if (pulseTimerRef.current) { clearTimeout(pulseTimerRef.current); pulseTimerRef.current = null; }
+    setPulse(null);
+  }, []);
   // Explicit navigation: play the short directional sweep and switch page in the same moment (no added delay).
   const navigateWithEffect = (navigation) => {
     firePulse('navigating', NAVIGATION_PULSE_MS);
     performNavigation(navigation);
   };
   useEffect(() => () => { if (pulseTimerRef.current) clearTimeout(pulseTimerRef.current); }, []);
+
+  // A financial action the assistant has proposed (Issue #73). The SERVER holds the real proposal; this is only what
+  // is needed to show it and to ask the server to confirm or cancel it: { proposalId, kind, status, summary, display,
+  // expiresAt }. status is 'pending' (waiting for Confirm) or 'needs_clarification' (a question is open).
+  const [pendingAction, setPendingAction] = useState(null);
+  const pendingRef = useRef(null);
+  const setActive = useCallback((next) => { pendingRef.current = next; setPendingAction(next); }, []);
+  const actionFromServer = (action) => (action && (action.status === 'pending' || action.status === 'needs_clarification')
+    ? { proposalId: action.proposalId, kind: action.kind, status: action.status, summary: action.summary, display: action.display ?? [], expiresAt: action.expiresAt }
+    : null);
+  const msUntil = (iso) => Math.max(1000, Date.parse(iso) - Date.now());
+  // The confirmation window closes on its own: forget the proposal when it does (the server also refuses it).
+  useEffect(() => {
+    if (!pendingAction) return undefined;
+    const timer = setTimeout(() => {
+      if (pendingRef.current?.proposalId !== pendingAction.proposalId) return;
+      pendingRef.current = null;
+      setPendingAction(null);
+      clearPulse();
+      idRef.current += 1;
+      setMessages((prev) => [...prev, { id: idRef.current, text: 'That request expired, so nothing was saved.', sender: 'bot', local: true }]);
+    }, Math.max(0, Date.parse(pendingAction.expiresAt) - Date.now()));
+    return () => clearTimeout(timer);
+  }, [pendingAction, clearPulse]);
 
   // ──────────────────────────────────────────────
   // Event Listeners (Speak & Autonomous Actions)
@@ -185,27 +215,92 @@ function AIAvatar() {
     speechTimeoutRef.current = setTimeout(() => setSpeech(null), ms);
   };
 
+  // Confirm or cancel the pending proposal. Both go through the server by proposal id only; the card buttons, a typed
+  // "yes" and a spoken "yes" all end up here, so text and voice have identical safety.
+  const resolvePending = async (choice, { userMsg = null } = {}) => {
+    const active = pendingRef.current;
+    const lead = userMsg ? [userMsg] : [];
+    if (!active || Date.parse(active.expiresAt) <= Date.now()) {
+      setActive(null);
+      clearPulse();
+      const reply = 'That request expired, so nothing was saved. Please ask again.';
+      setMessages((prev) => [...prev, ...lead, { id: nextId(), text: reply, sender: 'bot', local: true }]);
+      return { status: 'answered', reply, navigate: null };
+    }
+    busyRef.current = true;
+    setIsThinking(true);
+    try {
+      if (choice === 'no') {
+        await cancelAssistantAction(active.proposalId);
+        setActive(null);
+        clearPulse();
+        const reply = 'Okay, I cancelled that. Nothing was saved.';
+        setMessages((prev) => [...prev, ...lead, { id: nextId(), text: reply, sender: 'bot' }]);
+        return { status: 'answered', reply, navigate: null };
+      }
+      const done = await confirmAssistantAction(active.proposalId);   // state is updated inside, exactly like a manual write
+      setActive(null);
+      firePulse('success');
+      setMessages((prev) => [...prev, ...lead, { id: nextId(), text: done.message, sender: 'bot' }]);
+      return { status: 'answered', reply: done.message, navigate: null };
+    } catch (err) {
+      // A refusal from the server (expired, already cancelled, over the goal target...) closes the proposal; a network
+      // failure leaves it open so the user can try again.
+      if (err.actionStatus) setActive(null);
+      firePulse('error');
+      setMessages((prev) => [...prev, ...lead, { id: nextId(), text: err.message, sender: 'bot', local: true }]);
+      return err.actionStatus
+        ? { status: 'answered', reply: err.message, navigate: null }
+        : { status: 'failed', error: err.message };
+    } finally {
+      setIsThinking(false);
+      busyRef.current = false;
+    }
+  };
+
   // runTurn is the ONE assistant pipeline. Text chat, panel dictation and the voice session all call it; voice and
   // text share the same transcript, so a follow-up spoken after typing (or the reverse) has the same history.
   //   source 'text'  -> opens the panel for a question, navigates right after the answer, never speaks
   //   source 'voice' -> leaves the panel closed and returns `navigate` so the voice session can run it after the
   //                     answer has been read aloud
+  // While an action is waiting for confirmation, a whole-utterance yes / no confirms or cancels it; anything else goes
+  // to the server, which treats it as an edit, a new request, or an unrelated message (cancelling the old proposal).
   // Returns { status: 'answered', reply, navigate } | { status: 'navigated', note } | { status: 'failed', error }
   //       | { status: 'ignored' }.
-  const runTurn = async (rawText, { source = 'text' } = {}) => {
+  const runTurn = async (rawText, { source = 'text', confidence } = {}) => {
     const text = typeof rawText === 'string' ? rawText.trim() : '';
     if (!text || busyRef.current) return { status: 'ignored' };
     const voice = source === 'voice';
     if (!voice) setInput('');
 
     const prior = messagesRef.current;
+    const userMsg = { id: nextId(), text, sender: 'user' };
+
+    const active = pendingRef.current;
+    const choice = active?.status === 'pending' ? parseConfirmation(text) : null;
+    if (choice) {
+      // Very unclear speech never confirms anything: ask again instead.
+      if (choice === 'yes' && voice && typeof confidence === 'number' && confidence > 0 && confidence < 0.5) {
+        const reply = "I didn't catch that clearly. Should I go ahead? Say yes or no, or tap Confirm.";
+        setMessages((prev) => [...prev, userMsg, { id: nextId(), text: reply, sender: 'bot', local: true }]);
+        return { status: 'answered', reply, navigate: null };
+      }
+      return resolvePending(choice, { userMsg });
+    }
+
     const previousUserText = [...prior].reverse().find((m) => m.sender === 'user' && !m.local)?.text ?? '';
     const { question, navigation } = parseAssistantInput(text, { previousUserText });
-    const userMsg = { id: nextId(), text, sender: 'user' };
 
     if (!question) {
       // Navigation only: no assistant call, but the turn is kept so "why?" / "show me" have context afterwards.
-      const note = navigationNote(navigation);
+      let note = navigationNote(navigation);
+      if (active) {
+        // Moving on cancels an open proposal (best effort; the server also lets it lapse on its own).
+        cancelAssistantAction(active.proposalId).catch(() => {});
+        setActive(null);
+        clearPulse();
+        note = `I cancelled that request. Nothing was saved. ${note}`;
+      }
       setMessages((prev) => [...prev, userMsg, { id: nextId(), text: note, sender: 'bot' }]);
       navigateWithEffect(navigation);
       if (!voice && !isOpenRef.current) showBubble(note);
@@ -223,9 +318,13 @@ function AIAvatar() {
     let reply = null;
     let error = null;
     try {
-      reply = await sendMessageToBot(history);
+      const answer = await sendAssistantMessage(history);
+      reply = answer.reply;
+      const next = actionFromServer(answer.action);
+      setActive(next);                       // no action in the response means nothing is open on the server any more
       setMessages((prev) => [...prev, { id: nextId(), text: reply, sender: 'bot' }]);
-      firePulse('insight');
+      if (next?.status === 'pending') firePulse('attention', msUntil(next.expiresAt));
+      else firePulse('insight');
     } catch (err) {
       error = err.message;
       setMessages((prev) => [...prev, { id: nextId(), text: err.message, sender: 'bot', local: true }]);
@@ -393,6 +492,13 @@ function AIAvatar() {
           <div className="voice-caption voice-caption--reply" aria-live="polite">
             {voicePhase === 'error' ? voiceSession.errorText : voiceSession.replyCaption}
           </div>
+          <ActionConfirmationCard
+            compact
+            action={pendingAction}
+            busy={voicePhase === 'thinking'}
+            onConfirm={() => voiceSession.submit('confirm')}
+            onCancel={() => voiceSession.submit('cancel')}
+          />
           <div className="voice-stage-actions">
             <button type="button" className="voice-stage-btn" onClick={openChat} aria-label="Switch to text chat">
               <Keyboard size={16} aria-hidden="true" />
@@ -451,6 +557,13 @@ function AIAvatar() {
             </div>
           )}
         </div>
+
+        <ActionConfirmationCard
+          action={pendingAction}
+          busy={isThinking}
+          onConfirm={() => resolvePending('yes')}
+          onCancel={() => resolvePending('no')}
+        />
 
         <form className="ai-chat-input" onSubmit={handleSend}>
           <input

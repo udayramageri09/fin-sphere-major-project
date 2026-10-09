@@ -18,8 +18,11 @@ import {
   listGoalsByUser, createGoal, deleteGoalByUserAndId, addGoalContribution, listGoalContributions,
   listLiabilitiesByUser, createLiability, deleteLiabilityByUserAndId, sumMonthlyPaymentsByUser, repayLiability, listLiabilityRepayments,
   getEmergencyFundByUser, upsertEmergencyFund, getTransactionTotalsByUser,
-  listBudgetsByUserAndMonth, upsertBudget, deleteBudgetByUserAndId
+  listBudgetsByUserAndMonth, upsertBudget, deleteBudgetByUserAndId,
+  getActiveProposal, replaceActiveProposal, getProposalByUserAndId, claimProposal, finishProposal, cancelProposal,
+  expireProposal, previewGoalContribution
 } from './db/index.js';
+import { createAssistantActions, shiftDate } from './assistantActions.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -602,6 +605,7 @@ if (process.env.FINSPHERE_TEST_UPLOAD_LIMIT) {
 }
 const parseLimiter = perUserLimiter(uploadLimit, 'statement upload');
 const mlLimiter = perUserLimiter(10, 'analysis');
+const actionLimiter = perUserLimiter(30, 'assistant action');
 // ───────────────────────────────────────────────────────────────────────────────
 
 // --- AUTHENTICATION ---
@@ -693,26 +697,52 @@ app.get('/api/transactions', authenticate, async (req, res) => {
   }
 });
 
-// 2. POST /api/transactions (Manual Entry)
-app.post('/api/transactions', authenticate, async (req, res) => {
+// ── Shared write executors (Issue #73) ────────────────────────────────────────────────────────────────────────────
+// The manual routes and a confirmed assistant action run exactly this code, so validation, ownership and the locked
+// database checks can never differ between "typed into a form" and "said to the assistant". They return
+// { ok: true, ... } or { ok: false, status, error }; database failures are thrown for the caller to report.
+async function createTransactionFor(userId, input) {
   // Validate before touching the database.
-  const result = normalizeTransactionInput(req.body);
-  if (!result.ok) {
-    return res.status(400).json({ error: result.error });
-  }
-
-  const newTransaction = {
+  const result = normalizeTransactionInput(input);
+  if (!result.ok) return { ok: false, status: 400, error: result.error };
+  const transaction = {
     id: randomUUID(),
-    userId: req.user.id, // ownership stamp — always from verified JWT, never from req.body
+    userId, // ownership stamp: always the verified session user, never from the input
     ...result.value
   };
+  await createTransaction(transaction);
+  return { ok: true, transaction };
+}
 
+async function addGoalContributionFor(userId, goalId, body) {
+  const result = normalizeContributionInput(body);
+  if (!result.ok) return { ok: false, status: 400, error: result.error };
+  const outcome = await addGoalContribution({
+    userId, // ownership: always the verified session user
+    goalId,
+    amount: result.value.amount,
+    contributionId: randomUUID(),
+    now: new Date().toISOString()
+  });
+  // 404 for both missing and not-yours, exactly like DELETE /api/goals/:id.
+  if (outcome.status === 'not_found') return { ok: false, status: 404, error: 'Goal not found' };
+  if (outcome.status === 'complete') return { ok: false, status: 400, error: 'This goal is already complete' };
+  if (outcome.status === 'exceeds') {
+    return { ok: false, status: 400, error: `Contribution would exceed the goal target (${formatRupees(outcome.remaining)} remaining)` };
+  }
+  return { ok: true, goal: outcome.goal, contribution: outcome.contribution };
+}
+
+// 2. POST /api/transactions (Manual Entry)
+app.post('/api/transactions', authenticate, async (req, res) => {
+  let outcome;
   try {
-    await createTransaction(newTransaction);
+    outcome = await createTransactionFor(req.user.id, req.body);
   } catch (err) {
     return respondDbError(res, err, 'Could not save transaction');
   }
-  res.status(201).json(newTransaction);
+  if (!outcome.ok) return res.status(outcome.status).json({ error: outcome.error });
+  res.status(201).json(outcome.transaction);
 });
 
 // 3. DELETE /api/transactions/:id
@@ -787,28 +817,13 @@ app.delete('/api/goals/:id', authenticate, async (req, res) => {
 
 // POST /api/goals/:id/contributions - add a real contribution to one of the caller's goals
 app.post('/api/goals/:id/contributions', authenticate, async (req, res) => {
-  const result = normalizeContributionInput(req.body);
-  if (!result.ok) {
-    return res.status(400).json({ error: result.error });
-  }
   let outcome;
   try {
-    outcome = await addGoalContribution({
-      userId: req.user.id, // ownership: always from the verified JWT, never from req.body
-      goalId: req.params.id,
-      amount: result.value.amount,
-      contributionId: randomUUID(),
-      now: new Date().toISOString()
-    });
+    outcome = await addGoalContributionFor(req.user.id, req.params.id, req.body);   // owner: always from the verified JWT
   } catch (err) {
     return respondDbError(res, err, 'Could not save contribution');
   }
-  // 404 for both missing and not-yours, exactly like DELETE /api/goals/:id.
-  if (outcome.status === 'not_found') return res.status(404).json({ error: 'Goal not found' });
-  if (outcome.status === 'complete') return res.status(400).json({ error: 'This goal is already complete' });
-  if (outcome.status === 'exceeds') {
-    return res.status(400).json({ error: `Contribution would exceed the goal target (${formatRupees(outcome.remaining)} remaining)` });
-  }
+  if (!outcome.ok) return res.status(outcome.status).json({ error: outcome.error });
   res.status(201).json({ goal: outcome.goal, contribution: outcome.contribution });
 });
 
@@ -1538,6 +1553,116 @@ function fallbackReply(history, ctx) {
   return lead + reply;
 }
 
+// ── Confirmed assistant actions (Issue #73, Phase 1) ──────────────────────────────────────────────────────────────
+// The assistant proposes (see assistantActions.js); only these two endpoints can execute or cancel a proposal, and they
+// take nothing but the proposal id from the URL. The payload, owner and goal id are the ones the server stored.
+const assistantActions = createAssistantActions({
+  db: { getActiveProposal, replaceActiveProposal, cancelProposal, previewGoalContribution, listGoalsByUser },
+  normalizeTransactionInput,
+  normalizeContributionInput,
+  formatRupees
+});
+
+// Runs a claimed proposal through the same executors as the manual routes.
+async function executeProposal(userId, proposal) {
+  const p = proposal.payload;
+  if (proposal.kind === 'create_transaction') {
+    const out = await createTransactionFor(userId, p.input);
+    if (!out.ok) return { ok: false, error: out.error };
+    const t = out.transaction;
+    return {
+      ok: true,
+      result: {
+        kind: proposal.kind,
+        message: `Done. I added the ${formatRupees(Math.abs(t.amount))} ${t.title} ${t.type === 'income' ? 'income' : 'expense'}.`,
+        transaction: t
+      }
+    };
+  }
+  if (proposal.kind === 'contribute_to_goal') {
+    const out = await addGoalContributionFor(userId, p.goalId, { amount: p.amount });
+    if (!out.ok) return { ok: false, error: out.error };
+    return {
+      ok: true,
+      result: {
+        kind: proposal.kind,
+        message: `Done. I added ${formatRupees(out.contribution.amount)} to ${out.goal.title}. It's now ${formatRupees(out.goal.currentAmount)} of ${formatRupees(out.goal.targetAmount)}.`,
+        goal: out.goal,
+        contribution: out.contribution
+      }
+    };
+  }
+  return { ok: false, error: 'This kind of action is not supported.' };
+}
+
+const EXPIRED_MESSAGE = 'This request expired. Nothing was saved.';
+
+// POST /api/assistant/actions/:id/confirm - execute exactly once. The body is ignored on purpose.
+app.post('/api/assistant/actions/:id/confirm', authenticate, actionLimiter, async (req, res) => {
+  const userId = req.user.id;   // ownership: always from the verified JWT
+  const id = req.params.id;
+  try {
+    const claimed = await claimProposal(userId, id);   // atomic: only one confirmation can win
+    if (claimed) {
+      let outcome;
+      try {
+        outcome = await executeProposal(userId, claimed);
+      } catch (err) {
+        await finishProposal(userId, id, 'failed', { error: 'Could not save this action.' }).catch(() => {});
+        return respondDbError(res, err, 'Could not save this action');
+      }
+      if (!outcome.ok) {
+        await finishProposal(userId, id, 'failed', { error: outcome.error });
+        return res.status(400).json({ status: 'failed', error: outcome.error });
+      }
+      await finishProposal(userId, id, 'executed', outcome.result);
+      return res.json({ status: 'executed', ...outcome.result });
+    }
+    // Not claimed: say why, without ever writing. Missing and not-yours look the same.
+    const existing = await getProposalByUserAndId(userId, id);
+    if (!existing) return res.status(404).json({ error: 'Action not found' });
+    if (existing.status === 'executed') return res.json({ status: 'executed', replay: true, ...existing.result });   // stored result, no second write
+    if (existing.status === 'executing') return res.status(409).json({ status: 'executing', error: 'This action is already being processed.' });
+    if (existing.status === 'failed') return res.status(400).json({ status: 'failed', error: existing.result?.error ?? 'This action could not be completed.' });
+    if (existing.status === 'cancelled') return res.status(409).json({ status: 'cancelled', error: 'This action was cancelled. Nothing was saved.' });
+    if (existing.status === 'expired' || existing.expired) {
+      await expireProposal(userId, id);
+      return res.status(410).json({ status: 'expired', error: EXPIRED_MESSAGE });
+    }
+    return res.status(409).json({ status: existing.status, error: 'This action is not ready to confirm yet.' });
+  } catch (err) {
+    respondDbError(res, err, 'Could not confirm this action');
+  }
+});
+
+// POST /api/assistant/actions/:id/cancel - nothing is written. The body is ignored on purpose.
+app.post('/api/assistant/actions/:id/cancel', authenticate, actionLimiter, async (req, res) => {
+  const userId = req.user.id;
+  const id = req.params.id;
+  try {
+    if (await cancelProposal(userId, id)) return res.json({ status: 'cancelled', message: 'Cancelled. Nothing was saved.' });
+    const existing = await getProposalByUserAndId(userId, id);
+    if (!existing) return res.status(404).json({ error: 'Action not found' });
+    if (existing.status === 'executed') return res.status(409).json({ status: 'executed', error: 'This action was already completed.' });
+    if (existing.status === 'executing') return res.status(409).json({ status: 'executing', error: 'This action is already being processed.' });
+    res.json({ status: existing.status, message: 'Nothing was saved.' });
+  } catch (err) {
+    respondDbError(res, err, 'Could not cancel this action');
+  }
+});
+
+// The client's local calendar date, sent with chat messages so "today" / "yesterday" mean the user's today and
+// yesterday. It is only used to resolve those words: undefined when absent, null when invalid, otherwise
+// 'YYYY-MM-DD'. A real local date is never more than a day away from the UTC date.
+function parseClientLocalDate(raw) {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'string') return null;
+  const m = DATE_PATTERN.exec(raw);
+  if (!m || !isRealCalendarDate(Number(m[1]), Number(m[2]), Number(m[3]))) return null;
+  const utcToday = new Date().toISOString().slice(0, 10);
+  return raw >= shiftDate(utcToday, -1) && raw <= shiftDate(utcToday, 1) ? raw : null;
+}
+
 // 5. POST /api/chat
 // The assistant may only state facts that exist for the authenticated user, all loaded here on the server: their
 // own transactions and the classification-aware totals derived from them (all-time and for the current month),
@@ -1547,6 +1672,25 @@ app.post('/api/chat', authenticate, chatLimiter, async (req, res) => {
   const invalid = validateChatMessages(req.body?.messages);
   if (invalid) return res.status(400).json({ error: invalid });
   const history = recentTurns(req.body.messages);
+  const localDate = parseClientLocalDate(req.body?.localDate);
+  if (localDate === null) return res.status(400).json({ error: 'localDate must be today\'s date as YYYY-MM-DD' });
+
+  // Action requests ("add ₹450 for lunch", "put ₹5,000 into my Goa goal") and answers to an open clarification or
+  // confirmation are handled deterministically, with no language model. Anything else falls through to normal chat.
+  let actionTurn;
+  try {
+    actionTurn = await assistantActions.handleTurn({ userId: req.user.id, text: history[history.length - 1].content, localDate });
+  } catch (err) {
+    return respondDbError(res, err, 'Could not process that request');
+  }
+  if (actionTurn.handled) {
+    return res.json({ reply: actionTurn.reply, ...(actionTurn.action ? { action: actionTurn.action } : {}) });
+  }
+  // A cancelled proposal is reported to the client, and the user is told, before the normal answer.
+  const answer = (reply) => res.json({
+    reply: actionTurn.cancelNotice ? `${actionTurn.cancelNotice} ${reply}` : reply,
+    ...(actionTurn.action ? { action: actionTurn.action } : {})
+  });
 
   try {
     // Scope financial context to the authenticated user only. Nothing belonging to other users is read.
@@ -1629,7 +1773,7 @@ Rules:
         if (response.ok) {
           const data = await response.json();
           const reply = data?.choices?.[0]?.message?.content;
-          if (typeof reply === 'string' && reply.trim()) return res.json({ reply });
+          if (typeof reply === 'string' && reply.trim()) return answer(reply);
           console.error('Groq API returned no reply text');
         } else {
           console.error('Groq API Error: status', response.status);
@@ -1641,7 +1785,7 @@ Rules:
 
     // Deterministic fallback (no language model configured, or the call failed)
     console.log('Using fallback chatbot response');
-    return res.json({ reply: fallbackReply(history, ctx) });
+    return answer(fallbackReply(history, ctx));
   } catch (err) {
     // Never let one request take the process down; nothing from the request is logged.
     console.error('Chat request failed:', err?.name ?? 'unknown');
