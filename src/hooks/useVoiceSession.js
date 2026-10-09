@@ -104,12 +104,12 @@ export function useVoiceSession({ runTurn }) {
     }, NAVIGATION_PULSE_MS);
   }, [clearResume]);
 
-  const handleTranscript = useCallback(async (transcript) => {
+  const handleTranscript = useCallback(async (transcript, confidence) => {
     setUserCaption(transcript);
     setReplyCaption('');
     setErrorText('');
     setPhase('thinking');
-    const result = await runTurnRef.current(transcript, { source: 'voice' });
+    const result = await runTurnRef.current(transcript, { source: 'voice', confidence });
     if (!activeRef.current) return;                        // the session was closed while waiting
     if (result?.status === 'answered') {
       setReplyCaption(result.reply);
@@ -150,8 +150,10 @@ export function useVoiceSession({ runTurn }) {
     r.onresult = (event) => {
       if (recognitionRef.current !== r) return;
       recognitionRef.current = null;
-      const transcript = event?.results?.[0]?.[0]?.transcript?.trim();
-      if (transcript) handleTranscript(transcript);
+      const alternative = event?.results?.[0]?.[0];
+      const transcript = alternative?.transcript?.trim();
+      // The recogniser's own confidence (0-1, when the browser reports it) lets a doubtful "yes" be asked again.
+      if (transcript) handleTranscript(transcript, alternative.confidence);
       else setPhase('idle');
     };
     r.onerror = (event) => {
@@ -197,6 +199,16 @@ export function useVoiceSession({ runTurn }) {
     setErrorText('');
   }, [clearResume, stopRecognition, stopSpeaking]);
 
+  // Sends text through the same path as a spoken sentence (the stage's Confirm / Cancel buttons use it), so a button
+  // press and the word "confirm" are handled identically: same pipeline, same caption, same spoken answer.
+  const submit = useCallback((text) => {
+    if (!activeRef.current) return;
+    clearResume();
+    stopRecognition();
+    stopSpeaking();
+    handleTranscript(String(text));
+  }, [clearResume, stopRecognition, stopSpeaking, handleTranscript]);
+
   // The stage orb: listen again, stop listening, or skip the rest of a spoken reply.
   const tapOrb = useCallback(() => {
     if (!activeRef.current) return;
@@ -214,5 +226,5 @@ export function useVoiceSession({ runTurn }) {
 
   useEffect(() => () => { activeRef.current = false; clearResume(); stopRecognition(); stopSpeaking(); }, [clearResume, stopRecognition, stopSpeaking]);
 
-  return { active, phase, userCaption, replyCaption, errorText, start, end, tapOrb };
+  return { active, phase, userCaption, replyCaption, errorText, start, end, tapOrb, submit };
 }

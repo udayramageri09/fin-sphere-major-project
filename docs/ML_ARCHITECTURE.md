@@ -105,6 +105,23 @@ The assistant explains and interacts; it does not compute.
 * `POST /api/plan-chat`: a narrate-only prompt built from the ML results (see the trust note in section 3). Without a key it returns the plan summary text.
 * Statement parsing (`POST /api/transactions/parse-statement`): if a Groq key is configured, a language model proposes rows; otherwise (or if it produces nothing valid) a rule-based parser is used. Either way every row goes through the same server validator, receives a server-generated UUID and the owner from the session, and is stored with classification `unknown`.
 
+### Confirmed assistant actions (Issue #73, Phase 1)
+
+The assistant can propose, but never silently perform, a financial write:
+
+```
+natural language -> deterministic extraction -> clarification if needed -> server proposal
+  -> preview -> explicit confirmation -> execution -> verified result
+```
+
+* **Supported now:** `create_transaction` and `contribute_to_goal`.
+* **Not supported yet:** `create_liability`, `record_liability_repayment` and `set_budget`.
+* **No language model is trusted for action execution.** Extraction is deterministic in Phase 1 (amounts, dates, direction and the user's own goal names are parsed by rules); a missing or ambiguous field produces a clarifying question, never a guess.
+* **Confirmation is explicit.** The server stores the proposal and shows an exact preview; only a confirmation by proposal id executes it, through the same validators and database helpers as the manual forms. The client then updates its shared state from the stored result.
+* **Voice and typed chat use the same flow** (`runTurn`): a spoken "yes" and a typed "yes" confirm through the same endpoint.
+
+See [SECURITY_DEPLOYMENT.md](SECURITY_DEPLOYMENT.md) for the security properties of proposals.
+
 The model names in the code are `llama-3.3-70b-versatile` (chat and plan-chat) and `llama3-8b-8192` (parsing). No LLM output feeds a financial metric.
 
 ## 11. No persisted model artifacts

@@ -2,6 +2,7 @@
 import { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { useAuth } from './AuthContext';
 import { summarizeTransactions } from '../utils/finance';
+import { localDateString } from '../utils/localDate';
 
 const FinanceContext = createContext(null);
 
@@ -207,6 +208,11 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect
   }, []);
 
+  // The ONE place that applies a stored write to shared state. The manual forms and a confirmed assistant action both
+  // call these, so the Dashboard, Goals and Transactions pages cannot disagree about what the assistant just saved.
+  const applyTransactionCreated = (txn) => setTransactions(prev => (prev.some(t => t.id === txn.id) ? prev : [txn, ...prev]));
+  const applyGoalUpdated = (goal) => setGoals(prev => prev.map(g => (g.id === goal.id ? goal : g)));
+
   const addTransaction = async (txn) => {
     setError(null);
     try {
@@ -220,9 +226,13 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
         invalidateSession();
         throw new Error('Session expired');
       }
-      if (!res.ok) throw new Error('Failed to add transaction');
+      if (!res.ok) {
+        // The server's validation message is safe to show (like the goal / liability / budget writes).
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Failed to add transaction');
+      }
       const newTxn = await res.json();
-      setTransactions(prev => [newTxn, ...prev]);
+      applyTransactionCreated(newTxn);
       return newTxn;
     } catch (err) {
       console.error(err);
@@ -311,7 +321,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     }
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || 'Failed to add contribution');
-    setGoals(prev => prev.map(g => (g.id === goalId ? data.goal : g)));
+    applyGoalUpdated(data.goal);
     return data;
   };
 
@@ -433,16 +443,18 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     }
   };
 
-  // Sends the bounded chat history (src/utils/chatHistory.js) and resolves to the reply text. Failures reject with a
-  // message that can be shown to the user as-is; the caller keeps such messages out of later history.
-  const sendMessageToBot = async (messages) => {
+  // Sends the bounded chat history (src/utils/chatHistory.js) with the user's LOCAL date (only used to resolve "today" /
+  // "yesterday") and resolves to { reply, action }. `action` is the server's proposal / clarification / cancellation
+  // for a confirmed financial action (Issue #73), or null. Failures reject with a message that can be shown to the user
+  // as-is; the caller keeps such messages out of later history.
+  const sendAssistantMessage = async (messages, { localDate = localDateString() } = {}) => {
     let res;
     try {
       res = await fetch(`${API_URL}/chat`, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages })
+        body: JSON.stringify({ messages, localDate })
       });
     } catch {
       throw new Error("I couldn't reach the FinSphere server. Please check your connection and try again.");
@@ -455,7 +467,45 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     if (res.status === 400) throw new Error("I couldn't process that message. Please rephrase it and try again.");
     const data = res.ok ? await res.json().catch(() => null) : null;
     if (!data || typeof data.reply !== 'string') throw new Error('Something went wrong on our side. Please try again.');
-    return data.reply;
+    return { reply: data.reply, action: data.action ?? null };
+  };
+
+  const sendMessageToBot = async (messages) => (await sendAssistantMessage(messages)).reply;
+
+  // Confirms a server-held proposal. Only the id is sent: the amount, title, goal and owner are the ones the server
+  // stored when it showed the preview. On success the stored row is applied to shared state exactly like a manual
+  // write (a replay returns the same stored result and is applied only once). Rejects with the server's safe message;
+  // `err.actionStatus` is the proposal's status ('expired', 'cancelled', 'failed', ...).
+  const confirmAssistantAction = async (proposalId) => {
+    const res = await fetch(`${API_URL}/assistant/actions/${encodeURIComponent(proposalId)}/confirm`, {
+      method: 'POST',
+      credentials: 'include'
+    });
+    if (res.status === 401) {
+      invalidateSession();
+      throw new Error('Your session has expired. Please sign in again.');
+    }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err = new Error(data.error || 'I could not complete that. Nothing was saved.');
+      err.actionStatus = data.status ?? null;
+      throw err;
+    }
+    if (data.transaction) applyTransactionCreated(data.transaction);
+    if (data.goal) applyGoalUpdated(data.goal);
+    return data;
+  };
+
+  const cancelAssistantAction = async (proposalId) => {
+    const res = await fetch(`${API_URL}/assistant/actions/${encodeURIComponent(proposalId)}/cancel`, {
+      method: 'POST',
+      credentials: 'include'
+    });
+    if (res.status === 401) {
+      invalidateSession();
+      throw new Error('Your session has expired. Please sign in again.');
+    }
+    return res.json().catch(() => ({}));
   };
 
   // Derive Stats classification-aware (see src/utils/finance.js): totalIncome and totalExpenses are all-time
@@ -506,6 +556,9 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
       deleteTransaction,
       parseStatement,
       sendMessageToBot,
+      sendAssistantMessage,
+      confirmAssistantAction,
+      cancelAssistantAction,
       currentView,
       setCurrentView
     }}>

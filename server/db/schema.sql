@@ -193,3 +193,32 @@ CREATE TABLE IF NOT EXISTS budgets (
 );
 
 CREATE INDEX IF NOT EXISTS budgets_user_month_idx ON budgets (user_id, month);
+
+-- Confirmed assistant actions (Issue #73). The assistant never writes financial data from a chat message: it stores a
+-- PROPOSAL here (what it would do, in its already-validated form), the user confirms it, and only then does the server
+-- run the same write code the manual forms use. A proposal belongs to one user and executes at most once.
+--   draft      a clarification is in progress (a field is still missing or ambiguous); nothing can execute
+--   pending    complete and previewed; waiting for the user's explicit confirmation
+--   executing  claimed by exactly one confirmation (the atomic pending -> executing UPDATE decides the winner)
+--   executed   written; `result` holds what was stored so a repeated confirmation can return it without writing again
+--   failed     the write was refused (e.g. the goal target would be exceeded); nothing was stored
+--   cancelled  the user said no, edited it, or moved on
+--   expired    the confirmation window passed
+CREATE TABLE IF NOT EXISTS assistant_action_proposals (
+  id         TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 64),
+  user_id    BIGINT NOT NULL REFERENCES users(id),
+  kind       TEXT NOT NULL CHECK (kind IN ('create_transaction', 'contribute_to_goal')),
+  payload    JSONB NOT NULL,
+  summary    TEXT NOT NULL,
+  display    JSONB NOT NULL,
+  status     TEXT NOT NULL CHECK (status IN ('draft', 'pending', 'executing', 'executed', 'failed', 'cancelled', 'expired')),
+  result     JSONB,
+  expires_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS assistant_action_proposals_user_status_idx ON assistant_action_proposals (user_id, status);
+-- At most one open (draft or pending) proposal per user: a new request replaces the old one instead of piling up.
+CREATE UNIQUE INDEX IF NOT EXISTS assistant_action_proposals_one_open_idx
+  ON assistant_action_proposals (user_id) WHERE status IN ('draft', 'pending');

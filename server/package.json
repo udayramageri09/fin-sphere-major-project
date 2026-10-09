@@ -8,7 +8,9 @@
     "dev": "node --watch server.js",
     "start-ml": "cd ../ml_service && python main.py",
     "test:security": "node tests/security.test.mjs",
-    "test:chat": "node tests/chat.test.mjs"
+    "test:chat": "node tests/chat.test.mjs",
+    "test:actions": "node tests/actions.test.mjs",
+    "test:actions-extract": "node --test tests/actionExtract.test.mjs"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",
