@@ -8,20 +8,6 @@ function Subscriptions() {
     { id: 4, name: 'Gym Membership', amount: 1500, date: '5th of every month', status: 'Paused', type: 'Health' },
   ];
 
-  const handleSipHover = (name) => {
-    if (name.includes('Index Fund')) {
-      window.dispatchEvent(new CustomEvent('bot-speak', { detail: { message: "Great choice on the Index Fund! Consistent investing is the key to wealth. 📈" }}));
-    } else if (name.includes('Netflix')) {
-      window.dispatchEvent(new CustomEvent('bot-speak', { detail: { message: "Netflix and chill? Just make sure you're actually using it! 🍿" }}));
-    } else {
-      window.dispatchEvent(new CustomEvent('bot-speak', { detail: { message: "Auto-payments setup! I'll remind you if your balance ever gets low. 🤖" }}));
-    }
-  };
-
-  const handleMouseLeave = () => {
-    window.dispatchEvent(new CustomEvent('bot-quiet'));
-  };
-
   return (
     <div className="animate-fade-in">
       <h2 style={{ marginBottom: '2rem', fontSize: '2rem' }}>SIPs & Subscriptions</h2>
@@ -33,8 +19,6 @@ function Subscriptions() {
               key={sub.id} 
               className="widget-card" 
               style={{ padding: '1.5rem', background: 'var(--surface-color)', border: '1px solid var(--border-color)', borderRadius: '12px' }}
-              onMouseEnter={() => handleSipHover(sub.name)}
-              onMouseLeave={handleMouseLeave}
             >
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
                 <span style={{ fontSize: '0.8rem', textTransform: 'uppercase', letterSpacing: '0.05em', color: sub.type === 'Investment' ? 'var(--success)' : 'var(--text-secondary)' }}>

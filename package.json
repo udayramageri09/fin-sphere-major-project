@@ -10,18 +10,15 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test:assistant": "node --test tests/assistantIntent.test.mjs",
-    "test:copilot": "node tests/financialCopilot.test.mjs"
+    "test:copilot": "node tests/financialCopilot.test.mjs",
+    "test:companion": "node --test tests/companionState.test.mjs tests/speechText.test.mjs"
   },
   "dependencies": {
-    "@react-three/drei": "^10.7.7",
-    "@react-three/fiber": "^9.6.1",
-    "canvas-confetti": "^1.9.4",
     "framer-motion": "^13.1.0",
     "lucide-react": "^1.14.0",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
-    "recharts": "^3.8.1",
-    "three": "^0.184.0"
+    "recharts": "^3.8.1"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
