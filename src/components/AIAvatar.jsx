@@ -1,24 +1,19 @@
-import { useState, useEffect, useRef, Suspense, useCallback } from 'react';
-import { X, Send, Bot, Image as ImageIcon, Mic, MicOff } from 'lucide-react';
-import { Canvas } from '@react-three/fiber';
-import { Environment, ContactShadows, Html, useProgress } from '@react-three/drei';
-import { AnimatedAvatar } from './AnimatedAvatar';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { X, Send, Image as ImageIcon, Mic, MicOff, Keyboard } from 'lucide-react';
+import FinancialCompanion from './FinancialCompanion';
 import './AIAvatar.css';
 import { useFinance } from '../context/FinanceContext';
 import { useAvatarActions } from '../hooks/useAvatarActions';
+import { useVoiceSession } from '../hooks/useVoiceSession';
 import { parseAssistantInput } from '../utils/assistantIntent';
 import { buildChatHistory, CHAT_CONTENT_MAX } from '../utils/chatHistory';
+import { createPulse, deriveCompanionState, companionLabel, PULSE_MS, NAVIGATION_PULSE_MS } from '../utils/companionState';
 
 const WELCOME = "Hi! I'm your FinSphere assistant. Ask about your own money, like \"How much did I spend this month?\" or \"How is my budget?\". To go somewhere, say \"Open transactions\" or \"Go to budgets\".";
 const HINTS = ['How am I doing this month?', 'How much did I spend?', 'How is my budget?', 'Open transactions'];
 
 // The short assistant line recorded for a navigation, so the transcript (and later follow-ups) show what happened.
 const navigationNote = (navigation) => (navigation.type === 'scroll' ? `Scrolling ${navigation.target}.` : `Opening ${navigation.label}.`);
-
-function Loader() {
-  const { progress } = useProgress();
-  return <Html center><div style={{color: 'var(--text-primary)', fontWeight: 'bold'}}>{progress.toFixed(0)}%</div></Html>;
-}
 
 function AIAvatar() {
   const { sendMessageToBot } = useFinance();
@@ -53,13 +48,34 @@ function AIAvatar() {
   const [voiceSupported] = useState(() => 'webkitSpeechRecognition' in window || 'SpeechRecognition' in window);
   const recognitionRef = useRef(null);
 
+  // Financial Companion (Issue #71): short-lived event pulses on top of the real listening / thinking state.
+  // Only real events fire one: a reply arrived or a grounded Plans insight (insight), a request failed (error).
+  const [pulse, setPulse] = useState(null);
+  const pulseTimerRef = useRef(null);
+  const firePulse = useCallback((kind, durationMs = PULSE_MS) => {
+    const next = createPulse(kind, Date.now(), durationMs);
+    if (!next) return;
+    if (pulseTimerRef.current) clearTimeout(pulseTimerRef.current);
+    setPulse(next);
+    pulseTimerRef.current = setTimeout(() => { pulseTimerRef.current = null; setPulse(null); }, durationMs);
+  }, []);
+  // Explicit navigation: play the short directional sweep and switch page in the same moment (no added delay).
+  const navigateWithEffect = (navigation) => {
+    firePulse('navigating', NAVIGATION_PULSE_MS);
+    performNavigation(navigation);
+  };
+  useEffect(() => () => { if (pulseTimerRef.current) clearTimeout(pulseTimerRef.current); }, []);
+
   // ──────────────────────────────────────────────
   // Event Listeners (Speak & Autonomous Actions)
   // ──────────────────────────────────────────────
   useEffect(() => {
+    // bot-speak / bot-walk-to now come only from the Plans page, which narrates real ML results: shown in the
+    // bubble with an insight pulse. "walk-to" no longer moves anything; it only highlights its target.
     const handleSpeak = (e) => {
       if (speechTimeoutRef.current) clearTimeout(speechTimeoutRef.current);
       setSpeech(e.detail.message);
+      firePulse('insight');
     };
     const handleQuiet = () => {
       if (speechTimeoutRef.current) clearTimeout(speechTimeoutRef.current);
@@ -70,6 +86,7 @@ function AIAvatar() {
       const { message, selector } = e.detail;
       setIsOpen(false);
       setSpeech(message || 'Done! ✨');
+      firePulse('insight');
       if (speechTimeoutRef.current) clearTimeout(speechTimeoutRef.current);
       speechTimeoutRef.current = setTimeout(() => setSpeech(null), 4000);
 
@@ -92,7 +109,7 @@ function AIAvatar() {
       window.removeEventListener('bot-quiet', handleQuiet);
       window.removeEventListener('bot-walk-to', handleWalkTo);
     };
-  }, []);
+  }, [firePulse]);
 
   // ──────────────────────────────────────────────
   // Snipping Mode Toggle (Double Click)
@@ -168,10 +185,18 @@ function AIAvatar() {
     speechTimeoutRef.current = setTimeout(() => setSpeech(null), ms);
   };
 
-  const handleSendText = async (rawText) => {
+  // runTurn is the ONE assistant pipeline. Text chat, panel dictation and the voice session all call it; voice and
+  // text share the same transcript, so a follow-up spoken after typing (or the reverse) has the same history.
+  //   source 'text'  -> opens the panel for a question, navigates right after the answer, never speaks
+  //   source 'voice' -> leaves the panel closed and returns `navigate` so the voice session can run it after the
+  //                     answer has been read aloud
+  // Returns { status: 'answered', reply, navigate } | { status: 'navigated', note } | { status: 'failed', error }
+  //       | { status: 'ignored' }.
+  const runTurn = async (rawText, { source = 'text' } = {}) => {
     const text = typeof rawText === 'string' ? rawText.trim() : '';
-    if (!text || busyRef.current) return;
-    setInput('');
+    if (!text || busyRef.current) return { status: 'ignored' };
+    const voice = source === 'voice';
+    if (!voice) setInput('');
 
     const prior = messagesRef.current;
     const previousUserText = [...prior].reverse().find((m) => m.sender === 'user' && !m.local)?.text ?? '';
@@ -182,34 +207,84 @@ function AIAvatar() {
       // Navigation only: no assistant call, but the turn is kept so "why?" / "show me" have context afterwards.
       const note = navigationNote(navigation);
       setMessages((prev) => [...prev, userMsg, { id: nextId(), text: note, sender: 'bot' }]);
-      performNavigation(navigation);
-      if (!isOpenRef.current) showBubble(note);
-      return;
+      navigateWithEffect(navigation);
+      if (!voice && !isOpenRef.current) showBubble(note);
+      return { status: 'navigated', note };
     }
 
     busyRef.current = true;
     setMessages((prev) => [...prev, userMsg]);
-    setIsOpen(true);
+    if (!voice) setIsOpen(true);
     setIsThinking(true);
     const history = buildChatHistory(
       prior.filter((m) => !m.local).map((m) => ({ role: m.sender === 'bot' ? 'assistant' : 'user', content: m.text })),
       question
     );
+    let reply = null;
+    let error = null;
     try {
-      const reply = await sendMessageToBot(history);
+      reply = await sendMessageToBot(history);
       setMessages((prev) => [...prev, { id: nextId(), text: reply, sender: 'bot' }]);
+      firePulse('insight');
     } catch (err) {
+      error = err.message;
       setMessages((prev) => [...prev, { id: nextId(), text: err.message, sender: 'bot', local: true }]);
+      firePulse('error');
     } finally {
       setIsThinking(false);
       busyRef.current = false;
     }
     // The explicit navigation request is honoured after the answer, even if the answer could not be fetched.
-    if (navigation) {
-      setMessages((prev) => [...prev, { id: nextId(), text: navigationNote(navigation), sender: 'bot' }]);
-      performNavigation(navigation);
-    }
+    const navigate = navigation
+      ? () => {
+        setMessages((prev) => [...prev, { id: nextId(), text: navigationNote(navigation), sender: 'bot' }]);
+        navigateWithEffect(navigation);
+      }
+      : null;
+    if (navigate && (!voice || error)) navigate();
+    if (error) return { status: 'failed', error };
+    return { status: 'answered', reply, navigate: voice ? navigate : null };
   };
+
+  const handleSendText = (rawText) => runTurn(rawText, { source: 'text' });
+  const voiceSession = useVoiceSession({ runTurn });
+
+  // Companion state from REAL activity only: panel dictation (isListening), a request in flight (isThinking), and the
+  // voice session's phase (listening / thinking / speaking a reply / stopped on an error).
+  const voicePhase = voiceSession.active ? voiceSession.phase : 'idle';
+  const companionState = deriveCompanionState({
+    isListening: isListening || voicePhase === 'listening',
+    isThinking: isThinking || voicePhase === 'thinking',
+    isSpeaking: voicePhase === 'speaking',
+    hasError: voicePhase === 'error',
+    pulse,
+  });
+  const stateLabel = companionLabel(companionState);
+
+  const openVoice = () => {
+    if (isSnipping) return;
+    stopListening();
+    setIsOpen(false);
+    voiceSession.start();
+  };
+  const openChat = () => {
+    voiceSession.end();
+    setIsOpen(true);
+  };
+  // Escape ends the voice session.
+  const { active: voiceActive, end: endVoice } = voiceSession;
+  useEffect(() => {
+    if (!voiceActive) return undefined;
+    const onKey = (e) => { if (e.key === 'Escape') endVoice(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [voiceActive, endVoice]);
+  const voiceStageLabel = companionState === 'navigating' ? 'Opening…'
+    : voicePhase === 'idle' ? 'Tap the orb to speak'
+      : voicePhase === 'error' ? 'Something went wrong' : `${stateLabel}…`;
+  const voiceOrbAction = voicePhase === 'listening' ? 'Stop listening'
+    : voicePhase === 'speaking' ? 'Skip the spoken answer and listen'
+      : voicePhase === 'thinking' ? 'FinSphere is thinking' : 'Start listening';
 
   const sendRef = useRef(handleSendText);
   useEffect(() => { sendRef.current = handleSendText; });
@@ -262,58 +337,87 @@ function AIAvatar() {
         </div>
       )}
 
-      {/* Floating 3D Orb Button (Bottom Right) */}
-      <div className={`ai-orb-button ${isSnipping ? 'hidden' : ''} ${isOpen ? 'docked' : ''}`}>
-        
+      {/* Assistant state for screen readers: announced only when the state changes. */}
+      <span className="ai-sr-only" role="status" aria-live="polite" data-testid="companion-status">{stateLabel}</span>
+
+      {/* Launcher: the Financial Companion, anchored bottom-right. The orb starts a VOICE conversation; text chat is
+          the separate, explicit "Chat" control under it. Both use the same assistant pipeline (runTurn). */}
+      <div className={`ai-orb-button ${isSnipping ? 'hidden' : ''} ${isOpen || voiceSession.active ? 'docked' : ''}`}>
+
         {/* Speech bubble */}
-        {speech && !isOpen && !isSnipping && (
+        {speech && !isOpen && !voiceSession.active && !isSnipping && (
           <div className="bot-speech-bubble" onClick={() => setIsOpen(true)}>
             {speech}
           </div>
         )}
 
-        {/* 3D Orb Canvas */}
-        <div 
-          className="bot-avatar-3d-container" 
-          onClick={() => !isSnipping && setIsOpen(!isOpen)}
+        <button
+          type="button"
+          className="companion-launcher"
+          aria-label={`Talk to FinSphere (${stateLabel})`}
+          aria-expanded={voiceSession.active}
+          aria-controls="ai-voice-stage"
+          onClick={openVoice}
         >
-          <Canvas camera={{ position: [0, 0, 5], fov: 45 }} shadows>
-            <ambientLight intensity={0.8} />
-            <directionalLight position={[10, 10, 5]} intensity={2} castShadow />
-            <Environment preset="city" />
-            <Suspense fallback={<Loader />}>
-              <AnimatedAvatar isOpen={isOpen} isSnipping={isSnipping} isMoving={isThinking} />
-            </Suspense>
-            <ContactShadows position={[0, -2, 0]} opacity={0.5} scale={4} blur={2} far={4} />
-          </Canvas>
-        </div>
+          <FinancialCompanion state={companionState} size="launcher" />
+        </button>
 
-        {/* Floating mic button (when chat is closed) */}
-        {!isOpen && !isSnipping && voiceSupported && (
+        <div className="companion-caption">
+          <span className="companion-name" aria-hidden="true">Ask FinSphere</span>
           <button
-            className={`floating-mic-btn ${isListening ? 'listening' : ''}`}
-            onClick={(e) => { e.stopPropagation(); isListening ? stopListening() : startListening(); }}
-            title="Speak a command"
+            type="button"
+            className="companion-chat-btn"
+            aria-label="Open text chat"
+            aria-expanded={isOpen}
+            aria-controls="ai-chat-panel"
+            onClick={openChat}
           >
-            {isListening ? <MicOff size={20} /> : <Mic size={20} />}
-            {isListening && <span className="mic-label">Listening…</span>}
+            <Keyboard size={14} aria-hidden="true" />
+            <span>Chat</span>
           </button>
-        )}
+        </div>
       </div>
 
+      {/* Voice conversation stage: the companion expands; captions only, not a chat transcript. */}
+      {voiceSession.active && (
+        <section id="ai-voice-stage" className="voice-stage" role="dialog" aria-modal="false" aria-label="FinSphere voice assistant">
+          <button type="button" className="voice-stage-orb" onClick={voiceSession.tapOrb} aria-label={voiceOrbAction}>
+            <FinancialCompanion state={companionState} size="stage" />
+          </button>
+          <p className="voice-stage-state" aria-hidden="true">{voiceStageLabel}</p>
+          {voiceSession.userCaption && (
+            <p className="voice-caption voice-caption--user">
+              <span className="ai-sr-only">You said: </span>“{voiceSession.userCaption}”
+            </p>
+          )}
+          <div className="voice-caption voice-caption--reply" aria-live="polite">
+            {voicePhase === 'error' ? voiceSession.errorText : voiceSession.replyCaption}
+          </div>
+          <div className="voice-stage-actions">
+            <button type="button" className="voice-stage-btn" onClick={openChat} aria-label="Switch to text chat">
+              <Keyboard size={16} aria-hidden="true" />
+              <span>Chat</span>
+            </button>
+            <button type="button" className="voice-stage-btn voice-stage-btn--end" onClick={voiceSession.end} aria-label="End voice session">
+              <X size={16} aria-hidden="true" />
+              <span>End</span>
+            </button>
+          </div>
+        </section>
+      )}
+
       {/* Chat Side Panel (Docked on Right) */}
-      <div className={`ai-chat-panel ${isOpen ? 'open' : ''} glass-panel`}>
+      <div id="ai-chat-panel" className={`ai-chat-panel ${isOpen ? 'open' : ''} glass-panel`} role="complementary" aria-label="FinSphere assistant">
         <div className="ai-chat-header">
           <div className="ai-header-info">
-            <div className="ai-icon-small">
-              <Bot size={18} />
-            </div>
+            {/* The launcher is hidden while the panel is open, so the state shows here too. */}
+            <FinancialCompanion state={companionState} size="header" />
             <div>
               <span className="ai-title">FinSphere Assistant</span>
               <div className="ai-subtitle">Answers from your own financial data</div>
             </div>
           </div>
-          <button className="close-btn" onClick={() => setIsOpen(false)}>
+          <button type="button" className="close-btn" aria-label="Close assistant" onClick={() => setIsOpen(false)}>
             <X size={20} />
           </button>
         </div>
@@ -325,7 +429,7 @@ function AIAvatar() {
           ))}
         </div>
 
-        <div className="ai-chat-body" id="ai-chat-body">
+        <div className="ai-chat-body" id="ai-chat-body" aria-live="polite" aria-relevant="additions">
           {messages.map(msg => (
             <div key={msg.id} className={`chat-message ${msg.sender}`}>
               <div className="message-content">
@@ -337,11 +441,12 @@ function AIAvatar() {
           {isThinking && (
             <div className="chat-message bot">
               <div className="message-content">
-                <div className="thinking-dots">
+                <div className="thinking-dots" aria-hidden="true">
                   <span className="thinking-dot"></span>
                   <span className="thinking-dot"></span>
                   <span className="thinking-dot"></span>
                 </div>
+                <span className="ai-sr-only">Assistant is thinking</span>
               </div>
             </div>
           )}
@@ -351,6 +456,7 @@ function AIAvatar() {
           <input
             type="text"
             placeholder="Ask about your money, or say “open budgets”…"
+            aria-label="Message the FinSphere assistant"
             maxLength={CHAT_CONTENT_MAX}
             value={input}
             onChange={(e) => setInput(e.target.value)}
@@ -360,11 +466,13 @@ function AIAvatar() {
               type="button"
               className={`voice-btn ${isListening ? 'listening' : ''}`}
               onClick={isListening ? stopListening : startListening}
+              aria-label={isListening ? 'Stop voice input' : 'Ask by voice'}
+              aria-pressed={isListening}
             >
               {isListening ? <MicOff size={18} /> : <Mic size={18} />}
             </button>
           )}
-          <button type="submit" className="send-btn" disabled={!input.trim()}>
+          <button type="submit" className="send-btn" aria-label="Send message" disabled={!input.trim()}>
             <Send size={18} />
           </button>
         </form>

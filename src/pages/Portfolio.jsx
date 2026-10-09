@@ -18,13 +18,6 @@ function Portfolio() {
     { month: 'Dec', value: 4550000 },
   ];
 
-  const handleMouseEnter = () => {
-    window.dispatchEvent(new CustomEvent('bot-speak', { detail: { message: "Look at that profit climb! 🚀 Your compounding strategy is working perfectly." }}));
-  };
-  const handleMouseLeave = () => {
-    window.dispatchEvent(new CustomEvent('bot-quiet'));
-  };
-
   return (
     <div className="animate-fade-in">
       <h2 style={{ marginBottom: '2rem', fontSize: '2rem' }}>Your Portfolio</h2>
@@ -68,11 +61,7 @@ function Portfolio() {
         </div>
 
         {/* Profit Trend Chart Widget */}
-        <div 
-          className="glass-panel widget-card" 
-          onMouseEnter={handleMouseEnter} 
-          onMouseLeave={handleMouseLeave}
-        >
+        <div className="glass-panel widget-card">
           <div className="widget-header">
             <h3 className="widget-title" style={{marginBottom: 0}}>6-Month Growth Trend</h3>
           </div>

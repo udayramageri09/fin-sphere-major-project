@@ -1,0 +1,126 @@
+/* Financial Companion (Issue #71): an abstract orb whose only movement is its state.
+   Each state is ALSO distinguishable without motion (colour of the halo/core plus which element is visible), so
+   prefers-reduced-motion loses no information. */
+
+.fin-companion {
+  --fc-accent: #2563eb;
+  --fc-core-1: #93c5fd;
+  --fc-core-2: #2563eb;
+  --fc-core-3: #1e3a8a;
+  display: inline-block;
+  position: relative;
+  flex-shrink: 0;
+  line-height: 0;
+}
+.fin-companion--launcher { width: 108px; height: 108px; }
+.fin-companion--header { width: 30px; height: 30px; }
+.fin-companion--stage { width: 200px; height: 200px; }
+@media (max-width: 640px) {
+  .fin-companion--launcher { width: 80px; height: 80px; }
+  .fin-companion--stage { width: 150px; height: 150px; }
+}
+
+.fc-svg { width: 100%; height: 100%; overflow: visible; }
+
+.fc-core-stop-1 { stop-color: var(--fc-core-1); }
+.fc-core-stop-2 { stop-color: var(--fc-core-2); }
+.fc-core-stop-3 { stop-color: var(--fc-core-3); }
+
+.fc-core {
+  transform-origin: 32px 32px;
+  filter: drop-shadow(0 3px 6px rgba(15, 23, 42, 0.25));
+  transition: transform 0.3s ease;
+}
+.fc-halo {
+  fill: none;
+  stroke: var(--fc-accent);
+  stroke-width: 1.5;
+  opacity: 0.35;
+  transform-origin: 32px 32px;
+  transition: stroke 0.3s ease, opacity 0.3s ease;
+}
+.fc-wave, .fc-voice {
+  fill: none;
+  stroke: var(--fc-accent);
+  stroke-width: 1.5;
+  opacity: 0;
+  transform-origin: 32px 32px;
+}
+.fc-orbit { opacity: 0; transform-origin: 32px 32px; }
+.fc-sweep {
+  fill: none;
+  stroke: var(--fc-accent);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-dasharray: 18 82;
+  opacity: 0;
+  transform-origin: 32px 32px;
+  transform: rotate(-30deg);   /* rest position: an arc on the right-hand side */
+}
+.fc-dot { fill: var(--fc-accent); }
+.fc-spark { fill: #fde68a; opacity: 0; transform-origin: 44px 20px; }
+
+/* ── State colours and static forms (all visible without animation) ── */
+.fin-companion[data-state="listening"] { --fc-accent: #2563eb; }
+.fin-companion[data-state="listening"] .fc-wave--1 { opacity: 0.5; }
+.fin-companion[data-state="listening"] .fc-halo { opacity: 0.8; stroke-width: 2; }
+
+.fin-companion[data-state="thinking"] { --fc-accent: #6366f1; --fc-core-1: #c7d2fe; --fc-core-2: #6366f1; --fc-core-3: #312e81; }
+.fin-companion[data-state="thinking"] .fc-orbit { opacity: 1; }
+
+.fin-companion[data-state="speaking"] { --fc-accent: #0d9488; --fc-core-1: #99f6e4; --fc-core-2: #14b8a6; --fc-core-3: #134e4a; }
+.fin-companion[data-state="speaking"] .fc-voice { opacity: 0.7; }
+.fin-companion[data-state="speaking"] .fc-halo { opacity: 0.7; }
+
+.fin-companion[data-state="insight"] { --fc-accent: #0ea5e9; --fc-core-1: #bae6fd; --fc-core-2: #0ea5e9; --fc-core-3: #075985; }
+.fin-companion[data-state="insight"] .fc-spark { opacity: 1; }
+.fin-companion[data-state="insight"] .fc-halo { opacity: 0.8; }
+
+/* navigating: static form = an asymmetric glow arc on the right (no motion needed to read it) */
+.fin-companion[data-state="navigating"] { --fc-accent: #2563eb; }
+.fin-companion[data-state="navigating"] .fc-sweep { opacity: 0.95; }
+.fin-companion[data-state="navigating"] .fc-halo { opacity: 0.5; }
+
+.fin-companion[data-state="attention"] { --fc-accent: #f59e0b; }
+.fin-companion[data-state="attention"] .fc-halo { opacity: 0.9; stroke-width: 2.5; }
+
+.fin-companion[data-state="success"] { --fc-accent: #10b981; --fc-core-1: #a7f3d0; --fc-core-2: #10b981; --fc-core-3: #065f46; }
+.fin-companion[data-state="success"] .fc-halo { opacity: 0.9; }
+
+.fin-companion[data-state="error"] { --fc-accent: #dc2626; --fc-core-1: #fecaca; --fc-core-2: #e11d48; --fc-core-3: #7f1d1d; }
+.fin-companion[data-state="error"] .fc-halo { opacity: 0.8; stroke-width: 2; }
+
+/* ── Motion: one animation per state, subtle, never random ── */
+@media (prefers-reduced-motion: no-preference) {
+  .fin-companion[data-state="idle"] .fc-core { animation: fc-breathe 4s ease-in-out infinite; }
+
+  .fin-companion[data-state="listening"] .fc-wave--1 { animation: fc-wave 1.6s ease-out infinite; }
+  .fin-companion[data-state="listening"] .fc-wave--2 { animation: fc-wave 1.6s ease-out 0.8s infinite; }
+
+  .fin-companion[data-state="thinking"] .fc-orbit { animation: fc-orbit 2.4s linear infinite; }
+
+  .fin-companion[data-state="speaking"] .fc-voice { animation: fc-voice 0.9s ease-in-out infinite; }
+
+  .fin-companion[data-state="insight"] .fc-spark { animation: fc-spark 1.2s ease-out 1; }
+  .fin-companion[data-state="insight"] .fc-halo { animation: fc-glow 1.2s ease-out 1; }
+
+  .fin-companion[data-state="navigating"] .fc-sweep { animation: fc-sweep 0.55s cubic-bezier(0.16, 1, 0.3, 1) 1; }
+  .fin-companion[data-state="navigating"] .fc-core { animation: fc-nudge 0.55s ease-out 1; }
+
+  .fin-companion[data-state="attention"] .fc-halo { animation: fc-glow 2s ease-in-out infinite; }
+
+  .fin-companion[data-state="success"] .fc-halo { animation: fc-burst 0.8s ease-out 1; }
+
+  .fin-companion[data-state="error"] .fc-core { animation: fc-error 0.6s ease-in-out 2; }
+}
+
+@keyframes fc-breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.04); } }
+@keyframes fc-wave { 0% { transform: scale(1); opacity: 0.55; } 100% { transform: scale(1.6); opacity: 0; } }
+@keyframes fc-orbit { to { transform: rotate(360deg); } }
+@keyframes fc-voice { 0%, 100% { transform: scale(1); opacity: 0.4; } 50% { transform: scale(1.25); opacity: 0.8; } }
+@keyframes fc-spark { 0% { transform: scale(0.4); opacity: 0; } 40% { transform: scale(1.15); opacity: 1; } 100% { transform: scale(1); opacity: 1; } }
+@keyframes fc-glow { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+@keyframes fc-burst { 0% { transform: scale(1); opacity: 1; } 100% { transform: scale(1.35); opacity: 0.2; } }
+@keyframes fc-sweep { from { transform: rotate(-210deg); opacity: 0.2; } to { transform: rotate(-30deg); opacity: 0.95; } }
+@keyframes fc-nudge { 0%, 100% { transform: translateX(0); } 45% { transform: translateX(2.5px); } }
+@keyframes fc-error { 0%, 100% { transform: scale(1); } 50% { transform: scale(0.94); } }
