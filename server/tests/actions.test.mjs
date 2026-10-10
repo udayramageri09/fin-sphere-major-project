@@ -37,7 +37,8 @@ let server = null, serverOut = '', exitCode = null;
 
 async function startServer() {
   const env = { ...process.env, DATABASE_URL: urlFor(DB), PORT: String(PORT), JWT_SECRET: 'a'.repeat(40), GROQ_API_KEY: '' };
-  for (const k of ['NODE_ENV', 'CORS_ORIGINS', 'TRUST_PROXY', 'FINSPHERE_TEST_UPLOAD_LIMIT']) delete env[k];
+  for (const k of ['NODE_ENV', 'CORS_ORIGINS', 'FINSPHERE_TEST_UPLOAD_LIMIT']) delete env[k];
+  env.TRUST_PROXY = '1';   // test only: lets each test user come from its own X-Forwarded-For address (see newUser)
   server = spawn(process.execPath, ['server.js'], { cwd: SERVER_DIR, env, stdio: ['ignore', 'pipe', 'pipe'] });
   server.stdout.on('data', (d) => { serverOut += d; });
   server.stderr.on('data', (d) => { serverOut += d; });
@@ -57,10 +58,13 @@ async function call(cookie, method, p, body) {
   let json = null; try { json = JSON.parse(text); } catch { /* not JSON */ }
   return { status: r.status, json, text };
 }
+let userSeq = 0;
 async function newUser(name) {
   const email = `${name}@example.com`, password = 'action-test-password-1';
-  await call(null, 'POST', '/auth/register', { email, password });
-  const r = await fetch(`${base}/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, password }) });
+  userSeq += 1;
+  const headers = { 'content-type': 'application/json', 'x-forwarded-for': `10.20.${userSeq >> 8}.${userSeq & 255}` };
+  await fetch(`${base}/auth/register`, { method: 'POST', headers, body: JSON.stringify({ email, password }) });
+  const r = await fetch(`${base}/auth/login`, { method: 'POST', headers, body: JSON.stringify({ email, password }) });
   return (r.headers.get('set-cookie') || '').split(';')[0];
 }
 
@@ -319,6 +323,299 @@ async function run() {
   r = await say(U, 'Add ₹100 for books today');
   r = await say(U, 'make it 5');
   ok((await goals(U)).length === 0, 'security: no cross-user effects');
+
+  // ════════════════════ Issue #75: record_liability_repayment ════════════════════
+  const addLiab = (cookie, l) => call(cookie, 'POST', '/liabilities', { interestRate: 9, monthlyPayment: 0, ...l });
+  const liabs = async (cookie) => (await call(cookie, 'GET', '/liabilities')).json;
+  const outstandingOf = async (cookie, id) => (await liabs(cookie)).find((l) => l.id === id).outstandingAmount;
+  const repaysOf = async (cookie, id) => (await call(cookie, 'GET', `/liabilities/${id}/repayments`)).json;
+  const manualRepay = (cookie, id, amount) => call(cookie, 'POST', `/liabilities/${id}/repayments`, { amount });
+  const rowsText = (a) => JSON.stringify(a.display.map((d) => [d.label, d.value]));
+
+  const L1 = await newUser('act-repay1');
+  const hdfc = (await addLiab(L1, { name: 'HDFC Car Loan', type: 'vehicle_loan', outstandingAmount: 120000, monthlyPayment: 8000 })).json;
+  const bike = (await addLiab(L1, { name: 'Bike Loan', type: 'vehicle_loan', outstandingAmount: 10000 })).json;
+  const personal = (await addLiab(L1, { name: 'Personal Loan', type: 'personal_loan', outstandingAmount: 50000 })).json;
+  const paidOff = (await addLiab(L1, { name: 'Paid Off Loan', type: 'other', outstandingAmount: 100 })).json;
+  await manualRepay(L1, paidOff.id, 100);
+  const twinA = (await addLiab(L1, { name: 'Twin Loan', type: 'other', outstandingAmount: 10000 })).json;
+  const twinB = (await addLiab(L1, { name: 'Twin Loan', type: 'other', outstandingAmount: 20000 })).json;
+  const centsLoan = (await addLiab(L1, { name: 'Cents Loan', type: 'other', outstandingAmount: 0.3 })).json;
+
+  r = await say(L1, 'Repay 5k on my HDFC Car Loan');
+  const rp1 = r.json.action;
+  ok(rp1?.status === 'pending' && rp1.kind === 'record_liability_repayment' && r.json.reply === "I'll record a ₹5,000 repayment on your HDFC Car Loan. Its outstanding balance will go from ₹1,20,000 to ₹1,15,000. Should I record it?", 'repay: concise proposal with the balance change', r.json?.reply);
+  ok(rowsText(rp1) === JSON.stringify([['Liability', 'HDFC Car Loan (vehicle loan)'], ['Repayment', '₹5,000'], ['Outstanding now', '₹1,20,000'], ['Outstanding after', '₹1,15,000'], ['Note', 'Records a liability repayment only; no expense transaction will be added.']]), 'repay: exact preview rows incl. the "no expense transaction" disclosure', rowsText(rp1));
+  ok(await outstandingOf(L1, hdfc.id) === 120000 && (await repaysOf(L1, hdfc.id)).length === 0 && (await txs(L1)).length === 0, 'repay: a proposal writes NOTHING');
+  const manualShape = (await manualRepay(L1, bike.id, 1)).json;      // the manual route, for a shape comparison
+  r = await confirm(L1, rp1.proposalId);
+  ok(r.status === 200 && r.json.status === 'executed' && r.json.kind === 'record_liability_repayment' && r.json.message === 'Done. I recorded a ₹5,000 repayment on HDFC Car Loan. Its outstanding balance is now ₹1,15,000.', 'repay: confirm executes and reports the actual balance', r.text);
+  ok(r.json.liability.outstandingAmount === 115000 && r.json.repayment.amount === 5000 && r.json.repayment.liabilityId === hdfc.id, 'repay: the stored liability / repayment rows');
+  ok(Object.keys(r.json.liability).sort().join() === Object.keys(manualShape.liability).sort().join() && Object.keys(r.json.repayment).sort().join() === Object.keys(manualShape.repayment).sort().join(), 'repay: same liability / repayment shape as the manual route');
+  ok((await txs(L1)).length === 0, 'repay: NO expense transaction is created');
+  r = await confirm(L1, rp1.proposalId);
+  ok(r.status === 200 && r.json.replay === true && (await repaysOf(L1, hdfc.id)).length === 1 && await outstandingOf(L1, hdfc.id) === 115000, 'repay: replay returns the stored result and writes nothing');
+  r = await say(L1, 'Repay ₹1,000 on Twin Loan');
+  ok(/You have 2 liabilities called/.test(r.json.reply) && /\d\. “Twin Loan” \(other, ₹(?:10,000|20,000) outstanding\)/.test(r.json.reply) && r.json.action.status === 'needs_clarification', 'repay: duplicate names need a numbered choice with type and balance', r.json?.reply);
+  r = await say(L1, '2');
+  ok(r.json.action.status === 'pending' && ['₹10,000', '₹20,000'].includes(r.json.action.display.find((d) => d.label === 'Outstanding now').value), 'repay: a specific duplicate was chosen', rowsText(r.json.action ?? { display: [] }));
+  await cancel(L1, r.json.action.proposalId);
+  r = await say(L1, 'Repay 100 on Paid Off Loan');
+  ok(/already paid off/.test(r.json.reply) && !(r.json.action && r.json.action.status === 'pending'), 'repay: a paid-off liability is refused', r.json?.reply);
+  r = await say(L1, 'Repay ₹9,99,999 on Bike Loan');
+  ok(/more than the outstanding balance of “Bike Loan” \(₹9,999\)\. Nothing was saved\./.test(r.json.reply) && !(r.json.action && r.json.action.status === 'pending'), 'repay: an over-balance amount is refused at proposal time', r.json?.reply);
+  r = await say(L1, 'Paid ₹500 toward my car loan');
+  ok(/I couldn't find a liability called “car loan”/.test(r.json.reply) && r.json.action.status === 'needs_clarification' && (await repaysOf(L1, hdfc.id)).length === 1, 'repay: a near match is only SUGGESTED (nothing chosen, nothing written)', r.json?.reply);
+  r = await say(L1, '1');
+  ok(r.json.action.status === 'pending' && /₹500 repayment/.test(r.json.reply), 'repay: choosing a suggestion produces the proposal', r.json?.reply);
+  await cancel(L1, r.json.action.proposalId);
+  r = await say(L1, 'Record a repayment on my Bike Loan');
+  ok(r.json.reply === 'How much did you repay on Bike Loan?' && r.json.action.status === 'needs_clarification', 'repay: missing amount is asked', r.json?.reply);
+  r = await say(L1, '1000');
+  ok(r.json.action.status === 'pending' && /₹1,000 repayment on your Bike Loan/.test(r.json.reply), 'repay: amount answered', r.json?.reply);
+  await cancel(L1, r.json.action.proposalId);
+  r = await say(L1, 'I paid ₹5,000 toward my loan');
+  ok(/Which loan is this for\?/.test(r.json.reply) && /Which one\?/.test(r.json.reply) && r.json.action.status === 'needs_clarification', 'repay: a missing liability is asked, never guessed', r.json?.reply);
+  await cancel(L1, r.json.action.proposalId);
+  r = await say(L1, 'Paid my EMI on my HDFC Car Loan');
+  ok(r.json.reply === 'How much did you repay on HDFC Car Loan? (Its monthly payment is ₹8,000.)' && r.json.action.status === 'needs_clarification', 'repay: an EMI without an amount asks (the monthly payment is only mentioned)', r.json?.reply);
+  r = await say(L1, 'yes');
+  ok(r.json.action?.status === 'needs_clarification' && (await repaysOf(L1, hdfc.id)).length === 1, 'repay: "yes" does NOT adopt the monthly payment as the amount', r.json?.reply);
+  r = await say(L1, '3000');
+  ok(r.json.action.status === 'pending' && /₹3,000 repayment/.test(r.json.reply), 'repay: only the amount the user gives is used', r.json?.reply);
+  await cancel(L1, r.json.action.proposalId);
+  r = await say(L1, 'Add ₹5,000 to my car loan');
+  ok(!/goal/i.test(r.json.reply) && r.json.action?.kind === 'record_liability_repayment', 'ROUTING: "Add ₹5,000 to my car loan" is a repayment request, not a goal', r.json?.reply);
+  await cancel(L1, r.json.action.proposalId);
+  // exact numeric preview and storage
+  r = await say(L1, 'Repay 0.1 on Cents Loan');
+  ok(r.json.action.display.find((d) => d.label === 'Outstanding now').value === '₹0.3' && r.json.action.display.find((d) => d.label === 'Outstanding after').value === '₹0.2', 'repay: preview arithmetic is exact (0.3 - 0.1 = 0.2)', rowsText(r.json.action));
+  r = await confirm(L1, r.json.action.proposalId);
+  ok(r.json.liability.outstandingAmount === 0.2, 'repay: stored exactly', String(r.json.liability?.outstandingAmount));
+  // paying everything off says so
+  const small = (await addLiab(L1, { name: 'Small Loan', type: 'other', outstandingAmount: 500 })).json;
+  r = await say(L1, 'Repay 500 on Small Loan');
+  ok(/so it will be paid off\. Should I record it\?$/.test(r.json.reply) && r.json.action.display.some((d) => d.label === 'Result' && d.value === 'Paid off after this repayment'), 'repay: "Paid off after this repayment" is shown', r.json?.reply);
+  r = await confirm(L1, r.json.action.proposalId);
+  ok(/now ₹0, so it is paid off\.$/.test(r.json.message) && r.json.liability.outstandingAmount === 0, 'repay: the paid-off result is reported', r.json?.message);
+  r = await say(L1, 'Repay 100 on Small Loan');
+  ok(/already paid off/.test(r.json.reply), 'repay: afterwards it is refused as paid off');
+  // concurrent confirmations
+  r = await say(L1, 'Repay ₹2,000 on Personal Loan');
+  const rp2 = r.json.action;
+  const burstR = await Promise.all(Array.from({ length: 6 }, () => confirm(L1, rp2.proposalId)));
+  ok(burstR.filter((x) => x.status === 200 && x.json.status === 'executed' && !x.json.replay).length === 1 && await outstandingOf(L1, personal.id) === 48000 && (await repaysOf(L1, personal.id)).length === 1, 'repay: of 6 simultaneous confirmations exactly one repays', burstR.map((x) => `${x.status}:${x.json?.replay}`).join(' '));
+  // lenient stale balance: it moved, the amount is still valid -> executes and reports the ACTUAL balance
+  r = await say(L1, 'Repay ₹5,000 on Personal Loan');
+  const rpStale = r.json.action;
+  ok(/from ₹48,000 to ₹43,000/.test(r.json.reply), 'repay: preview before the balance moves', r.json?.reply);
+  await manualRepay(L1, personal.id, 30000);                         // balance is now 18,000
+  r = await confirm(L1, rpStale.proposalId);
+  ok(r.status === 200 && r.json.status === 'executed' && r.json.liability.outstandingAmount === 13000 && r.json.repayment.amount === 5000 && /now ₹13,000\.$/.test(r.json.message), 'repay: the balance moved but the exact amount is still valid -> executes, reports the ACTUAL balance (never resized)', r.text);
+  // stale and now invalid -> refused, nothing written
+  r = await say(L1, 'Repay ₹6,000 on Bike Loan');
+  const rpBad = r.json.action;
+  const bikeBefore = await outstandingOf(L1, bike.id);                // 9,999
+  await manualRepay(L1, bike.id, 7000);                               // leaves 2,999
+  r = await confirm(L1, rpBad.proposalId);
+  ok(r.status === 400 && r.json.status === 'failed' && /exceed the outstanding balance \(₹2,999 outstanding\)/.test(r.json.error), 'repay: the amount no longer fits -> refused with the authoritative error', r.text);
+  ok(await outstandingOf(L1, bike.id) === bikeBefore - 7000 && (await repaysOf(L1, bike.id)).length === 2, 'repay: that refusal wrote nothing (only the two manual repayments exist)', String(await outstandingOf(L1, bike.id)));
+  r = await confirm(L1, rpBad.proposalId);
+  ok(r.status === 400 && r.json.status === 'failed', 'repay: a retry returns the stored failure');
+
+  // edits, unrelated, tampering, cross-user
+  const L2 = await newUser('act-repay2');
+  const l2h = (await addLiab(L2, { name: 'HDFC Car Loan', type: 'vehicle_loan', outstandingAmount: 120000 })).json;
+  const l2b = (await addLiab(L2, { name: 'Bike Loan', type: 'vehicle_loan', outstandingAmount: 20000 })).json;
+  r = await say(L2, 'Repay 5k on HDFC Car Loan');
+  const re0 = r.json.action;
+  r = await say(L2, 'make it ₹6,000');
+  const re1 = r.json.action;
+  ok(re1.proposalId !== re0.proposalId && /₹6,000 repayment on your HDFC Car Loan/.test(r.json.reply), 'repay edit: "make it ₹6,000" creates a NEW proposal', r.json?.reply);
+  r = await confirm(L2, re0.proposalId);
+  ok(r.status === 409 && await outstandingOf(L2, l2h.id) === 120000, 'repay edit: the old proposal is unusable');
+  r = await say(L2, 'yes but make it 7000');
+  const re2 = r.json.action;
+  ok(re2.proposalId !== re1.proposalId && /₹7,000 repayment/.test(r.json.reply) && (await repaysOf(L2, l2h.id)).length === 0, '"yes but make it 7000" is an EDIT, not a confirmation', r.json?.reply);
+  r = await say(L2, 'use the Bike Loan');
+  const re3 = r.json.action;
+  ok(re3.proposalId !== re2.proposalId && /₹7,000 repayment on your Bike Loan/.test(r.json.reply), 'repay edit: "use the Bike Loan" re-resolves the liability', r.json?.reply);
+  r = await say(L2, 'How much did I spend?');
+  ok(/^I cancelled the ₹7,000 repayment on Bike Loan\. Nothing was saved\./.test(r.json.reply) && r.json.action.status === 'cancelled', 'repay: an unrelated message cancels it', r.json?.reply);
+  r = await say(L2, 'Repay ₹4,000 on Bike Loan');
+  const rt1 = r.json.action;
+  r = await confirm(U, rt1.proposalId);
+  ok(r.status === 404 && await outstandingOf(L2, l2b.id) === 20000, 'repay security: another user cannot confirm it (404, nothing written)');
+  r = await say(U, 'Repay ₹100 on HDFC Car Loan');
+  ok(/don't have any saved liabilities/.test(r.json.reply) && !r.json.action?.proposalId, "repay security: another user's liabilities are invisible", r.json?.reply);
+  r = await confirm(L2, rt1.proposalId, { amount: 999999, liabilityId: 'not-mine', payload: { amount: 1 }, liability: { id: l2h.id } });
+  ok(r.status === 200 && r.json.repayment.amount === 4000 && r.json.liability.id === l2b.id && await outstandingOf(L2, l2h.id) === 120000, 'repay security: a tampered confirm body cannot change the stored liability or amount', r.text);
+  void twinA; void twinB; void centsLoan; void small;
+
+  // ════════════════════ Issue #75: set_budget ════════════════════
+  const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  const ml = (ym) => `${MONTHS[Number(ym.slice(5, 7)) - 1]} ${ym.slice(0, 4)}`;
+  const shiftYm = (ym, n) => { const t = Number(ym.slice(0, 4)) * 12 + Number(ym.slice(5, 7)) - 1 + n; return `${Math.floor(t / 12)}-${String((t % 12) + 1).padStart(2, '0')}`; };
+  const month0 = today.slice(0, 7);
+  const nextYm = shiftYm(month0, 1);
+  const putBudget = (cookie, month, category, amount) => call(cookie, 'PUT', '/budgets', { month, category, amount });
+  const budgets = async (cookie, month = month0) => (await call(cookie, 'GET', `/budgets?month=${month}`)).json;
+  const budgetOf = async (cookie, key, month = month0) => (await budgets(cookie, month)).find((b) => b.categoryKey === key);
+
+  const B1 = await newUser('act-budget1');
+  await call(B1, 'POST', '/transactions', { title: 'Lunch', amount: 2500, type: 'expense', classification: 'expense', category: 'Food', date: today });
+  await putBudget(B1, month0, 'Food', 6000);
+
+  r = await say(B1, 'Set transport budget to ₹4,500');
+  const bu1 = r.json.action;
+  ok(bu1?.status === 'pending' && bu1.kind === 'set_budget' && r.json.reply === `I'll create a transport budget of ₹4,500 for ${ml(month0)}. Should I create it?`, 'budget: create preview (the local month is the default)', r.json?.reply);
+  ok(rowsText(bu1) === JSON.stringify([['Month', `${ml(month0)} (${month0})`], ['Category', 'transport'], ['New limit', '₹4,500'], ['Status', 'New budget']]), 'budget: exact create preview rows', rowsText(bu1));
+  ok(!(await budgetOf(B1, 'transport')), 'budget: a proposal writes NOTHING');
+  r = await confirm(B1, bu1.proposalId);
+  ok(r.status === 200 && r.json.created === true && r.json.budget.amount === 4500 && r.json.budget.category === 'transport' && r.json.message === `Done. I created the transport budget for ${ml(month0)}: ₹4,500.`, 'budget: create confirm', r.text);
+  ok((await budgetOf(B1, 'transport')).amount === 4500, 'budget: stored');
+  r = await confirm(B1, bu1.proposalId);
+  ok(r.status === 200 && r.json.replay === true && (await budgets(B1)).filter((b) => b.categoryKey === 'transport').length === 1, 'budget: replay returns the stored result, writes nothing');
+
+  // update preview discloses the old limit, spending, remaining, status and a label change
+  r = await say(B1, 'Set food budget to ₹2,000');
+  ok(r.json.action.display.find((d) => d.label === 'Remaining after').value === '₹500 over' && r.json.action.display.find((d) => d.label === 'Status after').value === 'Over budget', 'budget: an over-budget result is disclosed', rowsText(r.json.action));
+  await cancel(B1, r.json.action.proposalId);
+  r = await say(B1, 'Set my food budget to ₹8,000 this month');
+  const bu2 = r.json.action;
+  ok(r.json.reply === `Your Food budget for ${ml(month0)} is ₹6,000. I'll change it to ₹8,000. Should I update it?`, 'budget: update summary discloses the CURRENT limit', r.json?.reply);
+  ok(rowsText(bu2) === JSON.stringify([['Month', `${ml(month0)} (${month0})`], ['Category', 'Food'], ['Label', 'Will change from “Food” to “food”'], ['Current limit', '₹6,000'], ['New limit', '₹8,000'], ['Spent so far', '₹2,500'], ['Remaining after', '₹5,500'], ['Status after', 'Under budget']]), 'budget: exact update preview (old limit, spent, remaining, status, label change)', rowsText(bu2));
+  ok((await budgetOf(B1, 'food')).amount === 6000, 'budget: the update proposal wrote nothing');
+  r = await confirm(B1, bu2.proposalId);
+  ok(r.status === 200 && r.json.created === false && r.json.budget.amount === 8000 && r.json.budget.category === 'food' && r.json.message === `Done. I changed the food budget for ${ml(month0)} from ₹6,000 to ₹8,000.`, 'budget: update confirm', r.text);
+  ok((await budgets(B1)).filter((b) => b.categoryKey === 'food').length === 1, 'budget: one row per canonical key');
+  r = await say(B1, 'Set food budget to ₹8,000');
+  ok(r.json.reply === `Your food budget for ${ml(month0)} is already ₹8,000, so there is nothing to change.` && !(r.json.action && r.json.action.status === 'pending'), 'budget: no change needed -> no proposal', r.json?.reply);
+
+  // compare-and-set: a budget created / changed after the preview is never overwritten
+  r = await say(B1, 'Set fuel budget to ₹3,000');
+  const bNew = r.json.action;
+  await putBudget(B1, month0, 'Fuel', 1000);                        // someone creates it before the user confirms
+  r = await confirm(B1, bNew.proposalId);
+  ok(r.status === 400 && r.json.status === 'failed' && /changed after I showed you the preview/.test(r.json.error), 'budget CAS: a budget that appeared since the preview is NOT overwritten', r.text);
+  ok((await budgetOf(B1, 'fuel')).amount === 1000, 'budget CAS: nothing was written');
+  r = await say(B1, 'Set transport budget to ₹5,000');
+  const bUpd = r.json.action;
+  ok(/is ₹4,500\. I'll change it to ₹5,000/.test(r.json.reply), 'budget CAS: update preview shows 4,500', r.json?.reply);
+  await putBudget(B1, month0, 'transport', 4700);                   // the limit changes before the user confirms
+  r = await confirm(B1, bUpd.proposalId);
+  ok(r.status === 400 && r.json.status === 'failed' && /changed after I showed you the preview/.test(r.json.error) && (await budgetOf(B1, 'transport')).amount === 4700, 'budget CAS: a limit changed since the preview is NOT overwritten', r.text);
+  r = await confirm(B1, bUpd.proposalId);
+  ok(r.status === 400 && r.json.status === 'failed', 'budget CAS: a retry returns the stored failure');
+
+  // category matching: exact canonical key updates; a near match is never merged; groceries is not Food
+  await putBudget(B1, month0, 'Food & Dining', 3000);
+  r = await say(B1, 'Set dining budget to ₹2,000');
+  ok(/You also have “Food & Dining” for this month\./.test(r.json.reply) && r.json.action.display.some((d) => d.label === 'Note') && r.json.action.display.find((d) => d.label === 'Status').value === 'New budget', 'budget: a near category is disclosed but NOT merged (a new budget is proposed)', r.json?.reply);
+  r = await confirm(B1, r.json.action.proposalId);
+  ok((await budgetOf(B1, 'dining')).amount === 2000 && (await budgetOf(B1, 'food & dining')).amount === 3000, 'budget: both budgets exist, the near one untouched');
+  r = await say(B1, 'Set groceries budget to ₹2,500');
+  ok(!/Food/.test(r.json.reply) && r.json.action.display.find((d) => d.label === 'Category').value === 'groceries', 'budget: "groceries" is never silently mapped onto Food', r.json?.reply);
+  await cancel(B1, r.json.action.proposalId);
+  r = await say(B1, 'Set FOOD budget to ₹9,000');
+  ok(r.json.action.display.find((d) => d.label === 'Current limit')?.value === '₹8,000', 'budget: the exact canonical key matches regardless of case (updates, discloses ₹8,000)', rowsText(r.json.action));
+  await cancel(B1, r.json.action.proposalId);
+
+  // months
+  r = await say(B1, 'Set rent budget to ₹10,000 next month');
+  ok(r.json.action.display.find((d) => d.label === 'Month').value === `${ml(nextYm)} (${nextYm})` && !(await budgetOf(B1, 'rent', nextYm)), 'budget: "next month" resolves from the local month; nothing written', rowsText(r.json.action));
+  await cancel(B1, r.json.action.proposalId);
+  const curName = MONTHS[Number(month0.slice(5, 7)) - 1];
+  r = await say(B1, `Set my ${curName} food budget to ₹8,500`);
+  ok(r.json.reply === `Which year do you mean for ${curName}?` && r.json.action.status === 'needs_clarification', 'budget: a month name WITHOUT a year asks for the year (even the current month)', r.json?.reply);
+  r = await say(B1, today.slice(0, 4));
+  ok(r.json.action.status === 'pending' && r.json.action.display.find((d) => d.label === 'Month').value === `${ml(month0)} (${month0})`, 'budget: the year completes it', r.json?.reply);
+  await cancel(B1, r.json.action.proposalId);
+  r = await say(B1, 'Set food budget to 8000 for next quarter');
+  ok(/Which month do you mean\?/.test(r.json.reply) && r.json.action.status === 'needs_clarification', 'budget: an ambiguous month is asked about', r.json?.reply);
+  r = await say(B1, 'next month');
+  ok(r.json.action.status === 'pending' && r.json.action.display.find((d) => d.label === 'Month').value.includes(nextYm), 'budget: the answer completes it', r.json?.reply);
+  await cancel(B1, r.json.action.proposalId);
+  r = await say(B1, 'Set a budget of ₹8,000');
+  ok(r.json.reply === 'Which category is the ₹8,000 budget for?' && r.json.action.status === 'needs_clarification', 'budget: missing category is asked', r.json?.reply);
+  r = await say(B1, 'pets');
+  ok(r.json.action.status === 'pending' && r.json.action.display.find((d) => d.label === 'Category').value === 'pets', 'budget: category answered', r.json?.reply);
+  await cancel(B1, r.json.action.proposalId);
+  r = await say(B1, 'Set my travel budget');
+  ok(r.json.reply === `How much should the travel budget be for ${ml(month0)}?` && r.json.action.status === 'needs_clarification', 'budget: missing amount is asked', r.json?.reply);
+  r = await say(B1, '5k');
+  ok(r.json.action.status === 'pending' && /₹5,000/.test(r.json.reply), 'budget: amount answered', r.json?.reply);
+  await cancel(B1, r.json.action.proposalId);
+  r = await say(B1, 'Add ₹2,000 to my travel budget');
+  ok(/^I can set a budget to an exact amount/.test(r.json.reply) && !(r.json.action && r.json.action.status === 'pending'), 'ROUTING: "add to a budget" is refused (not a goal, not a transaction)', r.json?.reply);
+
+  // edits
+  const B2 = await newUser('act-budget2');
+  r = await say(B2, 'Set edtest budget to ₹5,000');
+  const be0 = r.json.action;
+  r = await say(B2, 'make it ₹9,000');
+  const be1 = r.json.action;
+  ok(be1.proposalId !== be0.proposalId && /budget of ₹9,000/.test(r.json.reply), 'budget edit: "make it ₹9,000" creates a NEW proposal', r.json?.reply);
+  r = await confirm(B2, be0.proposalId);
+  ok(r.status === 409 && !(await budgetOf(B2, 'edtest')), 'budget edit: the old proposal is unusable');
+  r = await say(B2, 'for next month');
+  ok(r.json.action.display.find((d) => d.label === 'Month').value === `${ml(nextYm)} (${nextYm})`, 'budget edit: "for next month"', rowsText(r.json.action));
+  r = await say(B2, 'change it to November 2026');
+  ok(r.json.action.display.find((d) => d.label === 'Month').value === 'November 2026 (2026-11)', 'budget edit: "change it to November 2026"', rowsText(r.json.action));
+  r = await say(B2, 'change the category to snacks');
+  ok(r.json.action.display.find((d) => d.label === 'Category').value === 'snacks' && r.json.action.display.find((d) => d.label === 'Month').value === 'November 2026 (2026-11)', 'budget edit: "change the category to snacks" keeps the other fields', rowsText(r.json.action));
+  r = await say(B2, 'yes but make it 9500');
+  const be2 = r.json.action;
+  ok(be2.status === 'pending' && /₹9,500/.test(r.json.reply) && !(await budgetOf(B2, 'snacks', '2026-11')), '"yes but make it 9500" is an EDIT, not a confirmation', r.json?.reply);
+  r = await confirm(B2, be2.proposalId, { month: '2020-01', category: 'hacked', amount: 1, payload: { amount: 1 }, expect: { exists: true } });
+  ok(r.status === 200 && r.json.budget.month === '2026-11' && r.json.budget.category === 'snacks' && r.json.budget.amount === 9500, 'budget security: a tampered confirm body cannot change the stored budget', r.text);
+  ok((await budgets(B2, '2026-11')).length === 1 && (await budgets(U)).length === 0, 'budget security: budgets are per user');
+  r = await say(B2, 'Set edtest budget to ₹5,000');
+  r = await say(B2, 'How much did I spend?');
+  ok(/^I cancelled the ₹5,000 edtest budget for/.test(r.json.reply) && r.json.action.status === 'cancelled', 'budget: an unrelated message cancels it', r.json?.reply);
+  r = await say(B2, 'Set cross budget to ₹1,000');
+  r = await confirm(U, r.json.action.proposalId);
+  ok(r.status === 404, 'budget security: another user cannot confirm it');
+
+  // the manual PUT is unchanged: plain upsert, same statuses and messages
+  r = await putBudget(B2, month0, 'Rent', 1000);
+  ok(r.status === 201 && r.json.amount === 1000, 'manual PUT: a new budget is 201');
+  r = await putBudget(B2, month0, 'rent', 1200);
+  ok(r.status === 200 && r.json.amount === 1200 && r.json.category === 'rent' && (await budgets(B2)).filter((b) => b.categoryKey === 'rent').length === 1, 'manual PUT: an existing budget is silently overwritten (label too), status 200');
+  r = await call(B2, 'PUT', '/budgets', { month: '2026-13', category: 'x', amount: 1 });
+  ok(r.status === 400 && r.json.error === 'Month must be in YYYY-MM format', 'manual PUT: validation messages unchanged', r.text);
+  r = await call(B2, 'PUT', '/budgets', { month: month0, category: '  ', amount: 1 });
+  ok(r.status === 400 && r.json.error === 'Category is required', 'manual PUT: category validation unchanged');
+
+  // ════════════════════ schema migration (Issue #75) ════════════════════
+  const schemaSql = fs.readFileSync(path.join(SERVER_DIR, 'db', 'schema.sql'), 'utf8');
+  const insertKind = (kind, id) => direct.query(
+    "INSERT INTO assistant_action_proposals (id,user_id,kind,payload,summary,display,status,expires_at,created_at,updated_at) VALUES ($1,(SELECT min(id) FROM users),$2,'{}','s','[]','cancelled',now(),now(),now())", [id, kind]);
+  const constraintNames = async () => (await rowsOf("SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conrelid = 'assistant_action_proposals'::regclass AND contype = 'c'"));
+  // 1) simulate a database made by Issue #73: the old UNNAMED two-kind check, no named constraint
+  await direct.query("DELETE FROM assistant_action_proposals WHERE kind NOT IN ('create_transaction', 'contribute_to_goal')");   // a #73-era database cannot hold these
+  await direct.query('ALTER TABLE assistant_action_proposals DROP CONSTRAINT assistant_action_proposals_kind_valid');
+  await direct.query("ALTER TABLE assistant_action_proposals ADD CONSTRAINT assistant_action_proposals_kind_check CHECK (kind IN ('create_transaction', 'contribute_to_goal'))");
+  let rejected = 0;
+  for (const kind of ['record_liability_repayment', 'set_budget']) { try { await insertKind(kind, `old-${kind}`); } catch { rejected++; } }
+  ok(rejected === 2, 'migration: a database with the OLD constraint rejects the new kinds');
+  await insertKind('create_transaction', 'old-ok-1'); await insertKind('contribute_to_goal', 'old-ok-2');
+  // 2) startup runs the schema again
+  await direct.query(schemaSql);
+  const names = (await constraintNames()).map((c) => c.conname);
+  ok(names.includes('assistant_action_proposals_kind_valid') && !names.includes('assistant_action_proposals_kind_check'), 'migration: the old constraint is replaced by the named one', names.join());
+  let accepted = 0;
+  for (const kind of ['create_transaction', 'contribute_to_goal', 'record_liability_repayment', 'set_budget']) { try { await insertKind(kind, `new-${kind}`); accepted++; } catch (e) { console.log(e.message); } }
+  ok(accepted === 4, 'migration: all four kinds are accepted afterwards');
+  ok((await rowsOf("SELECT count(*)::int AS n FROM assistant_action_proposals WHERE id IN ('old-ok-1','old-ok-2')"))[0].n === 2, 'migration: existing rows are untouched');
+  // 3) idempotent: another startup changes nothing and does not fail
+  const defBefore = (await constraintNames()).find((c) => c.conname === 'assistant_action_proposals_kind_valid').def;
+  await direct.query(schemaSql); await direct.query(schemaSql);
+  const defAfter = (await constraintNames()).find((c) => c.conname === 'assistant_action_proposals_kind_valid').def;
+  ok(defBefore === defAfter && (await constraintNames()).filter((c) => /kind/.test(c.conname)).length === 1, 'migration: running the schema again is a no-op');
+  let bogus = false;
+  try { await insertKind('delete_everything', 'bogus'); } catch { bogus = true; }
+  ok(bogus, 'migration: unknown kinds are still rejected');
 
   // ════════════════════ general ════════════════════
   r = await say(T, 'How much did I spend this month?');

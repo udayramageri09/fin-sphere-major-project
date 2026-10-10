@@ -70,9 +70,9 @@ Statement parsing uses SheetJS (`xlsx`). The npm registry copy (0.18.5) has know
 
 `npm audit --omit=dev`: 0 vulnerabilities in the API (`server/`) and in the frontend (root). Re-run before each release. `ml_service/requirements.txt` uses minimum versions (`>=`) rather than pins and has no automated vulnerability scan; pin and scan it in CI for a real deployment.
 
-## 10. Confirmed assistant actions (Issue #73, Phase 1)
+## 10. Confirmed assistant actions (Issues #73 and #75)
 
-When the assistant adds a transaction or a goal contribution, the chat message never writes anything by itself:
+When the assistant adds a transaction, adds to a goal, records a liability repayment or sets a budget, the chat message never writes anything by itself:
 
 * **Server-issued proposals.** The server stores a proposal (the validated payload, the resolved goal id and an exact preview) in `assistant_action_proposals`, owned by the signed-in user. The payload and ownership stay server-side.
 * **The client confirms only a proposal id.** `POST /api/assistant/actions/:id/confirm` and `/cancel` take the id from the URL; any request body is ignored, so a client cannot alter the amount, title, goal or owner.
@@ -80,6 +80,10 @@ When the assistant adds a transaction or a goal contribution, the chat message n
 * **Ownership.** Another user's proposal id behaves as not found (404), the same as a missing one.
 * **Rate limiting.** Confirm and cancel share a per-user limit of 30 requests per minute.
 * **Same validation as manual writes.** Execution calls the existing validators and owner-scoped database helpers, including the row lock that re-checks a goal's target at execution time.
+* **Liability repayments use the existing locked execution.** A confirmed repayment runs the same `repayLiability` transaction as the manual route (owner-scoped row lock, exact numeric checks). If the balance moved after the preview but the user's exact amount is still valid, it executes and reports the actual resulting balance; if the amount no longer fits, it is refused and nothing is written. The amount is never resized, and a liability's monthly payment is never used as the amount. A repayment does **not** create an expense transaction.
+* **Budgets: compare-and-set after a preview, plain upsert for the manual form.** An assistant budget write only happens if the budget still matches what the user was shown: a new budget is inserted only if none exists yet, and an update only applies while the amount is still the previewed one. Otherwise nothing is written and the user is told it changed. The manual `PUT /api/budgets` is unchanged: it remains an ordinary upsert that overwrites an existing budget (and its label).
+* **Month names without a year always ask for the year.** The assistant resolves "this month", "next month" and "last month" from the browser's local date, and accepts `YYYY-MM` or "October 2026"; "October" alone is never given a year.
+* **Proposal kinds are enforced by the database.** `assistant_action_proposals.kind` has a named check constraint that startup migrates idempotently, so a database created before #75 accepts the new kinds without manual steps.
 * **Known limitation.** If the process or database fails after a proposal is claimed but before its result is saved, the proposal stays in `executing`. It fails safe (it is never replayed automatically, so nothing can be written twice), but the user sees "already being processed" until it is asked for again.
 
 ## 11. Known remaining risks

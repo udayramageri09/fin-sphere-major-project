@@ -1,4 +1,4 @@
-// Financial Copilot UI regression test (Issues #69, #71 and #73).   Run: npm run test:copilot
+// Financial Copilot UI regression test (Issues #69, #71, #73 and #75).   Run: npm run test:copilot
 //
 // Renders the REAL AIAvatar, FinanceProvider and Goals page in jsdom and drives them like a user: typed messages,
 // hint chips and simulated speech recognition. Only the parts a test environment cannot provide are replaced:
@@ -75,6 +75,9 @@ function propose(kind, summary, display, result, { ttlMs = 180000 } = {}) {
 }
 const lunchDisplay = (amount = '₹450') => [{ label: 'Type', value: 'Expense' }, { label: 'Amount', value: amount }, { label: 'Title', value: 'Lunch' }, { label: 'Date', value: '2026-10-08 (today)' }, { label: 'Category', value: 'General' }, { label: 'Classification', value: 'Unclassified' }];
 const lunchTx = (id, amount = 450) => ({ kind: 'create_transaction', message: `Done. I added the ₹${amount} Lunch expense.`, transaction: { id, userId: 1, title: 'Lunch', amount: -amount, date: '2026-10-08', type: 'expense', category: 'General', classification: 'unknown' } });
+const hdfcLiab = (outstanding) => ({ id: 'l1', userId: 1, name: 'HDFC Car Loan', type: 'vehicle_loan', outstandingAmount: outstanding, interestRate: 9.5, monthlyPayment: 8000, createdAt: '2026-09-01T00:00:00.000Z' });
+const budgetRow = (month, category, amount) => ({ id: `bud-${month}-${category}`, userId: 1, month, category, categoryKey: category.toLowerCase(), amount, createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z' });
+let budgetGets = [];
 const goaGoal = (current) => ({ id: 'g1', userId: 1, title: 'Goa Trip', targetAmount: 50000, currentAmount: current, targetDate: '2026-12-01', createdAt: '2026-09-01T00:00:00.000Z' });
 globalThis.fetch = async (url, opts = {}) => {
   const u = String(url), method = opts.method ?? 'GET';
@@ -104,9 +107,10 @@ globalThis.fetch = async (url, opts = {}) => {
     if (scriptedChat.length) return json(200, scriptedChat.shift());
     return json(200, { reply: `ANSWER(${body.messages.at(-1).content})` });
   }
-  if (/\/budgets\?month=/.test(u)) return json(200, []);
+  if (/\/budgets\?month=/.test(u)) { budgetGets.push(decodeURIComponent(u.split('month=')[1])); return json(200, []); }
   if (/\/goals$/.test(u) && method === 'GET') return json(200, [goaGoal(20000)]);
-  if (/\/(transactions|liabilities)$/.test(u) && method === 'GET') return json(200, []);
+  if (/\/liabilities$/.test(u) && method === 'GET') return json(200, [hdfcLiab(120000)]);
+  if (/\/transactions$/.test(u) && method === 'GET') return json(200, []);
   if (/\/emergency-fund$/.test(u)) return json(200, { configured: false, currentAmount: null, targetAmount: null, createdAt: null, updatedAt: null });
   return json(200, []);
 };
@@ -124,7 +128,7 @@ import Goals from '/src/pages/Goals.jsx';
 export function Probe() {
   const f = useFinance();
   globalThis.__finance = f;
-  return h('div', { id: 'probe', 'data-tx': String(f.transactions.length), 'data-tx-first': f.transactions[0]?.title ?? '', 'data-goal': String(f.goals.find((g) => g.id === 'g1')?.currentAmount ?? '') });
+  return h('div', { id: 'probe', 'data-tx': String(f.transactions.length), 'data-tx-first': f.transactions[0]?.title ?? '', 'data-goal': String(f.goals.find((g) => g.id === 'g1')?.currentAmount ?? ''), 'data-liab': String(f.liabilities.find((l) => l.id === 'l1')?.outstandingAmount ?? '') });
 }
 export function App({ onView }) {
   const [view, setView] = useState('dashboard');
@@ -187,6 +191,13 @@ try {
   }
   const startVoice = () => act(async () => { document.querySelector('.voice-btn').click(); await tick(10); });
   const reset = () => { viewChanges = []; scrolledTo = []; chatOrder = []; };
+  // Waits (up to ms) for an asynchronous outcome instead of guessing a fixed sleep: under load a scroll that polls for its
+  // target can take longer than a hard-coded delay.
+  const waitFor = async (predicate, ms = 3000) => {
+    const start = Date.now();
+    while (!predicate() && Date.now() - start < ms) await act(async () => { await tick(25); });
+    return predicate();
+  };
 
   // Welcome text and hint chips
   ok(transcript()[0].includes('How much did I spend this month?') && !/credit score/i.test(transcript()[0]), 'welcome text is grounded, no credit-score example', transcript()[0]);
@@ -224,7 +235,7 @@ try {
   await type('How is my budget? Open it.', 250);
   ok(chatBodies.at(-1).messages.at(-1).content === 'How is my budget?', 'Q+A: only the question is sent', chatBodies.at(-1).messages.at(-1).content);
   ok(JSON.stringify(viewChanges) === '["goals"]', 'Q+A: navigated to Goals after answering', viewChanges.join(','));
-  ok(scrolledTo.includes('budgets'), 'Q+A: scrolled to the budgets section', scrolledTo.join(','));
+  ok(await waitFor(() => scrolledTo.includes('budgets')), 'Q+A: scrolled to the budgets section', scrolledTo.join(','));
   const t5 = transcript().slice(-3);
   ok(t5[0] === 'U: How is my budget? Open it.' && t5[1] === 'B: ANSWER(How is my budget?)' && t5[2] === 'B: Opening Budgets.', 'Q+A: answer appears before the navigation note', t5.join(' | '));
   ok(chatOrder.join(',') === 'chat-request,chat-reply', 'Q+A: chat completed before navigation');
@@ -242,7 +253,7 @@ try {
   reset();
   await type('How is my emergency fund?');
   await type('Take me there', 250);
-  ok(globalThis.__copilotView === 'goals' && scrolledTo.includes('emergency-fund'), 'pronoun "take me there" uses previous topic (emergency fund)', scrolledTo.join(','));
+  ok(await waitFor(() => globalThis.__copilotView === 'goals' && scrolledTo.includes('emergency-fund')), 'pronoun "take me there" uses previous topic (emergency fund)', scrolledTo.join(','));
 
   // 8. Unresolvable pronoun goes to the assistant, no navigation
   reset();
@@ -677,6 +688,170 @@ try {
   ok(synth.spoken.length > spokenBeforeVoice, 'VOICE ACTION: voice replies were spoken');
   await click(document.querySelector('.voice-stage-btn--end'));
   ok(!stage() && !stageCard(), 'VOICE ACTION: ending the session closes the stage');
+
+
+  // ── Issue #75: repayments and budgets (same pipeline, same safety) ───────────────────────────────────────────────────
+  await click(chatBtn());   // text mode
+  resetActions();
+  const liabNow = () => Number(probe().getAttribute('data-liab'));
+  const repayDisplay = (now, after, paidOff = false) => [
+    { label: 'Liability', value: 'HDFC Car Loan (vehicle loan)' }, { label: 'Repayment', value: '₹5,000' },
+    { label: 'Outstanding now', value: now }, { label: 'Outstanding after', value: after },
+    ...(paidOff ? [{ label: 'Result', value: 'Paid off after this repayment' }] : []),
+    { label: 'Note', value: 'Records a liability repayment only; no expense transaction will be added.' },
+  ];
+  const repaySummary = (amt, from, to) => `I'll record a ${amt} repayment on your HDFC Car Loan. Its outstanding balance will go from ${from} to ${to}. Should I record it?`;
+  const repayResult = (amt, left) => ({ kind: 'record_liability_repayment', message: `Done. I recorded a ${amt} repayment on HDFC Car Loan. Its outstanding balance is now ${left}.`, liability: hdfcLiab(left === '₹1,15,000' ? 115000 : 114000), repayment: { id: 'rp-1', liabilityId: 'l1', amount: amt === '₹5,000' ? 5000 : 6000 } });
+
+  // C1. A repayment card: previews the balance change and the "no transaction" disclosure; nothing is written
+  const txBeforeRepay = txCount();
+  const pr1 = propose('record_liability_repayment', repaySummary('₹5,000', '₹1,20,000', '₹1,15,000'), repayDisplay('₹1,20,000', '₹1,15,000'), repayResult('₹5,000', '₹1,15,000'));
+  await type('Repay 5k on my HDFC Car Loan', 120);
+  ok(Boolean(card()) && card().querySelector('.action-card-title').textContent === 'Record repayment', 'REPAYMENT: the card is titled "Record repayment"', card()?.textContent);
+  ok(cardRows().includes('Outstanding now₹1,20,000') && cardRows().includes('Outstanding after₹1,15,000') && cardRows().some((r) => r.startsWith('Note') && r.includes('no expense transaction will be added')), 'REPAYMENT: preview shows the balance change and the no-transaction disclosure', cardRows().join(' | '));
+  ok(liabNow() === 120000 && txCount() === txBeforeRepay && confirmCalls.length === 0, 'REPAYMENT: nothing is written before confirmation');
+  ok(launcherState() === 'attention', 'REPAYMENT: companion shows attention while pending', launcherState());
+
+  // C2. Confirm: by id only; the returned liability REPLACES the one in shared state; no transaction appears
+  await press('.action-card-btn--confirm', card());
+  ok(confirmCalls.length === 1 && confirmCalls[0].id === pr1 && confirmCalls[0].body === undefined, 'REPAYMENT: Confirm sends only the proposal id', JSON.stringify(confirmCalls));
+  ok(liabNow() === 115000 && txCount() === txBeforeRepay, 'REPAYMENT: the liability in shared state is replaced with the server\'s row; no transaction is added', `${liabNow()} ${txCount()}`);
+  ok(transcript().at(-1) === 'B: Done. I recorded a ₹5,000 repayment on HDFC Car Loan. Its outstanding balance is now ₹1,15,000.' && !card() && launcherState() === 'success', 'REPAYMENT: the ACTUAL resulting balance is reported; companion shows success', transcript().at(-1));
+  await settle();
+
+  // C3. Typed cancel and typed "record it"
+  resetActions();
+  const pr2 = propose('record_liability_repayment', repaySummary('₹5,000', '₹1,15,000', '₹1,10,000'), repayDisplay('₹1,15,000', '₹1,10,000'), repayResult('₹5,000', '₹1,15,000'));
+  await type('Repay 5k on my HDFC Car Loan', 120);
+  await type('no', 120);
+  ok(cancelCalls.length === 1 && cancelCalls[0].id === pr2 && liabNow() === 115000 && !card(), 'REPAYMENT: typed "no" cancels; nothing written');
+  await settle();
+  const pr3 = propose('record_liability_repayment', repaySummary('₹5,000', '₹1,15,000', '₹1,10,000'), repayDisplay('₹1,15,000', '₹1,10,000'), { ...repayResult('₹5,000', '₹1,15,000'), liability: hdfcLiab(110000) });
+  await type('Repay 5k on my HDFC Car Loan', 120);
+  const chatBeforeRecord = chatBodies.length;
+  await type('record it', 120);
+  ok(confirmCalls.length === 1 && confirmCalls[0].id === pr3 && chatBodies.length === chatBeforeRecord && liabNow() === 110000, 'REPAYMENT: typed "record it" confirms (through the endpoint, not the chat)', `${confirmCalls.length} ${liabNow()}`);
+  await settle();
+  const prNo = propose('record_liability_repayment', repaySummary('₹5,000', '₹1,10,000', '₹1,05,000'), repayDisplay('₹1,10,000', '₹1,05,000'), repayResult('₹5,000', '₹1,15,000'));
+  await type('Repay 5k on my HDFC Car Loan', 120);
+  const nrec = confirmCalls.length;
+  await type('record it later', 120);
+  ok(confirmCalls.length === nrec && chatBodies.at(-1).messages.at(-1).content === 'record it later', 'REPAYMENT: "record it later" is NOT a confirmation (goes to the server)');
+  void prNo;
+  await settle();
+
+  // C4. Edit -> a NEW proposal, only that one can be confirmed
+  scriptedChat.length = 0;
+  const pe0 = propose('record_liability_repayment', repaySummary('₹5,000', '₹1,10,000', '₹1,05,000'), repayDisplay('₹1,10,000', '₹1,05,000'), repayResult('₹5,000', '₹1,15,000'));
+  await type('Repay 5k on my HDFC Car Loan', 120);
+  const pe1 = propose('record_liability_repayment', repaySummary('₹6,000', '₹1,10,000', '₹1,04,000'), repayDisplay('₹1,10,000', '₹1,04,000').map((d) => (d.label === 'Repayment' ? { ...d, value: '₹6,000' } : d)), { ...repayResult('₹6,000', '₹1,14,000'), liability: hdfcLiab(104000) });
+  await type('make it ₹6,000', 120);
+  ok(cardRows().includes('Repayment₹6,000'), 'REPAYMENT EDIT: "make it ₹6,000" shows a new preview', cardRows().join(' | '));
+  await press('.action-card-btn--confirm', card());
+  ok(confirmCalls.at(-1).id === pe1 && !confirmCalls.some((c) => c.id === pe0) && liabNow() === 104000, 'REPAYMENT EDIT: only the new proposal is confirmed', JSON.stringify(confirmCalls.map((c) => c.id)));
+  await settle();
+
+  // C5. A refusal from the server (the amount no longer fits): shown, closes the proposal, changes nothing
+  propose('record_liability_repayment', repaySummary('₹5,000', '₹1,04,000', '₹99,000'), repayDisplay('₹1,04,000', '₹99,000'), repayResult('₹5,000', '₹1,15,000'));
+  await type('Repay 5k on my HDFC Car Loan', 120);
+  confirmMode = 'exceeds';
+  await press('.action-card-btn--confirm', card());
+  ok(!card() && liabNow() === 104000 && /would exceed the goal target/.test(transcript().at(-1)), 'REPAYMENT: a server refusal is shown, nothing changes', transcript().at(-1));
+  confirmMode = 'ok';
+  await settle();
+
+  // ── Budgets ──
+  const budgetResult = (month, category, amount, created, message) => ({ kind: 'set_budget', message, budget: budgetRow(month, category, amount), created });
+  await act(async () => { await globalThis.__finance.fetchBudgets('2026-10'); });
+  budgetGets = [];
+  const createRows = [{ label: 'Month', value: 'October 2026 (2026-10)' }, { label: 'Category', value: 'transport' }, { label: 'New limit', value: '₹4,500' }, { label: 'Status', value: 'New budget' }];
+  const pb1 = propose('set_budget', "I'll create a transport budget of ₹4,500 for October 2026. Should I create it?", createRows,
+    budgetResult('2026-10', 'transport', 4500, true, 'Done. I created the transport budget for October 2026: ₹4,500.'));
+  await type('Set transport budget to ₹4,500', 120);
+  ok(Boolean(card()) && card().querySelector('.action-card-title').textContent === 'Set budget' && cardRows().includes('StatusNew budget') && budgetGets.length === 0, 'BUDGET: the create card is titled "Set budget" and shows "New budget"; nothing fetched or written', cardRows().join(' | '));
+  await press('.action-card-btn--confirm', card());
+  ok(confirmCalls.at(-1).id === pb1 && confirmCalls.at(-1).body === undefined, 'BUDGET: Confirm sends only the proposal id');
+  ok(budgetGets.length === 1 && budgetGets[0] === '2026-10', 'BUDGET: the month on screen is reloaded after the save (like the manual form)', JSON.stringify(budgetGets));
+  ok(transcript().at(-1) === 'B: Done. I created the transport budget for October 2026: ₹4,500.' && launcherState() === 'success', 'BUDGET: success message and companion', transcript().at(-1));
+  await settle();
+
+  // a budget for ANOTHER month must not disturb the month on screen
+  budgetGets = [];
+  const nextRows = createRows.map((d) => (d.label === 'Month' ? { ...d, value: 'November 2026 (2026-11)' } : d));
+  propose('set_budget', "I'll create a transport budget of ₹4,500 for November 2026. Should I create it?", nextRows,
+    budgetResult('2026-11', 'transport', 4500, true, 'Done. I created the transport budget for November 2026: ₹4,500.'));
+  await type('Set transport budget to 4500 for 2026-11', 120);
+  await press('.action-card-btn--confirm', card());
+  ok(budgetGets.length === 0 && globalThis.__finance.budgetsMonth === '2026-10', 'BUDGET: a different month does not reload or overwrite the visible month', `${JSON.stringify(budgetGets)} ${globalThis.__finance.budgetsMonth}`);
+  await settle();
+
+  // update card: discloses the current limit, spending, remaining, status
+  const updRows = [{ label: 'Month', value: 'October 2026 (2026-10)' }, { label: 'Category', value: 'Food' }, { label: 'Label', value: 'Will change from “Food” to “food”' }, { label: 'Current limit', value: '₹6,000' }, { label: 'New limit', value: '₹8,000' }, { label: 'Spent so far', value: '₹2,500' }, { label: 'Remaining after', value: '₹5,500' }, { label: 'Status after', value: 'Under budget' }];
+  budgetGets = [];
+  const pb2 = propose('set_budget', "Your Food budget for October 2026 is ₹6,000. I'll change it to ₹8,000. Should I update it?", updRows,
+    budgetResult('2026-10', 'food', 8000, false, 'Done. I changed the food budget for October 2026 from ₹6,000 to ₹8,000.'));
+  await type('Set my food budget to ₹8,000 this month', 120);
+  ok(cardRows().includes('Current limit₹6,000') && cardRows().includes('New limit₹8,000') && cardRows().includes('Spent so far₹2,500') && cardRows().includes('Remaining after₹5,500') && cardRows().includes('Status afterUnder budget') && cardRows().some((r) => r.startsWith('Label') && r.includes('“Food” to “food”')), 'BUDGET: the update card discloses current limit, spent, remaining, status and the label change', cardRows().join(' | '));
+  ok(transcript().at(-1).startsWith("B: Your Food budget for October 2026 is ₹6,000. I'll change it to ₹8,000."), 'BUDGET: the summary states the CURRENT limit first', transcript().at(-1));
+  await type('update it', 120);
+  ok(confirmCalls.at(-1).id === pb2 && budgetGets.length === 1 && transcript().at(-1) === 'B: Done. I changed the food budget for October 2026 from ₹6,000 to ₹8,000.', 'BUDGET: typed "update it" confirms; the visible month reloads', `${budgetGets.length} ${transcript().at(-1)}`);
+  await settle();
+
+  // a stale budget (changed since the preview) is refused by the server; nothing changes, the card closes
+  propose('set_budget', "I'll create a fuel budget of ₹3,000 for October 2026. Should I create it?", createRows.map((d) => (d.label === 'Category' ? { ...d, value: 'fuel' } : d)),
+    budgetResult('2026-10', 'fuel', 3000, true, 'x'));
+  await type('Set fuel budget to ₹3,000', 120);
+  const gets = budgetGets.length;
+  confirmMode = 'exceeds';
+  await press('.action-card-btn--confirm', card());
+  ok(!card() && budgetGets.length === gets && launcherState() === 'error', 'BUDGET: a refused (stale) budget closes the proposal and reloads nothing; companion shows error', launcherState());
+  confirmMode = 'ok';
+  await settle();
+
+  // typed edit "for next month" -> a new proposal
+  scriptedChat.length = 0;
+  const pbe0 = propose('set_budget', "I'll create a transport budget of ₹4,500 for October 2026. Should I create it?", createRows, budgetResult('2026-10', 'transport', 4500, true, 'x'));
+  await type('Set transport budget to ₹4,500', 120);
+  const pbe1 = propose('set_budget', "I'll create a transport budget of ₹4,500 for November 2026. Should I create it?", nextRows, budgetResult('2026-11', 'transport', 4500, true, 'Done. I created the transport budget for November 2026: ₹4,500.'));
+  await type('for next month', 120);
+  ok(cardRows().includes('MonthNovember 2026 (2026-11)'), 'BUDGET EDIT: "for next month" shows a new preview', cardRows().join(' | '));
+  await press('.action-card-btn--confirm', card());
+  ok(confirmCalls.at(-1).id === pbe1 && !confirmCalls.some((c) => c.id === pbe0), 'BUDGET EDIT: only the new proposal is confirmed');
+  await settle();
+
+  // ── Voice: a spoken repayment, confirmed by a spoken "yes" ──
+  await click(document.querySelector('.close-btn'));
+  resetActions();
+  const vSummary = "I'll record a ₹6,500 repayment on your Bike Loan. Its outstanding balance will go from ₹10,000 to ₹3,500. Should I record it?";
+  const vRows = [{ label: 'Liability', value: 'Bike Loan (vehicle loan)' }, { label: 'Repayment', value: '₹6,500' }, { label: 'Outstanding now', value: '₹10,000' }, { label: 'Outstanding after', value: '₹3,500' }, { label: 'Note', value: 'Records a liability repayment only; no expense transaction will be added.' }];
+  const pv1 = propose('record_liability_repayment', vSummary, vRows,
+    { kind: 'record_liability_repayment', message: 'Done. I recorded a ₹6,500 repayment on HDFC Car Loan. Its outstanding balance is now ₹97,500.', liability: hdfcLiab(97500), repayment: { id: 'rp-v', liabilityId: 'l1', amount: 6500 } });
+  const txVoice = txCount();
+  await click(launcher());
+  await act(async () => { say('I paid 6500 toward my bike loan'); await tick(150); });
+  ok(stageState() === 'speaking' && synth.spoken.at(-1).startsWith("I'll record a six thousand five hundred rupees repayment on your Bike Loan."), 'VOICE REPAYMENT: the preview is spoken (amounts in words)', synth.spoken.at(-1));
+  ok(Boolean(stageCard()) && stageCard().querySelector('.action-card-title').textContent === 'Record repayment' && liabNow() === 104000, 'VOICE REPAYMENT: the card is on the stage and nothing is written yet');
+  await act(async () => { synth.finish(); await tick(30); });
+  await act(async () => { say('yes', 0.93); await tick(150); });
+  ok(confirmCalls.at(-1).id === pv1 && liabNow() === 97500 && txCount() === txVoice, 'VOICE REPAYMENT: a spoken "yes" confirms; the liability is replaced; no transaction', `${liabNow()} ${txCount()}`);
+  ok(replyCaption() === 'Done. I recorded a ₹6,500 repayment on HDFC Car Loan. Its outstanding balance is now ₹97,500.' && /outstanding balance is now ninety-seven thousand five hundred rupees/.test(synth.spoken.at(-1)), 'VOICE REPAYMENT: the actual balance is captioned and spoken', synth.spoken.at(-1));
+  await act(async () => { synth.finish(); await tick(30); });
+  const pv2 = propose('record_liability_repayment', vSummary, vRows, { kind: 'record_liability_repayment', message: 'x', liability: hdfcLiab(1), repayment: {} });
+  await act(async () => { say('I paid 6500 toward my bike loan'); await tick(150); });
+  await act(async () => { synth.finish(); await tick(30); });
+  await act(async () => { say('no'); await tick(150); });
+  ok(cancelCalls.at(-1).id === pv2 && liabNow() === 97500 && replyCaption() === 'Okay, I cancelled that. Nothing was saved.', 'VOICE REPAYMENT: a spoken "no" cancels; nothing written', replyCaption());
+  await act(async () => { synth.finish(); await tick(30); });
+  // budget by voice: "set it" confirms
+  const pv3 = propose('set_budget', "I'll create a transport budget of ₹4,500 for October 2026. Should I create it?", createRows, budgetResult('2026-10', 'transport', 4500, true, 'Done. I created the transport budget for October 2026: ₹4,500.'));
+  await act(async () => { say('set transport budget to 4500'); await tick(150); });
+  ok(Boolean(stageCard()) && stageCard().querySelector('.action-card-title').textContent === 'Set budget', 'VOICE BUDGET: the budget card is on the stage');
+  await act(async () => { synth.finish(); await tick(30); });
+  await act(async () => { say('set it', 0.9); await tick(150); });
+  ok(confirmCalls.at(-1).id === pv3 && /^Done\. I created the transport budget/.test(replyCaption()), 'VOICE BUDGET: a spoken "set it" confirms', replyCaption());
+  await act(async () => { synth.finish(); await tick(30); });
+  await click(document.querySelector('.voice-stage-btn--end'));
+  ok(!stage(), 'VOICE: the session ends cleanly');
 
   await act(async () => { root.unmount(); });
 } finally {

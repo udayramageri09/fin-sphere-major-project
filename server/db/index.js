@@ -749,6 +749,53 @@ export async function upsertBudget({ id, userId, month, label, amount, now }) {
   return { budget: toBudget(rows[0]), created: rows[0].inserted };
 }
 
+// What repaying `amount` toward one of the user's liabilities would do, in exact NUMERIC (never floating point):
+// the balance after, and whether the liability is already paid off or the amount would overshoot the balance.
+// Read-only: the locked check inside repayLiability stays the authority when the repayment is executed.
+export async function previewLiabilityRepayment(userId, liabilityId, amount) {
+  const { rows } = await pool.query(
+    `SELECT name, type, outstanding_amount::text AS outstanding,
+            (outstanding_amount - $3::numeric)::text AS after,
+            (outstanding_amount = 0) AS paid_off,
+            ($3::numeric > outstanding_amount) AS exceeds
+     FROM liabilities WHERE user_id = $1 AND id = $2`,
+    [userId, String(liabilityId), String(amount)]);
+  if (rows.length === 0) return null;
+  const r = rows[0];
+  return {
+    name: r.name,
+    type: r.type,
+    outstanding: Number(r.outstanding),
+    after: Number(r.after),
+    paidOff: r.paid_off,
+    exceeds: r.exceeds,
+  };
+}
+
+// Compare-and-set budget write for a CONFIRMED assistant action (the manual PUT keeps the plain upsertBudget above).
+// The user confirmed a specific preview, so the write only happens if the world still matches it:
+//   expect { exists: false } -> insert only if no budget exists for (user, month, category) any more
+//   expect { exists: true, id, amount } -> update only that budget, and only while its amount is still `amount`
+// Both are single atomic statements. Returns { status: 'ok', budget, created } or { status: 'conflict' } (nothing
+// written), so a budget changed or created since the preview is never overwritten blindly.
+export async function setBudgetExpecting({ id, userId, month, label, amount, now, expect }) {
+  if (!expect || expect.exists !== true) {
+    const { rows } = await pool.query(
+      `INSERT INTO budgets (id, user_id, month, label, amount, created_at, updated_at)
+       VALUES ($1, $2, ($3 || '-01')::date, $4, $5::numeric, $6::timestamptz, $6::timestamptz)
+       ON CONFLICT (user_id, month, category) DO NOTHING
+       RETURNING ${BUDGET_COLUMNS}`,
+      [id, userId, month, label, String(amount), now]);
+    return rows.length ? { status: 'ok', budget: toBudget(rows[0]), created: true } : { status: 'conflict' };
+  }
+  const { rows } = await pool.query(
+    `UPDATE budgets SET label = $4, amount = $5::numeric, updated_at = $6::timestamptz
+     WHERE user_id = $1 AND id = $2 AND month = ($3 || '-01')::date AND category = lower(btrim($4)) AND amount = $7::numeric
+     RETURNING ${BUDGET_COLUMNS}`,
+    [userId, String(expect.id), month, label, String(amount), now, String(expect.amount)]);
+  return rows.length ? { status: 'ok', budget: toBudget(rows[0]), created: false } : { status: 'conflict' };
+}
+
 // Removes exactly one budget, and only one owned by userId (id is the primary key). Returns true if removed.
 export async function deleteBudgetByUserAndId(userId, id) {
   const { rowCount } = await pool.query('DELETE FROM budgets WHERE user_id = $1 AND id = $2', [userId, String(id)]);

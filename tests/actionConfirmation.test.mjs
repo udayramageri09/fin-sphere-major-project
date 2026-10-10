@@ -1,7 +1,8 @@
 // Tests for src/utils/actionConfirmation.js and src/utils/localDate.js (Issue #73).   Run: npm run test:confirmation
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseConfirmation } from '../src/utils/actionConfirmation.js';
+import { parseConfirmation, CONFIRM_PHRASES, CANCEL_PHRASES } from '../src/utils/actionConfirmation.js';
+import { CONFIRM_PHRASES as SERVER_CONFIRM, CANCEL_PHRASES as SERVER_CANCEL, parseYesNo } from '../server/assistantActions.js';
 import { localDateString } from '../src/utils/localDate.js';
 
 test('whole-utterance confirmations', () => {
@@ -33,4 +34,25 @@ test('localDateString uses the LOCAL calendar date, never the UTC one', () => {
   assert.equal(localDateString(new Date(2026, 0, 5, 12)), '2026-01-05');
   assert.equal(localDateString(new Date(2024, 1, 29, 12)), '2024-02-29');
   assert.match(localDateString(), /^\d{4}-\d{2}-\d{2}$/);
+});
+
+test('Issue #75: the new confirmation verbs (record it / set it / update it / create it), whole utterance only', () => {
+  for (const t of ['record it', 'Record it!', 'set it', 'update it', 'create it', 'yes record it', 'yes set it', 'yes update it', 'yes create it']) {
+    assert.equal(parseConfirmation(t), 'yes', t);
+  }
+  for (const t of ['record it later', 'set it to 9000', 'update it to 5000', 'do not set it', 'yes record it tomorrow', 'record', 'update', 'create it for me tomorrow']) {
+    assert.equal(parseConfirmation(t), null, t);
+  }
+});
+
+test('Issue #75: the browser and the server read confirmations IDENTICALLY (same vocabulary, same answers)', () => {
+  assert.deepEqual([...CONFIRM_PHRASES].sort(), [...SERVER_CONFIRM].sort(), 'confirm phrases are the same list');
+  assert.deepEqual([...CANCEL_PHRASES].sort(), [...SERVER_CANCEL].sort(), 'cancel phrases are the same list');
+  const samples = [
+    ...CONFIRM_PHRASES, ...CANCEL_PHRASES,
+    'yes but make it 600', 'yesterday', 'I said yes earlier', 'yes and open goals', 'nobody', 'stopwatch', 'cancel my subscription',
+    'record it later', 'set it to 9000', 'update it please', 'make it 600', 'lunch', '', 'YES!', 'No.', 'Go Ahead!!', 'never mind.',
+  ];
+  for (const t of samples) assert.equal(parseConfirmation(t), parseYesNo(t), `client and server disagree on ${JSON.stringify(t)}`);
+  assert.ok(!CANCEL_PHRASES.some((c) => CONFIRM_PHRASES.includes(c)), 'no phrase both confirms and cancels');
 });
