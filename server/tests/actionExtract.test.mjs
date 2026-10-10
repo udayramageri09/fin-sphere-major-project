@@ -6,6 +6,8 @@ import assert from 'node:assert/strict';
 import {
   extractTransaction, looksLikeTransaction, extractGoalContribution, chooseAmount, findAmounts, findDate, shiftDate,
   exactGoalMatches, nearGoalMatches, pickCandidate, parseEdit, parseYesNo, stripPolite, isQuestion,
+  extractRepayment, exactLiabilityMatches, nearLiabilityMatches, extractBudget, findBudgetMonth, shiftMonth, monthLabel,
+  cleanBudgetCategory, CONFIRM_PHRASES, CANCEL_PHRASES,
 } from '../assistantActions.js';
 
 const LOCAL = '2026-10-08';
@@ -165,4 +167,173 @@ test('server-side yes / no and helpers', () => {
   assert.equal(stripPolite('Please could you add ₹5'), 'add ₹5');
   assert.equal(isQuestion('How is my budget'), true);
   assert.equal(isQuestion('add lunch'), false);
+});
+
+// ═════════════ Issue #75: liability repayments ═════════════
+const rep = (text) => extractRepayment(text);
+
+test('repayments: the practical phrasings', () => {
+  const r = (t) => { const x = rep(t); return x && { amount: x.amount.value, name: x.namePhrase, raw: x.rawPhrase }; };
+  assert.deepEqual(r('I paid ₹6,500 toward my bike loan'), { amount: 6500, name: 'bike', raw: 'bike loan' });
+  assert.deepEqual(r('Record ₹2,000 repayment on my personal loan'), { amount: 2000, name: 'personal', raw: 'personal loan' });
+  assert.deepEqual(r('Repay 5k on my HDFC car loan'), { amount: 5000, name: 'HDFC car', raw: 'HDFC car loan' });
+  assert.deepEqual(r('Put ₹10,000 toward my education loan'), { amount: 10000, name: 'education', raw: 'education loan' });
+  assert.deepEqual(r('Pay ₹6,500 to my vehicle loan'), { amount: 6500, name: 'vehicle', raw: 'vehicle loan' });
+  assert.deepEqual(r('Paid ₹5,000 toward my car loan'), { amount: 5000, name: 'car', raw: 'car loan' });
+  assert.deepEqual(r('I paid my car loan EMI ₹5,000'), { amount: 5000, name: 'car', raw: 'car loan' });
+  assert.equal(rep('Pay ₹6,500 to my vehicle loan').hasEmi, false);
+});
+
+test('repayments: ordinary expenses are not repayments', () => {
+  for (const t of ['Paid ₹500 for lunch', 'I spent 300 on tea', 'Add ₹450 for lunch today', 'Pay ₹1,200 for fuel', 'How much is my loan?', 'What is my EMI?', 'Show my loans'])
+    assert.equal(rep(t), null, t);
+  assert.equal(looksLikeTransaction('Paid ₹500 for lunch'), true, 'it stays a transaction');
+});
+
+test('repayments: missing pieces are reported, never filled from the EMI', () => {
+  const noAmount = rep('Record a repayment on my bike loan');
+  assert.equal(noAmount.amount.status, 'none'); assert.equal(noAmount.namePhrase, 'bike');
+  const noLiability = rep('I paid ₹5,000 toward my loan');
+  assert.equal(noLiability.namePhrase, ''); assert.equal(noLiability.amount.value, 5000);
+  const emi = rep('Paid EMI');
+  assert.equal(emi.amount.status, 'none'); assert.equal(emi.hasEmi, true); assert.equal(emi.namePhrase, '');
+  assert.equal(rep('Paid my EMI on my HDFC Car Loan').amount.status, 'none', 'no amount is invented from a monthly payment');
+  assert.equal(rep('Repay ₹500 and ₹600 on my loan').amount.status, 'many');
+});
+
+test('liability matching: exact, duplicates, near matches are suggestions only', () => {
+  const liabs = [
+    { id: 'a', name: 'HDFC Car Loan', type: 'vehicle_loan', outstandingAmount: 120000 },
+    { id: 'b', name: 'Bike Loan', type: 'vehicle_loan', outstandingAmount: 8000 },
+    { id: 'c', name: 'Twin', type: 'other', outstandingAmount: 10 },
+    { id: 'd', name: 'twin', type: 'other', outstandingAmount: 20 },
+    { id: 'e', name: 'Study Fund', type: 'education_loan', outstandingAmount: 5000 },
+    { id: 'f', name: 'Old Card', type: 'credit_card', outstandingAmount: 0 },
+  ];
+  assert.deepEqual(exactLiabilityMatches(liabs, 'hdfc car loan').map((l) => l.id), ['a'], 'case-insensitive, trimmed');
+  assert.deepEqual(exactLiabilityMatches(liabs, '  BIKE LOAN ').map((l) => l.id), ['b']);
+  assert.deepEqual(exactLiabilityMatches(liabs, 'twin').map((l) => l.id), ['c', 'd'], 'duplicate exact names');
+  assert.deepEqual(exactLiabilityMatches(liabs, 'car'), [], '"car" is NOT an exact match');
+  assert.deepEqual(nearLiabilityMatches(liabs, 'car').map((l) => l.id), ['a', 'b'], 'but the type word offers vehicle loans');
+  assert.deepEqual(nearLiabilityMatches(liabs, 'education').map((l) => l.id), ['e'], 'type word: education');
+  assert.deepEqual(nearLiabilityMatches(liabs, 'hdfc').map((l) => l.id), ['a'], 'name token');
+  assert.deepEqual(nearLiabilityMatches(liabs, 'mortgage'), [], 'no home loan here');
+  assert.deepEqual(exactLiabilityMatches(liabs, 'Old Card').map((l) => l.id), ['f'], 'paid-off ones still match exactly (they are refused later)');
+});
+
+// ═════════════ Issue #75: budgets ═════════════
+const LOCAL75 = '2026-10-08';
+const bud = (text) => extractBudget(text, { localDate: LOCAL75 });
+
+test('budgets: the practical phrasings', () => {
+  assert.deepEqual(bud('Set my food budget to ₹8,000 this month').fields, { amount: 8000, categoryPhrase: 'food', month: '2026-10' });
+  assert.deepEqual(bud('Make transport budget ₹4,500').fields, { amount: 4500, categoryPhrase: 'transport' });
+  assert.deepEqual(bud('Set dining budget to 10k for October 2026').fields, { amount: 10000, categoryPhrase: 'dining', month: '2026-10' });
+  assert.deepEqual(bud('Budget ₹6,000 for groceries next month').fields, { amount: 6000, categoryPhrase: 'groceries', month: '2026-11' });
+  assert.deepEqual(bud('₹5,000 fuel budget').fields, { amount: 5000, categoryPhrase: 'fuel' });
+  assert.deepEqual(bud('Raise the food budget to 9000').fields, { amount: 9000, categoryPhrase: 'food' });
+  assert.equal(bud('Raise the food budget to 9000').relative, false, '"raise to" is an exact amount');
+});
+
+test('budgets: month references from the client local date', () => {
+  assert.equal(bud('Set food budget to 8000 this month').fields.month, '2026-10');
+  assert.equal(bud('Set food budget to 8000 for the current month').fields.month, '2026-10');
+  assert.equal(bud('Set food budget to 8000 next month').fields.month, '2026-11');
+  assert.equal(bud('Set food budget to 8000 for last month').fields.month, '2026-09');
+  assert.equal(bud('Set food budget to 8000 for 2026-12').fields.month, '2026-12');
+  assert.equal(bud('Set food budget to 8000 for October 2026').fields.month, '2026-10');
+  assert.equal(bud('Set food budget to 8000 for Oct 2026').fields.month, '2026-10');
+  assert.equal(bud('Set food budget to 8000 for dec 2027').fields.month, '2027-12');
+  assert.equal(findBudgetMonth('next month', '2026-12-15').month, '2027-01', 'year rollover forward');
+  assert.equal(findBudgetMonth('last month', '2026-01-15').month, '2025-12', 'year rollover back');
+  assert.equal(findBudgetMonth('this month', undefined).kind, 'needs-local', 'no client date: never the server clock');
+  assert.equal(shiftMonth('2026-01', -1), '2025-12');
+  assert.equal(monthLabel('2026-10'), 'October 2026');
+  assert.equal(bud('Set food budget to ₹8,000').fields.month, undefined, 'no month said: the caller defaults to the local month');
+});
+
+test('budgets: a month NAME without a year always asks for the year', () => {
+  const r = bud('Set my October food budget to ₹8,000');
+  assert.equal(r.issues.monthIssue, 'needs-year'); assert.equal(r.issues.monthName, 'october'); assert.equal(r.fields.month, undefined);
+  assert.equal(r.fields.categoryPhrase, 'food');
+  assert.equal(bud('Set food budget to 8000 for Oct').issues.monthIssue, 'needs-year');
+  assert.equal(bud('Set food budget to 8000 for October').issues.monthIssue, 'needs-year', 'even the CURRENT month (October) asks for the year');
+  assert.equal(extractBudget('Set food budget to 8000 for October', { localDate: '2026-10-31' }).issues.monthIssue, 'needs-year');
+  assert.equal(findBudgetMonth('I may set it', LOCAL75).kind, 'none', '"may" the verb is not a month');
+  assert.equal(findBudgetMonth('for May', LOCAL75).kind, 'needs-year');
+});
+
+test('budgets: ambiguous months are asked about', () => {
+  for (const t of ['Set food budget 8000 for October or November', 'Set food budget 8000 for the 5th', 'Set food budget 8000 for next quarter', 'Set food budget 8000 for 12/10'])
+    assert.equal(bud(t).issues.monthIssue, 'ambiguous', t);
+  assert.equal(bud('Set food budget 8000 for October or November').fields.categoryPhrase, 'food', 'date words are not part of the category');
+});
+
+test('budgets: missing pieces', () => {
+  const noCategory = bud('Set a budget of ₹8,000');
+  assert.equal(noCategory.fields.categoryPhrase, undefined); assert.equal(noCategory.fields.amount, 8000);
+  const noAmount = bud('Set my food budget');
+  assert.equal(noAmount.fields.amount, undefined); assert.equal(noAmount.fields.categoryPhrase, 'food');
+  assert.equal(bud('Set food budget to ₹8,000 or ₹9,000').issues.amountAmbiguous, true);
+});
+
+test('budgets: categories keep the user\'s own words (never mapped semantically)', () => {
+  assert.equal(bud('Set groceries budget to ₹2,500').fields.categoryPhrase, 'groceries');
+  assert.equal(bud('Set dining budget to ₹2,500').fields.categoryPhrase, 'dining');
+  assert.equal(bud('Set my Food & Dining budget to ₹3,000').fields.categoryPhrase, 'Food & Dining');
+  assert.equal(cleanBudgetCategory('the transport budget'), 'transport');
+});
+
+test('budgets: "add to / raise by" a budget is not supported (and is never a goal or a transaction)', () => {
+  assert.equal(bud('Add ₹2,000 to my travel budget').relative, true);
+  assert.equal(bud('Increase my food budget by 500').relative, true);
+  assert.equal(bud('Add ₹500 for budget meeting'), null, 'an ordinary expense that mentions a budget meeting');
+  assert.equal(bud('How is my budget?'), null);
+  assert.equal(bud('Open budgets'), null);
+});
+
+test('ROUTING: loans, EMIs, credit cards and budgets are never goal contributions', () => {
+  for (const t of ['Add ₹5,000 to my car loan', 'Put 12000 into my HDFC loan', 'Add ₹2,000 to my travel budget', 'Add ₹300 to my credit card', 'Put ₹500 into my EMI', 'Add ₹100 to my home liability'])
+    assert.equal(extractGoalContribution(t), null, t);
+  // but they still are goals when the sentence says so, and ordinary goals are untouched
+  assert.notEqual(extractGoalContribution('Add ₹5,000 to my Goa goal'), null);
+  assert.notEqual(extractGoalContribution('Contribute 2k to Goa'), null);
+  assert.notEqual(extractGoalContribution('Add ₹500 to my car loan goal'), null, 'an explicit "goal" wins');
+  // and the repayment / budget readings claim them instead
+  assert.notEqual(extractRepayment('Add ₹5,000 to my car loan'), null);
+  assert.notEqual(extractRepayment('Put 12000 into my HDFC loan'), null);
+  assert.notEqual(extractBudget('Add ₹2,000 to my travel budget'), null);
+});
+
+test('edits: every kind has its own grammar (no fall-through)', () => {
+  // repayment
+  assert.deepEqual(parseEdit('make it ₹6,000', 'record_liability_repayment'), { patch: { amount: 6000 } });
+  assert.deepEqual(parseEdit('use the HDFC loan', 'record_liability_repayment'), { patch: { namePhrase: 'HDFC', rawPhrase: 'HDFC loan' } });
+  assert.deepEqual(parseEdit('yes but make it 7000', 'record_liability_repayment'), { patch: { amount: 7000 } });
+  assert.deepEqual(parseEdit('make it 500 or 600', 'record_liability_repayment'), { ambiguous: 'amount' });
+  // budget
+  assert.deepEqual(parseEdit('make it ₹9,000', 'set_budget'), { patch: { amount: 9000 } });
+  assert.deepEqual(parseEdit('for next month', 'set_budget'), { patch: { monthText: 'next month' } });
+  assert.deepEqual(parseEdit('change it to November 2026', 'set_budget'), { patch: { monthText: 'November 2026' } });
+  assert.deepEqual(parseEdit('change the category to groceries', 'set_budget'), { patch: { categoryPhrase: 'groceries' } });
+  assert.deepEqual(parseEdit('call it travel', 'set_budget'), { patch: { categoryPhrase: 'travel' } });
+  assert.deepEqual(parseEdit('yes but make it 9000', 'set_budget'), { patch: { amount: 9000 } });
+  assert.equal(parseEdit('make it groceries', 'set_budget'), null, 'a bare word after "make it" is not a category');
+  assert.equal(parseEdit('hello', 'set_budget'), null);
+  // transaction / goal keep their own meanings
+  assert.deepEqual(parseEdit('make it ₹600', 'create_transaction'), { patch: { amount: 600 } });
+  assert.deepEqual(parseEdit('use the Goa Trip goal', 'contribute_to_goal'), { patch: { goalPhrase: 'Goa Trip' } });
+  assert.equal(parseEdit('use the Goa Trip goal', 'create_transaction'), null, '"use the X goal" means nothing for a transaction');
+  // an unknown kind has NO grammar
+  assert.equal(parseEdit('make it ₹600', 'delete_everything'), null);
+  assert.equal(parseEdit('make it ₹600', undefined), null);
+});
+
+test('confirmation vocabulary: the new verbs, whole utterance only', () => {
+  for (const y of ['record it', 'set it', 'update it', 'create it', 'Record it!', 'yes record it', 'yes set it', 'yes update it'])
+    assert.equal(parseYesNo(y), 'yes', y);
+  for (const x of ['record it later', 'set it to 9000', 'update it please make it 5', 'do not record it', 'yes set it to 9000', 'record'])
+    assert.equal(parseYesNo(x), null, x);
+  assert.ok(CONFIRM_PHRASES.includes('record it') && CONFIRM_PHRASES.includes('set it') && CONFIRM_PHRASES.includes('update it'));
+  assert.ok(CANCEL_PHRASES.includes('cancel') && !CANCEL_PHRASES.some((c) => CONFIRM_PHRASES.includes(c)), 'no phrase both confirms and cancels');
 });

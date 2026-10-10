@@ -4,6 +4,8 @@
 const KIND_TITLE = {
   create_transaction: 'Add transaction',
   contribute_to_goal: 'Add to goal',
+  record_liability_repayment: 'Record repayment',
+  set_budget: 'Set budget',
 };
 
 function ActionConfirmationCard({ action, onConfirm, onCancel, busy = false, compact = false }) {

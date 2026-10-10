@@ -20,9 +20,9 @@ import {
   getEmergencyFundByUser, upsertEmergencyFund, getTransactionTotalsByUser,
   listBudgetsByUserAndMonth, upsertBudget, deleteBudgetByUserAndId,
   getActiveProposal, replaceActiveProposal, getProposalByUserAndId, claimProposal, finishProposal, cancelProposal,
-  expireProposal, previewGoalContribution
+  expireProposal, previewGoalContribution, previewLiabilityRepayment, setBudgetExpecting
 } from './db/index.js';
-import { createAssistantActions, shiftDate } from './assistantActions.js';
+import { createAssistantActions, shiftDate, monthLabel } from './assistantActions.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -733,6 +733,52 @@ async function addGoalContributionFor(userId, goalId, body) {
   return { ok: true, goal: outcome.goal, contribution: outcome.contribution };
 }
 
+async function repayLiabilityFor(userId, liabilityId, body) {
+  const result = normalizeRepaymentInput(body);
+  if (!result.ok) return { ok: false, status: 400, error: result.error };
+  const outcome = await repayLiability({
+    userId, // ownership: always the verified session user
+    liabilityId,
+    amount: result.value.amount,
+    repaymentId: randomUUID(),
+    now: new Date().toISOString()
+  });
+  // 404 for both missing and not-yours, exactly like DELETE /api/liabilities/:id.
+  if (outcome.status === 'not_found') return { ok: false, status: 404, error: 'Liability not found' };
+  if (outcome.status === 'paid_off') return { ok: false, status: 400, error: 'This liability is already paid off' };
+  if (outcome.status === 'exceeds') {
+    return { ok: false, status: 400, error: `Repayment would exceed the outstanding balance (${formatRupees(outcome.outstanding)} outstanding)` };
+  }
+  return { ok: true, liability: outcome.liability, repayment: outcome.repayment };
+}
+
+// Create-or-update the budget for (month, category). Without `expect` this is the manual PUT's plain upsert (an
+// existing row is silently overwritten, as it always was). With `expect` - only passed by a confirmed assistant
+// action - it is a compare-and-set against what the user was shown: see setBudgetExpecting in db/index.js.
+const BUDGET_CHANGED_MESSAGE = 'That budget changed after I showed you the preview, so I did not save anything. Please ask again.';
+async function setBudgetFor(userId, body, { expect } = {}) {
+  const result = normalizeBudgetInput(body);
+  if (!result.ok) return { ok: false, status: 400, error: result.error };
+  if (!expect) {
+    const { budget, created } = await upsertBudget({
+      id: randomUUID(), // used only if the row is new; an existing row keeps its id
+      userId, // ownership: always the verified session user
+      ...result.value,
+      now: new Date().toISOString()
+    });
+    return { ok: true, budget, created };
+  }
+  const outcome = await setBudgetExpecting({
+    id: randomUUID(),
+    userId,
+    ...result.value,
+    now: new Date().toISOString(),
+    expect
+  });
+  if (outcome.status === 'conflict') return { ok: false, status: 409, error: BUDGET_CHANGED_MESSAGE };
+  return { ok: true, budget: outcome.budget, created: outcome.created };
+}
+
 // 2. POST /api/transactions (Manual Entry)
 app.post('/api/transactions', authenticate, async (req, res) => {
   let outcome;
@@ -928,21 +974,14 @@ app.get('/api/budgets', authenticate, async (req, res) => {
 
 // PUT /api/budgets - create or update the budget for (month, category); nothing is written on a 400
 app.put('/api/budgets', authenticate, async (req, res) => {
-  const result = normalizeBudgetInput(req.body);
-  if (!result.ok) {
-    return res.status(400).json({ error: result.error });
-  }
+  let outcome;
   try {
-    const { budget, created } = await upsertBudget({
-      id: randomUUID(), // used only if the row is new; an existing row keeps its id
-      userId: req.user.id, // ownership: always from the verified JWT, never from req.body
-      ...result.value,
-      now: new Date().toISOString()
-    });
-    res.status(created ? 201 : 200).json(budget);
+    outcome = await setBudgetFor(req.user.id, req.body);   // owner: always from the verified JWT; plain upsert
   } catch (err) {
-    respondDbError(res, err, 'Could not save budget');
+    return respondDbError(res, err, 'Could not save budget');
   }
+  if (!outcome.ok) return res.status(outcome.status).json({ error: outcome.error });
+  res.status(outcome.created ? 201 : 200).json(outcome.budget);
 });
 
 // DELETE /api/budgets/:id - exactly one budget, and only one owned by the caller
@@ -1017,28 +1056,13 @@ app.put('/api/emergency-fund', authenticate, async (req, res) => {
 
 // POST /api/liabilities/:id/repayments - record a real repayment toward one of the caller's liabilities
 app.post('/api/liabilities/:id/repayments', authenticate, async (req, res) => {
-  const result = normalizeRepaymentInput(req.body);
-  if (!result.ok) {
-    return res.status(400).json({ error: result.error });
-  }
   let outcome;
   try {
-    outcome = await repayLiability({
-      userId: req.user.id, // ownership: always from the verified JWT, never from req.body
-      liabilityId: req.params.id,
-      amount: result.value.amount,
-      repaymentId: randomUUID(),
-      now: new Date().toISOString()
-    });
+    outcome = await repayLiabilityFor(req.user.id, req.params.id, req.body);   // owner: always from the verified JWT
   } catch (err) {
     return respondDbError(res, err, 'Could not save repayment');
   }
-  // 404 for both missing and not-yours, exactly like DELETE /api/liabilities/:id.
-  if (outcome.status === 'not_found') return res.status(404).json({ error: 'Liability not found' });
-  if (outcome.status === 'paid_off') return res.status(400).json({ error: 'This liability is already paid off' });
-  if (outcome.status === 'exceeds') {
-    return res.status(400).json({ error: `Repayment would exceed the outstanding balance (${formatRupees(outcome.outstanding)} outstanding)` });
-  }
+  if (!outcome.ok) return res.status(outcome.status).json({ error: outcome.error });
   res.status(201).json({ liability: outcome.liability, repayment: outcome.repayment });
 });
 
@@ -1557,9 +1581,14 @@ function fallbackReply(history, ctx) {
 // The assistant proposes (see assistantActions.js); only these two endpoints can execute or cancel a proposal, and they
 // take nothing but the proposal id from the URL. The payload, owner and goal id are the ones the server stored.
 const assistantActions = createAssistantActions({
-  db: { getActiveProposal, replaceActiveProposal, cancelProposal, previewGoalContribution, listGoalsByUser },
+  db: {
+    getActiveProposal, replaceActiveProposal, cancelProposal, previewGoalContribution, listGoalsByUser,
+    listLiabilitiesByUser, previewLiabilityRepayment, listBudgetsByUserAndMonth
+  },
   normalizeTransactionInput,
   normalizeContributionInput,
+  normalizeRepaymentInput,
+  normalizeBudgetInput,
   formatRupees
 });
 
@@ -1589,6 +1618,39 @@ async function executeProposal(userId, proposal) {
         message: `Done. I added ${formatRupees(out.contribution.amount)} to ${out.goal.title}. It's now ${formatRupees(out.goal.currentAmount)} of ${formatRupees(out.goal.targetAmount)}.`,
         goal: out.goal,
         contribution: out.contribution
+      }
+    };
+  }
+  if (proposal.kind === 'record_liability_repayment') {
+    // The same locked repayment the manual route runs. A balance that moved since the preview is fine as long as the
+    // user's exact amount is still valid (the lock decides); the message reports the ACTUAL resulting balance.
+    const out = await repayLiabilityFor(userId, p.liabilityId, { amount: p.amount });
+    if (!out.ok) return { ok: false, error: out.error };
+    const l = out.liability;
+    return {
+      ok: true,
+      result: {
+        kind: proposal.kind,
+        message: `Done. I recorded a ${formatRupees(out.repayment.amount)} repayment on ${l.name}. Its outstanding balance is now ${formatRupees(l.outstandingAmount)}${l.outstandingAmount === 0 ? ', so it is paid off' : ''}.`,
+        liability: l,
+        repayment: out.repayment
+      }
+    };
+  }
+  if (proposal.kind === 'set_budget') {
+    const out = await setBudgetFor(userId, { month: p.month, category: p.label, amount: p.amount }, { expect: p.expect });
+    if (!out.ok) return { ok: false, error: out.error };
+    const b = out.budget;
+    const was = p.expect?.exists ? ` from ${formatRupees(p.expect.amount)}` : '';
+    return {
+      ok: true,
+      result: {
+        kind: proposal.kind,
+        message: out.created
+          ? `Done. I created the ${b.category} budget for ${monthLabel(b.month)}: ${formatRupees(b.amount)}.`
+          : `Done. I changed the ${b.category} budget for ${monthLabel(b.month)}${was} to ${formatRupees(b.amount)}.`,
+        budget: b,
+        created: out.created
       }
     };
   }

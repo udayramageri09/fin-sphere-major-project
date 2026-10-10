@@ -162,6 +162,14 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
 
   const fetchBudgets = (month) => loadBudgets(month, { silent: false });
 
+  // The ONE place that applies a saved budget to shared state (the manual form and a confirmed assistant action both call
+  // it). The saved row has no actual-spending fields, and a changed amount changes remaining / percent / status, so the
+  // month on screen is reloaded from the server instead of merging a half-filled row. A budget for ANY OTHER month leaves
+  // the visible list untouched (it is fetched when that month is opened).
+  const applyBudgetSaved = async (budget) => {
+    if (activeBudgetMonth.current === budget.month) await loadBudgets(budget.month, { silent: true });
+  };
+
   // Creates or updates the budget for (month, category). Throws on failure so the form can show the server's
   // validation message; a 401 ends the session. The list is only touched if that month is still the one shown.
   const saveBudget = async (payload) => {
@@ -177,9 +185,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     }
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || 'Failed to save budget');
-    // The saved row has no actual-spending fields, and a changed amount changes remaining / percent / status, so
-    // the active month is reloaded from the server instead of merging a half-filled row (no stale derived values).
-    if (activeBudgetMonth.current === data.month) await loadBudgets(data.month, { silent: true });
+    await applyBudgetSaved(data);
     return data;
   };
 
@@ -212,6 +218,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
   // call these, so the Dashboard, Goals and Transactions pages cannot disagree about what the assistant just saved.
   const applyTransactionCreated = (txn) => setTransactions(prev => (prev.some(t => t.id === txn.id) ? prev : [txn, ...prev]));
   const applyGoalUpdated = (goal) => setGoals(prev => prev.map(g => (g.id === goal.id ? goal : g)));
+  const applyLiabilityUpdated = (liability) => setLiabilities(prev => prev.map(l => (l.id === liability.id ? liability : l)));
 
   const addTransaction = async (txn) => {
     setError(null);
@@ -359,7 +366,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     }
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || 'Failed to add repayment');
-    setLiabilities(prev => prev.map(l => (l.id === liabilityId ? data.liability : l)));
+    applyLiabilityUpdated(data.liability);
     return data;
   };
 
@@ -493,6 +500,8 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     }
     if (data.transaction) applyTransactionCreated(data.transaction);
     if (data.goal) applyGoalUpdated(data.goal);
+    if (data.liability) applyLiabilityUpdated(data.liability);
+    if (data.budget) await applyBudgetSaved(data.budget);
     return data;
   };
 

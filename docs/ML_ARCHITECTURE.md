@@ -105,7 +105,7 @@ The assistant explains and interacts; it does not compute.
 * `POST /api/plan-chat`: a narrate-only prompt built from the ML results (see the trust note in section 3). Without a key it returns the plan summary text.
 * Statement parsing (`POST /api/transactions/parse-statement`): if a Groq key is configured, a language model proposes rows; otherwise (or if it produces nothing valid) a rule-based parser is used. Either way every row goes through the same server validator, receives a server-generated UUID and the owner from the session, and is stored with classification `unknown`.
 
-### Confirmed assistant actions (Issue #73, Phase 1)
+### Confirmed assistant actions (Issues #73 and #75)
 
 The assistant can propose, but never silently perform, a financial write:
 
@@ -114,9 +114,11 @@ natural language -> deterministic extraction -> clarification if needed -> serve
   -> preview -> explicit confirmation -> execution -> verified result
 ```
 
-* **Supported now:** `create_transaction` and `contribute_to_goal`.
-* **Not supported yet:** `create_liability`, `record_liability_repayment` and `set_budget`.
-* **No language model is trusted for action execution.** Extraction is deterministic in Phase 1 (amounts, dates, direction and the user's own goal names are parsed by rules); a missing or ambiguous field produces a clarifying question, never a guess.
+* **Supported now:** `create_transaction`, `contribute_to_goal`, `record_liability_repayment` and `set_budget`. Each kind is one entry in a per-kind handler table (detect, clarify, preview, edit) in `server/assistantActions.js`; loans, EMIs and budgets are claimed before goals so "add to my car loan" is never a goal.
+* **Not supported yet:** `create_liability`, delete actions, refunds and transfers.
+* **Repayments and transactions are separate.** Recording a repayment changes the liability's balance only; no expense transaction is added.
+* **Budgets.** The assistant discloses the current limit before changing it and writes with compare-and-set; month names without a year are asked about, never guessed.
+* **No language model is trusted for action execution.** Extraction is deterministic (amounts, dates, months, direction and the user's own goal, loan and budget names are parsed by rules); a missing or ambiguous field produces a clarifying question, never a guess.
 * **Confirmation is explicit.** The server stores the proposal and shows an exact preview; only a confirmation by proposal id executes it, through the same validators and database helpers as the manual forms. The client then updates its shared state from the stored result.
 * **Voice and typed chat use the same flow** (`runTurn`): a spoken "yes" and a typed "yes" confirm through the same endpoint.
 

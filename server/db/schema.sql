@@ -207,7 +207,7 @@ CREATE INDEX IF NOT EXISTS budgets_user_month_idx ON budgets (user_id, month);
 CREATE TABLE IF NOT EXISTS assistant_action_proposals (
   id         TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 64),
   user_id    BIGINT NOT NULL REFERENCES users(id),
-  kind       TEXT NOT NULL CHECK (kind IN ('create_transaction', 'contribute_to_goal')),
+  kind       TEXT NOT NULL,
   payload    JSONB NOT NULL,
   summary    TEXT NOT NULL,
   display    JSONB NOT NULL,
@@ -217,6 +217,24 @@ CREATE TABLE IF NOT EXISTS assistant_action_proposals (
   created_at TIMESTAMPTZ NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL
 );
+
+-- The allowed action kinds. CREATE TABLE IF NOT EXISTS never changes a table that already exists, so the rule lives in
+-- a named constraint that is (re)created whenever the stored definition does not yet list every current kind. A database
+-- made by Issue #73 has the old unnamed check (assistant_action_proposals_kind_check, two kinds): it is dropped here.
+-- Safe to run on every startup: once the definition is current, nothing happens.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'assistant_action_proposals_kind_valid' AND conrelid = 'assistant_action_proposals'::regclass
+      AND pg_get_constraintdef(oid) LIKE '%record_liability_repayment%' AND pg_get_constraintdef(oid) LIKE '%set_budget%'
+  ) THEN
+    ALTER TABLE assistant_action_proposals DROP CONSTRAINT IF EXISTS assistant_action_proposals_kind_check;
+    ALTER TABLE assistant_action_proposals DROP CONSTRAINT IF EXISTS assistant_action_proposals_kind_valid;
+    ALTER TABLE assistant_action_proposals ADD CONSTRAINT assistant_action_proposals_kind_valid
+      CHECK (kind IN ('create_transaction', 'contribute_to_goal', 'record_liability_repayment', 'set_budget'));
+  END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS assistant_action_proposals_user_status_idx ON assistant_action_proposals (user_id, status);
 -- At most one open (draft or pending) proposal per user: a new request replaces the old one instead of piling up.
