@@ -10,6 +10,10 @@
 //   1. pure extraction / parsing functions (exported, unit-tested, no I/O)
 //   2. createAssistantActions(deps): the turn handler that talks to the proposal table through injected helpers
 import { randomUUID } from 'node:crypto';
+import { findAmounts, chooseAmount, scanAmounts } from './numberParser.js';
+import { normalizeActionText, describeCorrections } from './actionNormalization.js';
+import { fuzzyCandidates } from './entityMatcher.js';
+import { validateProvenance } from './provenanceValidator.js';
 
 export const PROPOSAL_TTL_SECONDS = 180;
 
@@ -33,6 +37,7 @@ export const CONFIRM_PHRASES = [
   'record it', 'set it', 'update it', 'create it', 'haan', 'yes please', 'please do', 'yes confirm', 'yes go ahead',
   'yes do it', 'yes add it', 'yes save it', 'yes record it', 'yes set it', 'yes update it', 'yes create it',
   'sure go ahead', 'ok go ahead', 'okay go ahead', 'looks good', 'that is right', 'correct',
+  'yeah sure', 'yes sure', 'sure do it', 'ok do it', 'okay do it', 'yeah do it', 'confirm it',
 ];
 export const CANCEL_PHRASES = [
   'no', 'nope', 'nah', 'cancel', 'cancel it', 'stop', "don't", 'dont', "don't add it", 'dont add it', 'never mind',
@@ -47,46 +52,10 @@ export function parseYesNo(text) {
   return null;
 }
 
-// ── Amounts: "₹450", "500", "5k", "1.5k", "1 lakh", "1.5 lakh", "1,25,000", "2 crore" ───────────────────────────────
-const UNIT = { k: 1000, thousand: 1000, lakh: 100000, lakhs: 100000, lac: 100000, lacs: 100000, crore: 10000000, crores: 10000000, cr: 10000000 };
-const AMOUNT_RE = /(?<![\w.])((?:₹|rs\.?|inr)\s*)?(\d{1,3}(?:,\d{2,3})+|\d+)(?:\.(\d+))?(?:\s*(k|thousand|lakhs?|lacs?|crores?|cr)\b)?(\s*(?:rupees?|rs\b\.?|inr\b))?(?![A-Za-z0-9])/gi;
+// ── Amounts: digits ("₹450", "5k", "1.5 lakh", "1,25,000") and number words ("five thousand", "six five zero zero") ──────
+// Parsed by numberParser.js (exact BigInt arithmetic); re-exported here because the extractors and tests use them.
+export { findAmounts, chooseAmount };
 const ISO_DATE_RE = /\b(\d{4})-(\d{2})-(\d{2})\b/;
-
-// Exact decimal scaling with BigInt (1.5 lakh -> 150000, 0.1 k -> 100); never floating-point multiplication.
-function scaleDecimal(intDigits, fracDigits, multiplier) {
-  const frac = fracDigits ?? '';
-  const scaled = (BigInt(intDigits + frac) * BigInt(multiplier)).toString().padStart(frac.length + 1, '0');
-  const whole = frac ? scaled.slice(0, scaled.length - frac.length) : scaled;
-  const decimals = frac ? scaled.slice(scaled.length - frac.length).replace(/0+$/, '') : '';
-  return Number(decimals ? `${whole}.${decimals}` : whole);
-}
-
-export function findAmounts(text) {
-  const masked = String(text).replace(new RegExp(ISO_DATE_RE.source, 'g'), (m) => ' '.repeat(m.length));   // dates are not amounts
-  const found = [];
-  for (const m of masked.matchAll(AMOUNT_RE)) {
-    const unit = m[4] ? UNIT[m[4].toLowerCase()] : 1;
-    const digits = m[2].replace(/,/g, '');
-    found.push({
-      raw: m[0],
-      index: m.index,
-      value: scaleDecimal(digits, m[3], unit),
-      marked: Boolean(m[1] || m[4] || m[5]),    // has a currency sign / unit / "rupees"
-    });
-  }
-  return found;
-}
-
-// status: 'none' | 'one' | 'many'. Amounts with a currency sign or unit win over bare numbers ("₹450 for 2 people").
-export function chooseAmount(text) {
-  const all = findAmounts(text);
-  const marked = all.filter((a) => a.marked);
-  const group = marked.length ? marked : all;
-  const distinct = [...new Set(group.map((a) => a.value))];
-  if (distinct.length === 0) return { status: 'none' };
-  if (distinct.length > 1) return { status: 'many', values: distinct };
-  return { status: 'one', value: distinct[0], spans: all.map((a) => a.raw) };
-}
 
 // ── Dates: today / yesterday / day before yesterday / YYYY-MM-DD, resolved from the CLIENT's local date ──────────────
 const UNSUPPORTED_DATE = new RegExp([
@@ -182,7 +151,8 @@ export function looksLikeTransaction(text) {
   const t = stripPolite(text);
   if (!t || isQuestion(t)) return false;
   if (/\b(?:goals?|budgets?|liabilit\w*|loans?|emis?)\b/i.test(t)) return false;
-  const hasAmount = findAmounts(t).length > 0;
+  const scan = scanAmounts(t);
+  const hasAmount = scan.found.length > 0 || scan.unclear.length > 0;
   if (TXN_VERB.test(t)) return hasAmount || TXN_NOUN.test(t);
   if (TXN_STATEMENT.test(t)) return hasAmount;
   return false;
@@ -230,6 +200,14 @@ export function extractGoalContribution(text) {
 
 const normKey = (s) => String(s).trim().replace(/\s+/g, ' ').toLowerCase();
 
+// Substring / word matches first, then similarity matches (typos, word order) that the first pass missed: entityMatcher.js.
+// Candidates are only ever put to the user as a question; none is chosen automatically.
+function mergeFuzzy(items, direct, phrase, nameOf, limit) {
+  const seen = new Set(direct);
+  const extra = fuzzyCandidates(items, phrase, nameOf).filter((x) => !seen.has(x));
+  return [...direct, ...extra].slice(0, limit);
+}
+
 // Goals whose title equals the phrase exactly (case-insensitive, trimmed); never fuzzy.
 export function exactGoalMatches(goals, ...phrases) {
   const keys = phrases.filter(Boolean).map(normKey);
@@ -241,10 +219,11 @@ export function nearGoalMatches(goals, phrase, limit = 5) {
   const p = normKey(phrase);
   if (!p) return [];
   const tokens = p.split(/[^a-z0-9]+/).filter((x) => x.length >= 3);
-  return goals.filter((g) => {
+  const direct = goals.filter((g) => {
     const k = normKey(g.title);
     return k.includes(p) || p.includes(k) || tokens.some((tok) => k.split(/[^a-z0-9]+/).includes(tok) || k.includes(tok));
-  }).slice(0, limit);
+  });
+  return mergeFuzzy(goals, direct, p, (g) => g.title, limit);
 }
 
 const ORDINALS = { first: 1, '1st': 1, one: 1, second: 2, '2nd': 2, two: 2, third: 3, '3rd': 3, three: 3, fourth: 4, '4th': 4, four: 4, fifth: 5, '5th': 5, five: 5 };
@@ -307,8 +286,8 @@ export function findBudgetMonth(text, localDate) {
 
 // ── Liability repayments ───────────────────────────────────────────────────────────────────────────────────────────
 const LIAB_NOUN = /\b(?:loans?|emis?|liabilit(?:y|ies)|credit cards?|mortgage|repayments?)\b/i;
-const PAY_VERB = /^(?:i\s+)?(?:'ve\s+|have\s+|just\s+|already\s+)*(?:paid|pay|repay|repaid|record|log|put|add|made|make|deposit|send|sent|settle|settled|clear|cleared|contribute)\b/i;
-const REPAY_STOP = /\b(?:i|ive|i've|have|just|already|paid|pay|repay|repaid|record|log|put|add|made|make|deposit|send|sent|settle|settled|clear|cleared|contribute|my|the|our|a|an|of|towards?|to|on|against|for|into|in|emi|emis|repayment|repayments|today|yesterday|please)\b/gi;
+const PAY_VERB = /^(?:i\s+)?(?:'ve\s+|have\s+|just\s+|already\s+)*(?:paid|pay|repay|repaid|record|log|put|add|made|make|deposit|send|sent|(?:gave|give|given)(?!\s+(?:me|us|him|her|them|you)\b)|settle|settled|clear|cleared|contribute)\b/i;
+const REPAY_STOP = /\b(?:i|ive|i've|have|just|already|paid|pay|repay|repaid|record|log|put|add|made|make|deposit|send|sent|gave|give|given|settle|settled|clear|cleared|contribute|my|the|our|a|an|of|towards?|to|on|against|for|into|in|emi|emis|repayment|repayments|today|yesterday|please)\b/gi;
 
 // "I paid ₹6,500 toward my bike loan" -> { amount, namePhrase, rawPhrase, hasEmi } or null. Needs a payment verb AND a
 // liability word (loan, EMI, credit card...), so "Paid ₹500 for lunch" stays a transaction. A missing amount is reported,
@@ -349,17 +328,25 @@ export function nearLiabilityMatches(liabilities, phrase, limit = 5) {
   const p = normName(phrase);
   if (!p) return [];
   const tokens = p.split(/[^a-z0-9]+/).filter((x) => x.length >= 3 && !['loan', 'loans', 'emi', 'the', 'and'].includes(x));
-  return liabilities.filter((l) => {
+  const direct = liabilities.filter((l) => {
     const k = normName(l.name);
     const words = k.split(/[^a-z0-9]+/);
     // whole words only: "car" must not suggest "Old Card"
     return ` ${k} `.includes(` ${p} `) || ` ${p} `.includes(` ${k} `) || tokens.some((tok) => words.includes(tok) || (TYPE_WORDS[l.type] ?? []).includes(tok));
-  }).slice(0, limit);
+  });
+  return mergeFuzzy(liabilities, direct, p, (l) => l.name, limit);
 }
 
 // ── Budgets ────────────────────────────────────────────────────────────────────────────────────────────────────────
 const BUDGET_WORD = /\bbudgets?\b/i;
 const BUDGET_START = /^(?:i\s+)?(?:(?:want|need|would like)\s+to\s+|'d like to\s+)?(?:set|make|create|update|change|put|raise|increase|lower|reduce|cut|decrease|add|adjust|fix|budget)\b/i;
+// "transport 4.5k budget", "food budget 8000": a category, a budget word and an amount, with no leading verb.
+const BARE_BUDGET = /^(?:(?:my|the|our)\s+)?[a-z&'/-]+(?:\s+[a-z&'/-]+){0,2}\s+(?:\S*\d\S*\s+)?budgets?\b/i;
+const BUDGET_NOT_LIMIT = /\bbudget\s+(?:meeting|review|report|presentation|plan|discussion|proposal)\b/i;
+function hasMoney(text) {
+  const scan = scanAmounts(text);
+  return scan.found.length > 0 || scan.unclear.length > 0;
+}
 const BUDGET_DROP = /\b(?:set|make|create|update|change|put|raise|increase|lower|reduce|cut|decrease|add|adjust|fix|my|the|a|an|our|new|monthly|budget|budgets|limit|spending|of|to|at|for|as|in|on|please|i|want|need|would|like|d|be|is|should|by|this|current|month)\b/gi;
 
 export function cleanBudgetCategory(text, extraSpans = []) {
@@ -376,7 +363,7 @@ export function extractBudget(text, { localDate } = {}) {
   const t = stripPolite(text);
   if (!t || isQuestion(t) || !BUDGET_WORD.test(t) || /\bgoals?\b/i.test(t)) return null;
   const addTo = /^(?:i\s+)?(?:(?:want|need|would like)\s+to\s+)?add\b/i.test(t);
-  const startsLikeBudget = BUDGET_START.test(t) || /^(?:₹|rs\.?\s*|inr\s*)?\d/i.test(t);
+  const startsLikeBudget = BUDGET_START.test(t) || /^(?:₹|rs\.?\s*|inr\s*)?\d/i.test(t) || (hasMoney(t) && BARE_BUDGET.test(t) && !BUDGET_NOT_LIMIT.test(t));
   if (!startsLikeBudget) return null;
   if (addTo && !/\bto\s+(?:my\s+|the\s+|our\s+)?[^.?!]*\bbudgets?\b/i.test(t)) return null;   // "Add ₹500 for budget meeting"
   const relative = (addTo && /\bto\s+(?:my\s+|the\s+|our\s+)?[^.?!]*\bbudgets?\b/i.test(t)) || /\bby\s+(?:₹|rs\.?|inr)?\s*\d/i.test(t);
@@ -403,13 +390,67 @@ export function extractBudget(text, { localDate } = {}) {
   return { relative, fields, issues };
 }
 
+// "Set dining to ten thousand next month": a budget change that never says the word "budget". It only counts as one
+// when the category is an existing budget (decided by the caller), so "set alarm to 5" is never taken for a budget.
+const IMPLICIT_BUDGET = /^(?:i\s+)?(?:(?:want|need|would like)\s+to\s+|'d like to\s+)?(?:set|make|change|update|put|raise|lower)\s+(?!aside\b)(?:my\s+|the\s+|our\s+)?(.+?)\s+(?:to|at|as)\s+(.+)$/i;
+
+export function extractImplicitBudget(text, { localDate } = {}) {
+  const t = stripPolite(text);
+  if (!t || isQuestion(t)) return null;
+  const m = IMPLICIT_BUDGET.exec(t);
+  if (!m) return null;
+  if (/\b(?:goals?|loans?|emis?|liabilit\w*|budgets?)\b/i.test(t) || /\bby\s+(?:₹|rs\.?|inr)?\s*\d/i.test(t)) return null;
+  const amount = chooseAmount(m[2]);
+  if (amount.status === 'none') return null;
+  const month = findBudgetMonth(m[2], localDate);
+  const category = cleanBudgetCategory(m[1]);
+  if (!category || category.split(/\s+/).length > 3) return null;
+  const fields = { categoryPhrase: category };
+  const issues = {};
+  if (amount.status === 'one') fields.amount = amount.value; else issues.amountAmbiguous = true;
+  if (month.kind === 'ok') fields.month = month.month;
+  else if (month.kind === 'needs-year') { issues.monthIssue = 'needs-year'; issues.monthName = month.name; }
+  else if (month.kind === 'ambiguous') issues.monthIssue = 'ambiguous';
+  else if (month.kind === 'needs-local') issues.monthIssue = 'needs-local';
+  return { fields, issues };
+}
+
+// Income / expense wording the USER typed. The language model may only agree with this; it never supplies a direction.
+export function directionCue(text) {
+  const t = String(text).replace(/\bpaid me\b/gi, ' got paid ');
+  const income = INCOME_CUE.test(t);
+  const expense = EXPENSE_CUE.test(t.replace(/\bgot paid\b/gi, ' '));
+  if (income && expense) return 'conflict';
+  return income ? 'income' : expense ? 'expense' : null;
+}
+
+// Is this message worth a language-model reading at all? Not a question, not advice-seeking, has something money-like and
+// an action word. Normal financial questions never reach the extractor.
+const ACTION_CUE = /\b(?:pay|paid|repay|repaid|repayment|spend|spent|received|receive|earned|salary|budget|limit|loan|emi|goal|save|saved|put|gave|give|given|set|make|add|record|log|contribute|deposit)\b/i;
+const CHATTY = /\b(?:should|advise|advice|suggest|recommend|tips?|why|what|how|which|can i|could i|would|plan|help me|tell me|explain|show|compare)\b/i;
+export function looksLikeActionAttempt(text) {
+  const t = stripPolite(text);
+  if (!t || t.length > 200 || isQuestion(t) || CHATTY.test(t)) return false;
+  return hasMoney(t) && ACTION_CUE.test(t);
+}
+// Stricter: the message OPENS like an instruction or a first-person payment, so a hint is better than silence.
+const OPENS_LIKE_ACTION = /^(?:i\s+)?(?:'ve\s+|have\s+|just\s+|already\s+|want\s+to\s+|need\s+to\s+)*(?:paid|pay|repaid|repay|spent|spend|gave|give|put|add|record|log|set|make|save|contribute|deposit|received|earned|got)\b/i;
+export function clearlyAnAction(text) {
+  const t = stripPolite(text);
+  return looksLikeActionAttempt(t) && (OPENS_LIKE_ACTION.test(t) || BARE_BUDGET.test(t));
+}
+const ACTION_HELP = "I couldn't turn that into an action. You can say things like “Paid ₹5,000 on my bike loan”, “Set food budget to ₹8,000”, “Add ₹2,000 to my Goa goal” or “Spent ₹450 on lunch”.";
+
 // ── Edits to a pending proposal ("make it ₹600", "change it to yesterday", "use the Goa Trip goal", "for next month") ──
 // Each kind has its OWN grammar: there is no fall-through to another kind's meaning.
-const EDIT_LEAD = /^(?:(?:yes|no|ok|okay)[,.\s]+(?:but\s+)?)?(?:actually[,.\s]+)?(?:please\s+)?(make it|make that|change it to|change (?:the )?(?:amount|date|title|name|description|type|goal|category|month|loan|liability|limit)(?: it)? to|set (?:it|the amount|the date|the title|the category) to|update (?:it |the amount |the date )?to|it should be|should be|it was|use|call it|name it|title it|rename it to)\s+(.+)$/i;
+const EDIT_LEAD = /^(?:(?:yes|yeah|yep|yup|sure|ok|okay|no|nope|nah)[,.\s]+(?:but\s+)?)?(?:(?:actually|wait|hold on|oh)[,.\s]+)?(?:please\s+)?(make it|make that|change it to|change (?:the )?(?:amount|date|title|name|description|type|goal|category|month|loan|liability|limit)(?: it)? to|set (?:it|the amount|the date|the title|the category) to|update (?:it |the amount |the date )?to|it should be|should be|it was|use|call it|name it|title it|rename it to)\s+(.+)$/i;
 const TITLE_LEADS = /^(?:call it|name it|title it|rename it to|change (?:the )?(?:title|name|description)(?: it)? to|set (?:it|the title) to)$/i;
 const NAMING_LEADS = /category|call it|name it|rename|use|title it/i;
 
-const editMatch = (text) => EDIT_LEAD.exec(stripPolite(text).replace(/[.!]+$/, ''));
+// "make it 600 instead" / "use the HDFC loan, please": a trailing softener is not part of the new value.
+const TRAILING_SOFTENER = /[,\s]+(?:instead|please|rather|though|then|actually)$/i;
+const editText = (text) => stripPolite(text).replace(/[.!]+$/, '').replace(TRAILING_SOFTENER, '');
+const editMatch = (text) => EDIT_LEAD.exec(editText(text));
 
 function parseTransactionEdit(text) {
   const m = editMatch(text);
@@ -461,9 +502,9 @@ function parseRepaymentEdit(text) {
 }
 
 function parseBudgetEdit(text) {
-  const t = stripPolite(text).replace(/[.!]+$/, '');
+  const t = editText(text);
   // "for next month" / "in November 2026": a bare month phrase edits the month
-  const bare = /^(?:(?:yes|no|ok|okay)[,.\s]+(?:but\s+)?)?(?:for|in|during)\s+(.+)$/i.exec(t);
+  const bare = /^(?:(?:yes|yeah|yep|yup|sure|ok|okay|no|nope|nah)[,.\s]+(?:but\s+)?)?(?:for|in|during)\s+(.+)$/i.exec(t);
   if (bare && findBudgetMonth(bare[1], '2000-01-01').kind !== 'none') return { patch: { monthText: bare[1].trim() } };
   const m = EDIT_LEAD.exec(t);
   if (!m) return null;
@@ -524,12 +565,14 @@ export function createAssistantActions(deps) {
   }
   // A clarifying question: stored as a draft so the next message is read as its answer.
   async function askDraft(ctx, kind, payload, question) {
-    const draft = await store(ctx.userId, kind, 'draft', payload, question, []);
+    const draft = await store(ctx.userId, kind, 'draft', ctx.interpreted ? { ...payload, interpreted: ctx.interpreted } : payload, question, []);
     return handled(withNotice(ctx.preface, question), view(draft, 'needs_clarification'));
   }
   // A complete, previewed proposal waiting for the user's explicit confirmation.
   async function propose(ctx, kind, payload, summary, display) {
-    const pending = await store(ctx.userId, kind, 'pending', payload, summary, display);
+    // What the typo fixes / spoken numbers were read as, so the user can check it on the card before confirming.
+    const rows = ctx.interpreted ? [...display, { label: 'Interpreted', value: ctx.interpreted }] : display;
+    const pending = await store(ctx.userId, kind, 'pending', ctx.interpreted ? { ...payload, interpreted: ctx.interpreted } : payload, summary, rows);
     return handled(withNotice(ctx.preface, summary), view(pending, 'pending'));
   }
   // Nothing in the reply moved the draft forward: ask once more, then give up (never loops).
@@ -546,7 +589,7 @@ export function createAssistantActions(deps) {
     const amt = f.amount != null ? formatRupees(f.amount) : null;
     switch (want) {
       case 'type': return 'Was that money you spent or money you received?';
-      case 'amount-many': return 'I found more than one amount. How much was it?';
+      case 'amount-many': return "I found more than one amount, or one I couldn't read exactly. How much was it?";
       case 'amount': return f.type === 'income'
         ? `How much did you receive${f.titleRaw ? ` for ${f.titleRaw}` : ''}?`
         : `How much did you spend${f.titleRaw ? ` on ${f.titleRaw}` : ''}?`;
@@ -608,6 +651,11 @@ export function createAssistantActions(deps) {
   }
 
   async function continueTransactionDraft(ctx, text, p) {
+    // "I paid 5k" -> "What was it for?" -> "my bike loan": that is a loan repayment, not an expense titled "Bike loan".
+    if (p.want === 'title' && p.fields.amount != null && LIAB_NOUN.test(text) && !/\bbudgets?\b|\bgoals?\b/i.test(text)) {
+      const asRepayment = await startRepayment(ctx, `paid ${p.fields.amount} to ${stripPolite(text)}`);
+      if (asRepayment) return asRepayment;
+    }
     const got = extractTransaction(text, { localDate: ctx.localDate, allowForCue: false });
     const f = { ...p.fields };
     let progress = false;
@@ -640,7 +688,7 @@ export function createAssistantActions(deps) {
   async function askGoal(ctx, fields, candidates, intro, attempts = 0) {
     const lines = candidates.map((g, i) => `${i + 1}. ${goalLine({ title: g.title, currentAmount: g.current, targetAmount: g.target, targetDate: g.targetDate })}`);
     const question = candidates.length === 1
-      ? `${intro} Is it ${lines[0].slice(3)}? Say yes, or cancel.`
+      ? `${intro} Did you mean ${lines[0].slice(3)}? Say yes, or cancel.`
       : `${intro} Which one? ${lines.join(' ')} Say the number.`;
     return askDraft(ctx, 'contribute_to_goal', { kind: 'contribute_to_goal', stage: 'choose_goal', fields, candidates, attempts }, question);
   }
@@ -673,16 +721,24 @@ export function createAssistantActions(deps) {
   }
 
   // Resolve the goal for a (possibly partial) request and move to the next step. `goals` are the caller's own.
+  // True when a typo / speech correction landed inside the words that picked an entity ("bike lon" -> "bike loan"):
+  // even an exact-looking match is then confirmed with the user first. (Entity names themselves are never rewritten.)
+  function nameTouched(ctx, ...phrases) {
+    return (ctx.corrections ?? []).some((c) => c.kind !== 'filler' && c.to && phrases.some((ph) => ph && new RegExp(`\\b${c.to}\\b`, 'i').test(ph)));
+  }
+
   async function advanceGoal(ctx, fields, goals, attempts = 0) {
     const phrase = fields.namePhrase ?? '';
     const live = goals.filter((g) => g.currentAmount < g.targetAmount);
     const exact = phrase ? exactGoalMatches(goals, phrase, fields.rawPhrase) : [];
     if (exact.length > 1) return askGoal(ctx, fields, exact.map(asGoalCandidate), `You have ${exact.length} goals called “${exact[0].title}”.`, attempts);
-    if (exact.length === 0) {
+    const reachedByCorrection = exact.length === 1 && nameTouched(ctx, phrase, fields.rawPhrase);
+    if (exact.length === 0 || reachedByCorrection) {
       if (goals.length === 0) return stopWith(ctx, "You don't have any savings goals yet. You can create one on the Goals page.");
-      const pool = phrase ? nearGoalMatches(goals, phrase) : live.slice(0, 5);
+      const pool = reachedByCorrection ? exact : phrase ? nearGoalMatches(goals, phrase) : live.slice(0, 5);
       if (pool.length === 0) return stopWith(ctx, `I couldn't find a goal called “${phrase}”. Your goals: ${goals.slice(0, 5).map((g) => `“${g.title}”`).join(', ')}.`);
-      return askGoal(ctx, fields, pool.map(asGoalCandidate), phrase ? `I couldn't find a goal called “${phrase}”.` : 'Which goal is this for?', attempts);
+      const intro = reachedByCorrection ? `I wasn't sure about “${fields.rawPhrase || phrase}”.` : phrase ? `I couldn't find a goal called “${phrase}”.` : 'Which goal is this for?';
+      return askGoal(ctx, fields, pool.map(asGoalCandidate), intro, attempts);
     }
     const goal = exact[0];
     if (fields.amountAmbiguous || fields.amount == null) return askGoalAmount(ctx, goal, fields, attempts);
@@ -755,7 +811,7 @@ export function createAssistantActions(deps) {
   async function askLiability(ctx, fields, candidates, intro, attempts = 0) {
     const lines = candidates.map((c, i) => `${i + 1}. ${liabLine(c)}`);
     const question = candidates.length === 1
-      ? `${intro} Is it ${lines[0].slice(3)}? Say yes, or cancel.`
+      ? `${intro} Did you mean ${lines[0].slice(3)}? Say yes, or cancel.`
       : `${intro} Which one? ${lines.join(' ')} Say the number.`;
     return askDraft(ctx, 'record_liability_repayment', { kind: 'record_liability_repayment', stage: 'choose_liability', fields, candidates, attempts }, question);
   }
@@ -764,7 +820,7 @@ export function createAssistantActions(deps) {
   async function askRepaymentAmount(ctx, liability, fields, attempts = 0) {
     const emi = fields.hasEmi && liability.monthlyPayment > 0 ? ` (Its monthly payment is ${formatRupees(liability.monthlyPayment)}.)` : '';
     const question = fields.amountAmbiguous
-      ? `I found more than one amount. How much did you repay on ${liability.name}?`
+      ? `I found more than one amount, or one I couldn't read exactly. How much did you repay on ${liability.name}?`
       : `How much did you repay on ${liability.name}?${emi}`;
     return askDraft(ctx, 'record_liability_repayment',
       { kind: 'record_liability_repayment', stage: 'amount', fields, liabilityId: liability.id, liabilityName: liability.name, monthlyPayment: liability.monthlyPayment, attempts }, question);
@@ -802,9 +858,14 @@ export function createAssistantActions(deps) {
     const live = liabilities.filter((l) => l.outstandingAmount > 0);
     const exact = phrase || fields.rawPhrase ? exactLiabilityMatches(liabilities, phrase, fields.rawPhrase) : [];
     if (exact.length > 1) return askLiability(ctx, fields, exact.map(asLiabCandidate), `You have ${exact.length} liabilities called “${exact[0].name}”.`, attempts);
-    if (exact.length === 0) {
-      const pool = phrase || fields.rawPhrase ? nearLiabilityMatches(live, phrase || fields.rawPhrase) : live.slice(0, 5);
+    const reachedByCorrection = exact.length === 1 && nameTouched(ctx, phrase, fields.rawPhrase);
+    if (exact.length === 0 || reachedByCorrection) {
+      const pool = reachedByCorrection ? exact.filter((l) => l.outstandingAmount > 0) : phrase || fields.rawPhrase ? nearLiabilityMatches(live, phrase || fields.rawPhrase) : live.slice(0, 5);
       const label = fields.rawPhrase || phrase;     // what the user said ("car loan"), not the trimmed matching form
+      if (reachedByCorrection && pool.length > 0) {
+        return askLiability(ctx, fields, pool.map(asLiabCandidate), `I wasn't sure about “${label}”.`, attempts);
+      }
+      if (reachedByCorrection) return stopWith(ctx, `“${exact[0].name}” is already paid off, so there is nothing to repay.`);
       if (pool.length === 0) {
         return stopWith(ctx, label
           ? `I couldn't find a liability called “${label}”. Your liabilities: ${live.slice(0, 5).map((l) => `“${l.name}”`).join(', ') || 'none are open'}.`
@@ -880,7 +941,7 @@ export function createAssistantActions(deps) {
     const amt = fields.amount != null ? formatRupees(fields.amount) : null;
     let question;
     if (want === 'category') question = amt ? `Which category is the ${amt} budget for?` : 'Which category is the budget for?';
-    else if (want === 'amount-many') question = 'I found more than one amount. How much should the budget be?';
+    else if (want === 'amount-many') question = "I found more than one amount, or one I couldn't read exactly. How much should the budget be?";
     else if (want === 'amount') question = `How much should the ${fields.categoryPhrase} budget be${fields.month ? ` for ${monthLabel(fields.month)}` : ''}?`;
     else if (fields.monthIssue === 'needs-year') question = `Which year do you mean for ${capitalize(fields.monthName)}?`;
     else question = 'Which month do you mean? You can say this month, next month, or a month and year like October 2026.';
@@ -904,7 +965,9 @@ export function createAssistantActions(deps) {
     const list = await db.listBudgetsByUserAndMonth(ctx.userId, v.month);
     const key = v.label.trim().toLowerCase();      // the canonical key the database derives: lower(btrim(label))
     const existing = list.find((b) => b.categoryKey === key);
-    const near = list.filter((b) => b.categoryKey !== key && nearKey(b.categoryKey, key)).slice(0, 3);
+    const others = list.filter((b) => b.categoryKey !== key);
+    const near = [...others.filter((b) => nearKey(b.categoryKey, key)), ...fuzzyCandidates(others, v.label, (b) => b.category)]
+      .filter((b, i, all) => all.indexOf(b) === i).slice(0, 3);
     const when = monthLabel(v.month);
     const newLimit = formatRupees(v.amount);
     const fieldsOut = { categoryPhrase: f.categoryPhrase, month: v.month, amount: v.amount };
@@ -947,9 +1010,24 @@ export function createAssistantActions(deps) {
       summary, display);
   }
 
+  // "Set dining to ten thousand next month": only when "dining" is an existing budget of that month.
+  async function startImplicitBudget(ctx, t) {
+    const im = extractImplicitBudget(t, { localDate: ctx.localDate });
+    if (!im) return null;
+    const month = im.fields.month ?? (im.issues.monthIssue ? null : ctx.localDate?.slice(0, 7));
+    if (!month) return null;
+    const list = await db.listBudgetsByUserAndMonth(ctx.userId, month);
+    const key = im.fields.categoryPhrase.trim().toLowerCase();
+    if (!list.some((b) => b.categoryKey === key)) return null;
+    const fields = { ...im.fields };
+    if (im.issues.amountAmbiguous) fields.amountAmbiguous = true;
+    if (im.issues.monthIssue) { fields.monthIssue = im.issues.monthIssue; if (im.issues.monthName) fields.monthName = im.issues.monthName; }
+    return advanceBudget(ctx, fields);
+  }
+
   async function startBudget(ctx, t) {
     const ex = extractBudget(t, { localDate: ctx.localDate });
-    if (!ex) return null;
+    if (!ex) return startImplicitBudget(ctx, t);
     if (ex.relative) {
       return handled(withNotice(ctx.preface, "I can set a budget to an exact amount, for example “Set food budget to ₹8,000”, but I can't add to or reduce one by an amount."));
     }
@@ -1055,25 +1133,131 @@ export function createAssistantActions(deps) {
     return p.payload?.shortLabel ?? KINDS[p.kind]?.draftLabel ?? 'unfinished request';
   }
 
-  async function startNew(ctx, text) {
+  // ═════════════ language-model fallback (Issue #77) ═════════════
+  // Only for a NEW request that no deterministic parser understood. The model's answer is a hint: it is schema-checked,
+  // grounded in the user's words, and converted back into the same fields the deterministic parsers produce, so entity
+  // resolution, previews and explicit confirmation are exactly the ones every other action uses.
+  const askWhichAction = (ctx) => handled(withNotice(ctx.preface, 'I\'m not sure what that payment is for. Is it an expense, a loan repayment, money for a savings goal, or a budget?'));
+  const helpOrChat = (ctx, text) => (clearlyAnAction(text) ? handled(withNotice(ctx.preface, ACTION_HELP)) : NOT_HANDLED);
+
+  async function startStructured(ctx, text) {
+    if (!deps.extractStructured || !looksLikeActionAttempt(text)) return null;
+    let result;
+    try { result = await deps.extractStructured(text); } catch { result = { status: 'unavailable' }; }
+    if (!result || result.status !== 'ok') return helpOrChat(ctx, text);
+    const ex = result.extraction;
+    if (ex.intent === 'none') return NOT_HANDLED;
+
+    const prov = validateProvenance(ex, {
+      original: ctx.original ?? text, normalized: text, toOriginal: ctx.toOriginal, localDate: ctx.localDate,
+      resolvers: { directionCue, findDate, findBudgetMonth, shiftDate, shiftMonth },
+    });
+    if (!prov.ok) return helpOrChat(ctx, text);
+    const f = prov.fields;
+
+    // The intent must be supported by the user's own words, or by one of THEIR entities that the phrase resolves to.
+    const lexical = [];
+    if (LIAB_NOUN.test(text)) lexical.push('record_liability_repayment');
+    if (BUDGET_WORD.test(text) || /\blimit\b/i.test(text)) lexical.push('set_budget');
+    if (/\bgoals?\b/i.test(text)) lexical.push('contribute_to_goal');
+    if (lexical.length > 1) return askWhichAction(ctx);
+    if (lexical.length === 1 && lexical[0] !== ex.intent) return askWhichAction(ctx);
+
+    const target = f.targetText ?? '';
+    const fieldsCommon = {};
+    if (f.amount != null) fieldsCommon.amount = f.amount;
+    if (f.amountAmbiguous) fieldsCommon.amountAmbiguous = true;
+
+    if (ex.intent === 'create_transaction') {
+      if (lexical.length) return askWhichAction(ctx);
+      if (UNSUPPORTED_CLASS.test(text)) return handled(withNotice(ctx.preface, "I can't record refunds or transfers from chat yet. Add them on the Transactions page, where you can pick the classification."));
+      if (!f.type && !TXN_VERB.test(text)) return askWhichAction(ctx);
+      const fields = { ...fieldsCommon };
+      if (f.type) fields.type = f.type;
+      const title = f.title ?? (target ? capitalize(target) : undefined);
+      if (title) { fields.title = title; fields.titleRaw = f.titleRaw ?? target; }
+      if (f.date) fields.date = f.date;
+      if (f.dateIssue) fields.dateIssue = f.dateIssue;
+      return advanceTransaction(ctx, fields);
+    }
+    if (ex.intent === 'contribute_to_goal') {
+      const goals = await db.listGoalsByUser(ctx.userId);
+      if (!lexical.length && !(target && nearGoalMatches(goals, cleanGoalPhrase(target)).length)) return askWhichAction(ctx);
+      const rawPhrase = target.replace(/^(?:my|the|our)\s+/i, '');
+      return advanceGoal(ctx, { ...fieldsCommon, namePhrase: cleanGoalPhrase(target), rawPhrase }, goals);
+    }
+    if (ex.intent === 'record_liability_repayment') {
+      const liabilities = await db.listLiabilitiesByUser(ctx.userId);
+      const rawPhrase = target.replace(/^(?:my|the|our)\s+/i, '').trim();
+      const namePhrase = rawPhrase.replace(/\s+(?:loans?|emis?|liabilit(?:y|ies)|repayments?)$/i, '').trim();
+      if (!lexical.length && !(rawPhrase && nearLiabilityMatches(liabilities, rawPhrase).length)) return askWhichAction(ctx);
+      return advanceRepayment(ctx, { ...fieldsCommon, namePhrase, rawPhrase, hasEmi: /\bemis?\b/i.test(text) }, liabilities);
+    }
+    // set_budget
+    if (/\b(?:increase|raise|reduce|lower|cut|decrease|add|top up)\b/i.test(text) && /\bby\b|\badd\b/i.test(text)) {
+      return handled(withNotice(ctx.preface, "I can set a budget to an exact amount, for example “Set food budget to ₹8,000”, but I can't add to or reduce one by an amount."));
+    }
+    const category = target ? cleanBudgetCategory(target) : '';
+    if (!lexical.length) {
+      // no "budget" / "limit" in the sentence: the category has to be one of their budgets, and the verb has to be a "set"
+      const month = f.month ?? ctx.localDate?.slice(0, 7);
+      const list = month ? await db.listBudgetsByUserAndMonth(ctx.userId, month) : [];
+      const known = category && list.some((b) => b.categoryKey === category.trim().toLowerCase());
+      if (!known || !/\b(?:set|make|change|update|put)\b/i.test(text)) return askWhichAction(ctx);
+    }
+    const fields = { ...fieldsCommon };
+    if (category) fields.categoryPhrase = category;
+    if (f.month) fields.month = f.month;
+    if (f.monthIssue) { fields.monthIssue = f.monthIssue; if (f.monthName) fields.monthName = f.monthName; }
+    return advanceBudget(ctx, fields);
+  }
+
+  // `allowModel` is false whenever an earlier request was open: the language model is never consulted mid-conversation.
+  async function startNew(ctx, text, { allowModel = false } = {}) {
     const t = stripPolite(text);
     if (!t || isQuestion(t)) return NOT_HANDLED;
     for (const kind of START_ORDER) {
       const result = await KINDS[kind].start(ctx, t);
       if (result) return result;
     }
+    if (allowModel) {
+      const viaModel = await startStructured(ctx, t);
+      if (viaModel) return viaModel;
+    }
     return NOT_HANDLED;
+  }
+
+  // Typos and speech slips are fixed first (actionNormalization.js). The user's own goal / loan / budget names are passed
+  // as protected so a name that happens to look like a typo is never rewritten.
+  async function prepare(userId, localDate, text) {
+    let n = normalizeActionText(text);
+    if (n.corrections.some((c) => c.kind !== 'filler')) {
+      const [goals, liabilities, budgets] = await Promise.all([
+        db.listGoalsByUser(userId),
+        db.listLiabilitiesByUser(userId),
+        localDate ? db.listBudgetsByUserAndMonth(userId, localDate.slice(0, 7)) : [],
+      ]);
+      n = normalizeActionText(text, { protect: [...goals.map((g) => g.title), ...liabilities.map((l) => l.name), ...budgets.map((b) => b.category)] });
+    }
+    const corrections = n.corrections.filter((c) => c.kind !== 'filler');
+    const parts = [];
+    const fixed = describeCorrections(corrections);
+    if (fixed) parts.push(fixed);
+    for (const sp of chooseAmount(n.text).spoken ?? []) parts.push(`“${sp.raw}” → ${formatRupees(sp.value)}`);
+    return { n, corrections, interpreted: parts.join('; ') };
   }
 
   // Entry point, called once per chat message with the caller's verified id.
   //   -> { handled: true, reply, action }                the whole answer (clarification, proposal, cancellation)
   //   -> { handled: false, cancelNotice?, action? }      not an action: answer normally (after cancelling any open one)
-  async function handleTurn({ userId, text, localDate }) {
+  async function handleTurn({ userId, text: rawText, localDate }) {
     const active = await db.getActiveProposal(userId);
+    const { n, corrections, interpreted } = await prepare(userId, localDate, rawText);
+    const text = n.text;
     const t = stripPolite(text);
-    const ctx = { userId, localDate, active, preface: '' };
+    const ctx = { userId, localDate, active, preface: '', corrections, interpreted, original: rawText, toOriginal: n.toOriginal };
 
-    if (!active) return startNew(ctx, text);
+    if (!active) return startNew(ctx, text, { allowModel: true });
 
     const yn = parseYesNo(text);
     if (yn === 'no') {
@@ -1081,6 +1265,8 @@ export function createAssistantActions(deps) {
       return handled('Okay, I cancelled that. Nothing was saved.', { proposalId: c.proposalId, kind: c.kind, status: 'cancelled' });
     }
     const p = active.payload;
+    // what earlier turns of this request were read as (typo fixes, spoken amounts) stays on the card
+    if (p?.interpreted) ctx.interpreted = [...new Set(`${p.interpreted}; ${ctx.interpreted}`.split('; ').filter(Boolean))].join('; ');
     const handler = KINDS[active.kind];
     if (handler && active.status === 'pending') {
       if (yn === 'yes') {
@@ -1096,7 +1282,7 @@ export function createAssistantActions(deps) {
     }
     // A brand-new request, or an unrelated message: the open proposal is cancelled and the user is told.
     const c = await cancelActive(userId, active);
-    const fresh = await startNew({ userId, localDate, active: null, preface: c.notice }, text);
+    const fresh = await startNew({ ...ctx, active: null, preface: c.notice }, text);
     if (fresh.handled) return fresh;
     return { handled: false, cancelNotice: c.notice, action: { proposalId: c.proposalId, kind: c.kind, status: 'cancelled' } };
   }

@@ -850,6 +850,18 @@ try {
   await act(async () => { say('set it', 0.9); await tick(150); });
   ok(confirmCalls.at(-1).id === pv3 && /^Done\. I created the transport budget/.test(replyCaption()), 'VOICE BUDGET: a spoken "set it" confirms', replyCaption());
   await act(async () => { synth.finish(); await tick(30); });
+  const pv4 = propose('set_budget', "I'll create a transport budget of ₹4,500 for October 2026. Should I create it?", createRows, budgetResult('2026-10', 'transport', 4500, true, 'Done. I created the transport budget for October 2026: ₹4,500.'));
+  await act(async () => { say('set transport budget to 4500'); await tick(150); });
+  await act(async () => { synth.finish(); await tick(30); });
+  await act(async () => { say('yeah sure', 0.9); await tick(150); });
+  ok(confirmCalls.at(-1).id === pv4 && /^Done\. I created the transport budget/.test(replyCaption()), 'VOICE: a spoken "yeah sure" confirms exactly like the typed one', replyCaption());
+  await act(async () => { synth.finish(); await tick(30); });
+  const pv5 = propose('set_budget', "I'll create a transport budget of ₹4,500 for October 2026. Should I create it?", createRows, budgetResult('2026-10', 'transport', 4500, true, 'Done. I created the transport budget for October 2026: ₹4,500.'));
+  await act(async () => { say('set transport budget to 4500'); await tick(150); });
+  await act(async () => { synth.finish(); await tick(30); });
+  await act(async () => { say('ok do it', 0.9); await tick(150); });
+  ok(confirmCalls.at(-1).id === pv5 && /^Done\. I created the transport budget/.test(replyCaption()), 'VOICE: a spoken "ok do it" confirms exactly like the typed one', replyCaption());
+  await act(async () => { synth.finish(); await tick(30); });
   await click(document.querySelector('.voice-stage-btn--end'));
   ok(!stage(), 'VOICE: the session ends cleanly');
 

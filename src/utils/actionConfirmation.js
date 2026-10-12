@@ -12,6 +12,7 @@ export const CONFIRM_PHRASES = [
   'record it', 'set it', 'update it', 'create it', 'haan', 'yes please', 'please do', 'yes confirm', 'yes go ahead',
   'yes do it', 'yes add it', 'yes save it', 'yes record it', 'yes set it', 'yes update it', 'yes create it',
   'sure go ahead', 'ok go ahead', 'okay go ahead', 'looks good', 'that is right', 'correct',
+  'yeah sure', 'yes sure', 'sure do it', 'ok do it', 'okay do it', 'yeah do it', 'confirm it',
 ];
 export const CANCEL_PHRASES = [
   'no', 'nope', 'nah', 'cancel', 'cancel it', 'stop', "don't", 'dont', "don't add it", 'dont add it', 'never mind',

@@ -23,6 +23,7 @@ import {
   expireProposal, previewGoalContribution, previewLiabilityRepayment, setBudgetExpecting
 } from './db/index.js';
 import { createAssistantActions, shiftDate, monthLabel } from './assistantActions.js';
+import { createStructuredExtractor } from './structuredActionExtractor.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1589,7 +1590,11 @@ const assistantActions = createAssistantActions({
   normalizeContributionInput,
   normalizeRepaymentInput,
   normalizeBudgetInput,
-  formatRupees
+  formatRupees,
+  // Optional language-model FALLBACK for messages the deterministic parser does not understand (Issue #77). It can only
+  // describe the message; every value is re-derived from the user's words and the usual preview + confirmation follows.
+  // Off when GROQ_API_KEY is missing or ASSISTANT_ACTION_LLM=off.
+  extractStructured: createStructuredExtractor({ isConfigured: isGroqConfigured })
 });
 
 // Runs a claimed proposal through the same executors as the manual routes.

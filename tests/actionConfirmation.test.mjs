@@ -56,3 +56,21 @@ test('Issue #75: the browser and the server read confirmations IDENTICALLY (same
   for (const t of samples) assert.equal(parseConfirmation(t), parseYesNo(t), `client and server disagree on ${JSON.stringify(t)}`);
   assert.ok(!CANCEL_PHRASES.some((c) => CONFIRM_PHRASES.includes(c)), 'no phrase both confirms and cancels');
 });
+
+test('Issue #77: natural whole-utterance confirmations (yeah sure, ok do it, ...)', () => {
+  for (const t of ['yeah sure', 'yes sure', 'sure', 'sure do it', 'ok', 'okay', 'ok do it', 'okay do it', 'yes do it', 'yeah do it', 'go ahead', 'please do', 'do it', 'confirm it', 'Yeah, sure!', 'OK, do it.', 'Okay do it!']) {
+    assert.equal(parseConfirmation(t), 'yes', t);
+    assert.equal(parseYesNo(t), 'yes', `server: ${t}`);
+  }
+});
+
+test('Issue #77: confirmations are whole-utterance only; edits and conditions never confirm', () => {
+  for (const t of [
+    'yes but make it 600', 'okay change it to 9000', 'sure use the other loan', 'yeah maybe', 'do it tomorrow', 'yes if the balance is enough',
+    'yeah sure but make it 600', 'ok do it later', 'sure do it for yesterday', 'okay do it twice', 'confirm it tomorrow', 'yeah sure thing',
+    'ok do', 'sure sure sure', 'yeah sure.. actually no',
+  ]) {
+    assert.equal(parseConfirmation(t), null, t);
+    assert.equal(parseYesNo(t), null, `server: ${t}`);
+  }
+});

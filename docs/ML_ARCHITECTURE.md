@@ -105,26 +105,33 @@ The assistant explains and interacts; it does not compute.
 * `POST /api/plan-chat`: a narrate-only prompt built from the ML results (see the trust note in section 3). Without a key it returns the plan summary text.
 * Statement parsing (`POST /api/transactions/parse-statement`): if a Groq key is configured, a language model proposes rows; otherwise (or if it produces nothing valid) a rule-based parser is used. Either way every row goes through the same server validator, receives a server-generated UUID and the owner from the session, and is stored with classification `unknown`.
 
-### Confirmed assistant actions (Issues #73 and #75)
+### Confirmed assistant actions (Issues #73, #75 and #77)
 
 The assistant can propose, but never silently perform, a financial write:
 
 ```
-natural language -> deterministic extraction -> clarification if needed -> server proposal
-  -> preview -> explicit confirmation -> execution -> verified result
+user text -> safe deterministic normalization -> deterministic action parser
+  -> (if not understood) action-likelihood gate -> structured LLM extraction (fallback only)
+  -> schema validation -> provenance validation -> server entity resolution -> clarification if needed
+  -> server proposal -> preview -> explicit confirmation -> single-use execution -> verified result
 ```
 
 * **Supported now:** `create_transaction`, `contribute_to_goal`, `record_liability_repayment` and `set_budget`. Each kind is one entry in a per-kind handler table (detect, clarify, preview, edit) in `server/assistantActions.js`; loans, EMIs and budgets are claimed before goals so "add to my car loan" is never a goal.
 * **Not supported yet:** `create_liability`, delete actions, refunds and transfers.
 * **Repayments and transactions are separate.** Recording a repayment changes the liability's balance only; no expense transaction is added.
 * **Budgets.** The assistant discloses the current limit before changing it and writes with compare-and-set; month names without a year are asked about, never guessed.
-* **No language model is trusted for action execution.** Extraction is deterministic (amounts, dates, months, direction and the user's own goal, loan and budget names are parsed by rules); a missing or ambiguous field produces a clarifying question, never a guess.
+* **No language model is trusted for action execution.** The deterministic parser is preferred and runs first (amounts, dates, months, direction and the user's own goal, loan and budget names are parsed by rules); a missing or ambiguous field produces a clarifying question, never a guess.
+* **Normalization layer (Issue #77).** `server/actionNormalization.js` fixes typos and speech-recognition slips in action keywords before parsing (curated aliases such as `payed`→`paid`, `lon`→`loan`, `budgt`→`budget`, `mnth`→`month`, plus a keyword-only Damerau-Levenshtein backstop with distance 1 for 4-6 letter words, 2 for longer ones, never for words of 3 letters or fewer, and a protected-word list such as `send`, `sent`, `spent`, `set`, `lend`, `earn`, `learn`). It keeps a correction log and an offset map back to the original text, leaves digits, amounts, number words and the user's own entity names alone, and never produces income, expense, refund, transfer or confirmation words.
+* **Spoken money.** `server/numberParser.js` reads digit forms (`₹500`, `4.5k`, `1.5 lakh`, `1,25,000`) and number words (`five thousand`, `one lakh twenty thousand`, `two and a half thousand`, `six five zero zero`, `four fifty`) with BigInt arithmetic; Indian scale (hundred, thousand, k, lakh, lac, crore) only. "2 and a half thousand" is ₹2,500; a dangling "2 and a half" is a question, never ₹2. Number words only count in a money slot, so "Five Guys" is not an amount.
+* **Entity matching.** `server/entityMatcher.js` ranks the user's own goals, liabilities and budget labels (exact, whole-word overlap, edit distance and trigram similarity). A fuzzy candidate is never chosen automatically: the assistant asks "Did you mean …?" even for a single candidate.
+* **Structured LLM extraction is a fallback only.** `server/structuredActionExtractor.js` uses the existing Groq integration (`GROQ_API_KEY`; optional `GROQ_ACTION_MODEL`; kill switch `ASSISTANT_ACTION_LLM=off`) with temperature 0, about 250 output tokens and a 4 second timeout, and is called only for a new message that is not a question, contains a money expression and an action word, and was not understood by the rules. It receives only that message: no chat history, account data or entity names, and it has no tools. Its output must match a closed schema (unknown keys, ids, confirmation or execution fields and confidence scores reject the whole output); `server/provenanceValidator.js` then requires every span to appear in the user's words, re-parses the amount itself, derives direction from the user's cue words and resolves dates and months on the server. The result is converted back into the same fields the deterministic handlers use, so entity resolution, previews and confirmation are unchanged. If the model is unavailable, slow, malformed or contradicts the user's words, the assistant falls back to deterministic behaviour and never executes anything.
+* **Edits stay deterministic.** While a proposal is pending, "yeah make it 600 instead", "actually make that six hundred" or "sure, use the HDFC loan instead" are parsed by rules as edits: the old proposal is replaced by a new one that must be confirmed again. The model is never used for confirmation, cancellation or edits.
 * **Confirmation is explicit.** The server stores the proposal and shows an exact preview; only a confirmation by proposal id executes it, through the same validators and database helpers as the manual forms. The client then updates its shared state from the stored result.
 * **Voice and typed chat use the same flow** (`runTurn`): a spoken "yes" and a typed "yes" confirm through the same endpoint.
 
 See [SECURITY_DEPLOYMENT.md](SECURITY_DEPLOYMENT.md) for the security properties of proposals.
 
-The model names in the code are `llama-3.3-70b-versatile` (chat and plan-chat) and `llama3-8b-8192` (parsing). No LLM output feeds a financial metric.
+The model names in the code are `llama-3.3-70b-versatile` (chat, plan-chat and, unless `GROQ_ACTION_MODEL` is set, the action extractor) and `llama3-8b-8192` (parsing). No LLM output feeds a financial metric.
 
 ## 11. No persisted model artifacts
 
