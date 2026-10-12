@@ -644,6 +644,47 @@ async function run() {
   try { await direct.query("INSERT INTO assistant_action_proposals (id,user_id,kind,payload,summary,display,status,expires_at,created_at,updated_at) VALUES ('y',1,'delete_everything','{}','s','[]','pending',now(),now(),now())"); } catch { bad = true; }
   ok(bad, 'schema: unknown action kinds are rejected by the database');
 
+  // ════════════════════ natural language (Issue #77), over HTTP with no language-model key ════════════════════
+  const N = await newUser('act-natural');
+  await addGoal(N, { title: 'Goa Trip', targetAmount: 50000 });
+  const nBike = (await addLiab(N, { name: 'Bike Loan', type: 'vehicle_loan', outstandingAmount: 20000 })).json;
+  const row = (resp, label) => resp.json?.action?.display?.find((d) => d.label === label)?.value;
+
+  r = await say(N, 'i payed 5k to bike lon');
+  ok(r.json.action?.status === 'needs_clarification' && /Did you mean “Bike Loan”/.test(r.json.reply), 'natural: a name reached through a typo is a question, never auto-selected', r.json?.reply);
+  r = await say(N, 'yes');
+  ok(r.json.action?.status === 'pending' && row(r, 'Repayment') === '₹5,000' && /“payed” → “paid”/.test(row(r, 'Interpreted')), 'natural: "yes" picks the candidate, then a preview that shows how the typos were read', r.text);
+  ok((await liabs(N)).find((l) => l.id === nBike.id).outstandingAmount === 20000, 'natural: nothing is written before the explicit confirmation');
+  r = await say(N, 'yes');
+  ok(/Tap Confirm/.test(r.json.reply) && (await liabs(N)).find((l) => l.id === nBike.id).outstandingAmount === 20000, 'natural: a typed "yes" never executes');
+  const nProposal = r.json.action.proposalId;
+  r = await confirm(N, nProposal);
+  ok(r.status === 200 && (await liabs(N)).find((l) => l.id === nBike.id).outstandingAmount === 15000, 'natural: the confirm endpoint executes it once', r.text);
+
+  const nTxBefore = (await txs(N)).length;
+  r = await say(N, 'add 450 for lunch');
+  const lunch = r.json.action.proposalId;
+  r = await say(N, 'yeah make it 600 instead');
+  ok(r.json.action?.status === 'pending' && r.json.action.proposalId !== lunch && row(r, 'Amount') === '₹600', 'edit: "yeah make it 600 instead" is an edit with a NEW proposal', r.text);
+  ok((await txs(N)).length === nTxBefore, 'edit: nothing was saved by the edit');
+  r = await confirm(N, lunch);
+  ok(r.status !== 200 && (await txs(N)).length === nTxBefore, 'edit: the old proposal is invalidated and cannot be confirmed', r.text);
+  r = await say(N, 'actually make it six hundred');
+  ok(row(r, 'Amount') === '₹600' && r.json.action.status === 'pending', 'edit: "actually make it six hundred" is read as an edit too', r.text);
+  r = await confirm(N, r.json.action.proposalId);
+  ok(r.status === 200 && Math.abs((await txs(N)).find((t) => t.title === 'Lunch').amount) === 600, 'edit: the edited amount is what is saved', r.text);
+
+  r = await say(N, 'spent 2 and a half thousand on dinner');
+  ok(row(r, 'Amount') === '₹2,500' && /2 and a half thousand” → ₹2,500/.test(row(r, 'Interpreted')), 'money safety: "2 and a half thousand" is ₹2,500', r.text);
+  await cancel(N, r.json.action.proposalId);
+  r = await say(N, 'spent 2 and a half on dinner');
+  ok(r.json.action?.status === 'needs_clarification' && row(r, 'Amount') === undefined && /couldn't read exactly/.test(r.json.reply), 'money safety: a dangling fraction is a question, never ₹2', r.text);
+  await say(N, 'cancel');
+
+  r = await say(N, 'put fifty thousand somewhere safe');
+  ok(r.status === 200 && /couldn't turn that into an action/.test(r.json.reply) && !r.json.action, 'no model configured: a clear action attempt gets a concise hint and nothing is proposed', r.text);
+  ok((await rowsOf("SELECT 1 FROM assistant_action_proposals WHERE user_id = (SELECT id FROM users WHERE email = 'act-natural@example.com') AND status IN ('draft','pending')")).length === 0, 'no model configured: no proposal was stored');
+
   // rate limit on confirm / cancel
   const R = await newUser('act-rate');
   let limited = 0;
