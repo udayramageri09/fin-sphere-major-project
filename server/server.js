@@ -24,6 +24,7 @@ import {
 } from './db/index.js';
 import { createAssistantActions, shiftDate, monthLabel } from './assistantActions.js';
 import { createStructuredExtractor } from './structuredActionExtractor.js';
+import { getChatModel, getParseModel, groqChatUrl, modelRequestFields } from './groqModels.js';
 import { createSnapshotStore, sanitizeAnalysis } from './planSnapshot.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1243,7 +1244,10 @@ app.post('/api/transactions/parse-statement', authenticate, parseLimiter, (req, 
   // If Groq is configured, use it for parsing
   if (isGroqConfigured()) {
     try {
-      const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      // Model: GROQ_PARSE_MODEL (default openai/gpt-oss-20b). No response_format (the prompt asks for a top-level JSON array,
+      // which JSON mode cannot return) and no max_tokens (the output grows with the statement).
+      const parseModel = getParseModel(process.env);
+      const response = await fetch(groqChatUrl(process.env), {
         method: 'POST',
         signal: AbortSignal.timeout(30_000),
         headers: {
@@ -1251,7 +1255,7 @@ app.post('/api/transactions/parse-statement', authenticate, parseLimiter, (req, 
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          model: 'llama3-8b-8192',
+          model: parseModel,
           messages: [
             {
               role: 'system',
@@ -1271,7 +1275,8 @@ Return only the valid JSON array, like: [{"title": "Salary", "amount": 50000, "d
               content: statementText
             }
           ],
-          temperature: 0.1
+          temperature: 0.1,
+          ...modelRequestFields(parseModel)
         })
       });
 
@@ -1310,11 +1315,11 @@ Return only the valid JSON array, like: [{"title": "Salary", "amount": 50000, "d
           // No valid rows from the AI: fall through to the rule-based parser below.
         }
       } else {
-        const errText = await response.text();
-        console.error('Groq API Error during parsing:', errText);
+        // The status only: a provider error body can echo the generated text, and so the user's statement.
+        console.error('Groq API Error during parsing: status', response.status);
       }
     } catch (err) {
-      console.error('Error invoking Groq API for parsing:', err);
+      console.error('Error invoking Groq API for parsing:', err?.name ?? 'error');
     }
   }
 
@@ -1847,7 +1852,8 @@ Rules:
 
     if (isGroqConfigured()) {
       try {
-        const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        const chatModel = getChatModel(process.env);   // GROQ_CHAT_MODEL (default openai/gpt-oss-120b)
+        const response = await fetch(groqChatUrl(process.env), {
           method: 'POST',
           signal: AbortSignal.timeout(30_000),
           headers: {
@@ -1855,10 +1861,11 @@ Rules:
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({
-            model: 'llama-3.3-70b-versatile',
+            model: chatModel,
             messages: [systemMessage, ...history],
             temperature: 0.4,
-            max_tokens: 500
+            max_tokens: 500,
+            ...modelRequestFields(chatModel)
           })
         });
 
@@ -2067,7 +2074,8 @@ Guidelines:
 
   if (isGroqConfigured()) {
     try {
-      const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      const planModel = getChatModel(process.env);   // GROQ_CHAT_MODEL (default openai/gpt-oss-120b)
+      const response = await fetch(groqChatUrl(process.env), {
         method: 'POST',
         signal: AbortSignal.timeout(30_000),
         headers: {
@@ -2075,10 +2083,11 @@ Guidelines:
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          model: 'llama-3.3-70b-versatile',
+          model: planModel,
           messages: fullMessages,
           temperature: 0.4,
-          max_tokens: 600
+          max_tokens: 600,
+          ...modelRequestFields(planModel)
         })
       });
 

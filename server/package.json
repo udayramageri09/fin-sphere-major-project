@@ -13,7 +13,8 @@
     "test:actions-extract": "node --test tests/actionExtract.test.mjs",
     "test:natural": "node --test tests/naturalActions.test.mjs",
     "test:liability": "node --test tests/liabilityActions.test.mjs",
-    "test:plans": "node tests/plans.test.mjs"
+    "test:plans": "node tests/plans.test.mjs",
+    "test:groq": "node tests/groq.test.mjs"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",

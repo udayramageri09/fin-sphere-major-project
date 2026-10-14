@@ -142,7 +142,7 @@ user text -> safe deterministic normalization -> deterministic action parser
 
 See [SECURITY_DEPLOYMENT.md](SECURITY_DEPLOYMENT.md) for the security properties of proposals.
 
-The model names in the code are `llama-3.3-70b-versatile` (chat and plan-chat), `openai/gpt-oss-120b` (the action extractor, overridable with `GROQ_ACTION_MODEL`) and `llama3-8b-8192` (parsing). No LLM output feeds a financial metric.
+Model selection lives in one module, `server/groqModels.js`. The **default configured models** are `openai/gpt-oss-120b` for chat and plan-chat (`GROQ_CHAT_MODEL`), `openai/gpt-oss-20b` for statement parsing (`GROQ_PARSE_MODEL`) and `openai/gpt-oss-120b` for the action extractor (`GROQ_ACTION_MODEL`). Each can be overridden by an environment variable, so a model the provider retires is a configuration change, not a code change; the defaults are not a promise about the provider's catalogue. Models whose name starts with `openai/gpt-oss-` are sent `reasoning_effort: low` (their reasoning counts against `max_tokens`); any other model gets no extra fields, and only GPT-OSS models are supported by that mapping. Request parameters that differ per call (`temperature`, `max_tokens`, `response_format`) stay with the call site: chat 0.4 / 500, plan-chat 0.4 / 600, statement parsing 0.1 with neither `max_tokens` nor `response_format` (it expects a top-level JSON array, which JSON mode cannot return), the extractor 0 / 250 with `response_format: json_object`. Only `message.content` is ever read; the separate reasoning text is never returned to the user. An optional `GROQ_API_BASE` overrides the API base URL (used by the tests to point at a local stub). No LLM output feeds a financial metric.
 
 ## 11. No persisted model artifacts
 
