@@ -4,6 +4,9 @@
   "type": "module",
   "main": "server.js",
   "scripts": {
+    "test:password-reset": "node --test tests/passwordReset.test.mjs",
+    "test:password-reset-db": "node --test tests/passwordResetDb.test.mjs",
+    "test:password-reset-local": "node tests/passwordResetLocal.test.mjs",
     "start": "node server.js",
     "dev": "node --watch server.js",
     "start-ml": "cd ../ml_service && python main.py",

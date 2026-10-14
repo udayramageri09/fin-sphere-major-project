@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { FinanceProvider } from './context/FinanceContext'
 import { useAuth } from './context/AuthContext'
 import TopNav from './components/TopNav'
@@ -13,6 +13,10 @@ import AIAvatar from './components/AIAvatar'
 import AuthPage from './pages/AuthPage'
 
 function App() {
+  const [resetToken] = useState(() => new URLSearchParams(window.location.hash.slice(1)).get('reset'));
+  useEffect(() => {
+    if (resetToken !== null) window.history.replaceState(null, '', window.location.pathname + window.location.search);
+  }, [resetToken]);
   const [currentView, setCurrentView] = useState('dashboard');
   const { status } = useAuth();
 
@@ -24,8 +28,8 @@ function App() {
     );
   }
 
-  if (status === 'unauthenticated') {
-    return <AuthPage />;
+  if (status === 'unauthenticated' || resetToken !== null) {
+    return <AuthPage resetToken={resetToken} />;
   }
 
   return (

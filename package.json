@@ -4,6 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "test:password-recovery": "node tests/passwordRecoveryUi.test.mjs",
     "dev": "vite",
     "server": "node server/server.js",
     "build": "vite build",

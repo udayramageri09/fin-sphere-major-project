@@ -134,11 +134,18 @@ async function run() {
   let limited = 0;
   for (let i = 0; i < 12; i++) { const x = await upload('a.txt', Buffer.from('nothing here')); if (x.status === 429) limited++; }
   ok(limited >= 1, 'parse-statement limiter engages', String(limited));
-  const asUser = (id) => `token=${jwt.sign({ id, email: 'o@e.co' }, SECRET, { algorithm: 'HS256', expiresIn: '1h' })}`;
-  const other = await upload('a.txt', Buffer.from('x'), asUser(payload.id + 999));
-  ok(other.status !== 429, 'limiter is per user, not global', String(other.status));
+  // Session revocation now checks persisted users; create real isolated test accounts.
+  const fixtureDb = new pg.Client({ connectionString: urlFor(DB) });
+  await fixtureDb.connect();
+  const asUser = async (id) => {
+    const email = `rate-${id}@example.com`;
+    await fixtureDb.query('INSERT INTO users(id,email,password_hash) SELECT $1,$2,password_hash FROM users WHERE id=$3 ON CONFLICT DO NOTHING', [id, email, payload.id]);
+    return `token=${jwt.sign({ id, email, sessionVersion: 0 }, SECRET, { algorithm: 'HS256', expiresIn: '1h' })}`;
+  };
+  const other = await upload('a.txt', Buffer.from('x'), await asUser(payload.id + 999));
+  ok(other.status !== 429 && other.status !== 401, 'limiter is per user, not global', String(other.status));
   // The exact DEFAULT: a fresh user gets 10 uploads per minute, and the 11th is refused.
-  const fresh = asUser(payload.id + 1234);
+  const fresh = await asUser(payload.id + 1234);
   const statuses = [];
   for (let i = 0; i < 11; i++) statuses.push((await upload('a.txt', Buffer.from('nothing here'), fresh)).status);
   ok(statuses.slice(0, 10).every((s) => s !== 429) && statuses[10] === 429, 'default upload limit is exactly 10 per minute per user', statuses.join(','));
@@ -160,9 +167,13 @@ async function run() {
     const fd = new FormData(); fd.append('statementFile', new Blob([Buffer.from('nothing here')]), 'a.txt');
     return fetch(base(P3) + '/api/transactions/parse-statement' + qs, { method: 'POST', headers: { cookie: tok, ...headers }, body: fd });
   };
-  const tok3 = asUser(77);
+  const tok3 = await asUser(77);
   let n429 = 0;
-  for (let i = 0; i < 20; i++) if ((await rawUpload(tok3)).status === 429) n429++;
+  for (let i = 0; i < 20; i++) {
+    const status = (await rawUpload(tok3)).status;
+    ok(status !== 401, 'override upload uses a valid session');
+    if (status === 429) n429++;
+  }
   ok(n429 === 0, 'override raises the limit below its new ceiling');
   raised.child.kill();
 
@@ -179,13 +190,14 @@ async function run() {
   ok(/Secure/i.test(pc) && /SameSite=Strict/i.test(pc) && /HttpOnly/i.test(pc), 'prod cookie Secure; HttpOnly; SameSite=Strict', pc);
   ok(r.headers.get('strict-transport-security') !== null, 'HSTS header present');
   const pstat = [];
-  const ptok = asUser(88);
+  const ptok = await asUser(88);
   for (let i = 0; i < 11; i++) {
     const fd = new FormData(); fd.append('statementFile', new Blob([Buffer.from('nothing here')]), 'a.txt');
     pstat.push((await fetch(base(P2) + '/api/transactions/parse-statement?FINSPHERE_TEST_UPLOAD_LIMIT=100000', { method: 'POST', headers: { cookie: ptok, 'x-finsphere-test-upload-limit': '100000' }, body: fd })).status);
   }
   ok(pstat.slice(0, 10).every((s) => s !== 429) && pstat[10] === 429, 'production keeps 10/min even with the override env set and bypass-style query/header', pstat.join(','));
   prod.child.kill();
+  await fixtureDb.end();
 }
 
 try {

@@ -14,6 +14,7 @@ import helmet from 'helmet';
 import { randomUUID } from 'node:crypto';
 import {
   initDatabase, closeDatabase, createUser, findUserByEmail, normalizeEmail, DuplicateEmailError,
+  issuePasswordReset, consumePasswordReset, isCurrentSession,
   listTransactionsByUser, createTransaction, createTransactionsBatch, deleteTransactionByUserAndId,
   listGoalsByUser, createGoal, deleteGoalByUserAndId, addGoalContribution, listGoalContributions,
   listLiabilitiesByUser, insertLiabilityIdempotent, deleteLiabilityByUserAndId, sumMonthlyPaymentsByUser, repayLiability, listLiabilityRepayments,
@@ -26,6 +27,7 @@ import { createAssistantActions, shiftDate, monthLabel } from './assistantAction
 import { createStructuredExtractor } from './structuredActionExtractor.js';
 import { getChatModel, getParseModel, groqChatUrl, modelRequestFields } from './groqModels.js';
 import { createSnapshotStore, sanitizeAnalysis } from './planSnapshot.js';
+import { createResetDelivery, createDevMailHandlers, createPasswordResetHandlers } from './passwordReset.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -53,11 +55,12 @@ const JWT_VERIFY_OPTIONS = { algorithms: [JWT_ALGORITHM] };
 // ── Authentication Middleware ──────────────────────────────────────────────────
 // Reads the JWT from the httpOnly cookie set at login, verifies it, and attaches
 // the decoded identity to req.user.  Returns 401 for missing / invalid / expired tokens.
-function authenticate(req, res, next) {
+async function authenticate(req, res, next) {
   const token = req.cookies.token;
   if (!token) return res.status(401).json({ error: 'Authentication required' });
   try {
     const decoded = jwt.verify(token, JWT_SECRET, JWT_VERIFY_OPTIONS);
+    if (!await isCurrentSession(decoded.id, decoded.sessionVersion ?? 0)) return res.status(401).json({ error: 'Invalid or expired token' });
     req.user = { id: decoded.id, email: decoded.email };
     next();
   } catch {
@@ -612,6 +615,24 @@ const actionLimiter = perUserLimiter(30, 'assistant action');
 // ───────────────────────────────────────────────────────────────────────────────
 
 // --- AUTHENTICATION ---
+const resetLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5, standardHeaders: true, legacyHeaders: false,
+  message: { error: 'Too many password recovery attempts. Please try again in 15 minutes.' } });
+// Delivery: Resend by default. PASSWORD_RESET_DELIVERY=local is an explicit, development-only opt-in that captures the email in
+// memory instead (refused when NODE_ENV=production; never a fallback for missing Resend settings).
+const resetDelivery = createResetDelivery(process.env);
+const resetHandlers = createPasswordResetHandlers({
+  issueToken: issuePasswordReset, consumeToken: consumePasswordReset,
+  hashPassword: (password) => bcrypt.hash(password, 10), sendEmail: resetDelivery.sendEmail,
+  reportFailure: () => console.error('Password recovery operation failed')
+});
+app.post('/api/auth/forgot-password', resetLimiter, resetHandlers.forgot);
+app.post('/api/auth/reset-password', authLimiter, resetHandlers.reset);
+if (resetDelivery.capture) {
+  const devMail = createDevMailHandlers({ capture: resetDelivery.capture, env: process.env });
+  app.get('/api/dev/password-reset-mail', devMail.list);
+  app.delete('/api/dev/password-reset-mail', devMail.clear);
+  console.warn('WARNING: password reset emails are CAPTURED LOCALLY, not sent (PASSWORD_RESET_DELIVERY=local, development only).');
+}
 // Users live in PostgreSQL (see ./db). The previous flat file is only read once, at startup,
 // to import existing accounts; nothing writes to it any more.
 const LEGACY_USERS_FILE = path.join(__dirname, 'server_users.json');
@@ -658,7 +679,7 @@ app.post('/api/auth/login', authLimiter, async (req, res) => {
     if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
-    const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { algorithm: JWT_ALGORITHM, expiresIn: '1h' });
+    const token = jwt.sign({ id: user.id, email: user.email, sessionVersion: user.sessionVersion }, JWT_SECRET, { algorithm: JWT_ALGORITHM, expiresIn: '1h' });
     res.cookie('token', token, { httpOnly: true, secure: isProd, sameSite: isProd ? 'strict' : 'lax', maxAge: 60 * 60 * 1000 });
     res.json({ message: 'Logged in successfully', user: { id: user.id, email: user.email } });
   } catch (err) {
@@ -672,11 +693,12 @@ app.post('/api/auth/logout', (req, res) => {
   res.json({ message: 'Logged out successfully' });
 });
 
-app.get('/api/auth/verify', (req, res) => {
+app.get('/api/auth/verify', async (req, res) => {
   const token = req.cookies.token;
   if (!token) return res.status(401).json({ error: 'Not authenticated' });
   try {
     const decoded = jwt.verify(token, JWT_SECRET, JWT_VERIFY_OPTIONS);
+    if (!await isCurrentSession(decoded.id, decoded.sessionVersion ?? 0)) return res.status(401).json({ error: 'Invalid token' });
     res.json({ user: decoded });
   } catch (err) {
     res.status(401).json({ error: 'Invalid token' });

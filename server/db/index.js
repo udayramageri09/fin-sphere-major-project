@@ -35,7 +35,7 @@ function sslConfig(env) {
 function toUser(row) {
   const id = Number(row.id);
   if (!Number.isSafeInteger(id)) throw new Error('users.id is outside the safe integer range');
-  return { id, email: row.email, passwordHash: row.password_hash };
+  return { id, email: row.email, passwordHash: row.password_hash, sessionVersion: row.session_version ?? 0 };
 }
 
 // Creates the pool, applies the schema and runs the one-time legacy users import.
@@ -131,8 +131,31 @@ export async function createUser(email, passwordHash) {
 }
 
 export async function findUserByEmail(email) {
-  const { rows } = await pool.query('SELECT id, email, password_hash FROM users WHERE email = $1', [email]);
+  const { rows } = await pool.query('SELECT id, email, password_hash, session_version FROM users WHERE email = $1', [email]);
   return rows.length ? toUser(rows[0]) : null;
+}
+
+// The database cooldown limits email flooding even across different client IPs.
+export async function issuePasswordReset(email, tokenHash) {
+  const { rows } = await pool.query(`UPDATE users SET reset_token_hash = $2,
+    reset_token_expires_at = clock_timestamp() + interval '15 minutes', reset_requested_at = clock_timestamp()
+    WHERE email = $1 AND (reset_requested_at IS NULL OR reset_requested_at < clock_timestamp() - interval '1 minute')
+    RETURNING email`, [email, tokenHash]);
+  return rows[0] ?? null;
+}
+
+// Conditional UPDATE serializes consumption, password change and session revocation.
+export async function consumePasswordReset(tokenHash, passwordHash) {
+  const { rowCount } = await pool.query(`UPDATE users SET password_hash = $2,
+    reset_token_hash = NULL, reset_token_expires_at = NULL, session_version = session_version + 1
+    WHERE reset_token_hash = $1 AND reset_token_expires_at > clock_timestamp()`, [tokenHash, passwordHash]);
+  return rowCount === 1;
+}
+
+export async function isCurrentSession(userId, version) {
+  if (!Number.isSafeInteger(userId) || !Number.isSafeInteger(version) || version < 0) return false;
+  const { rowCount } = await pool.query('SELECT 1 FROM users WHERE id = $1 AND session_version = $2', [userId, version]);
+  return rowCount === 1;
 }
 
 // ── Transactions ───────────────────────────────────────────────────────────────

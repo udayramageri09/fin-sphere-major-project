@@ -13,6 +13,15 @@ export const useAuth = () => {
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:5000/api';
 
+export async function passwordRecovery(endpoint, body) {
+  const res = await fetch(`${API_URL}/auth/${endpoint}`, {
+    method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Password recovery failed');
+  return data.message;
+}
+
 export const AuthProvider = ({ children }) => {
   // 'checking' | 'authenticated' | 'unauthenticated'
   const [status, setStatus] = useState('checking');

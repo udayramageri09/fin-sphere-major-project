@@ -17,6 +17,13 @@ CREATE TABLE IF NOT EXISTS users (
   CONSTRAINT users_password_is_bcrypt CHECK (password_hash ~ '^\$2[aby]\$[0-9]{2}\$.{53}$')
 );
 
+-- Password recovery: only a digest is persisted; one active link per user.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token_hash TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token_expires_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_requested_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS session_version INTEGER NOT NULL DEFAULT 0;
+CREATE UNIQUE INDEX IF NOT EXISTS users_reset_token_hash_idx ON users(reset_token_hash) WHERE reset_token_hash IS NOT NULL;
+
 -- Records one-off data migrations (e.g. the import of server_users.json) so they run once.
 CREATE TABLE IF NOT EXISTS schema_migrations (
   name       TEXT PRIMARY KEY,

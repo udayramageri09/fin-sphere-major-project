@@ -1,10 +1,12 @@
 import { useState } from 'react';
 import { AlertCircle, Loader2 } from 'lucide-react';
-import { useAuth } from '../context/AuthContext';
+import { useAuth, passwordRecovery } from '../context/AuthContext';
 
-function AuthPage() {
+function AuthPage({ resetToken = null }) {
   const { login, register, authMessage, clearAuthMessage } = useAuth();
-  const [mode, setMode] = useState('login'); // 'login' | 'register'
+  const [mode, setMode] = useState(resetToken !== null ? 'reset' : 'login');
+  const [message, setMessage] = useState('');
+  const [confirmation, setConfirmation] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [localError, setLocalError] = useState('');
@@ -13,12 +15,24 @@ function AuthPage() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLocalError('');
+    setMessage('');
     setIsSubmitting(true);
     try {
-      if (mode === 'login') {
+      if (mode === 'forgot') {
+        setMessage(await passwordRecovery('forgot-password', { email }));
+      } else if (mode === 'reset') {
+        if (password !== confirmation) throw new Error('Passwords do not match');
+        setMessage(await passwordRecovery('reset-password', { token: resetToken, password }));
+        setPassword('');
+        setConfirmation('');
+        setMode('login');
+        // Reset revokes this browser's old cookie too; refresh after the user reads success.
+      } else if (mode === 'login') {
         await login(email, password);
+        if (resetToken !== null) window.location.reload();
       } else {
         await register(email, password);
+        if (resetToken !== null) window.location.reload();
       }
     } catch (err) {
       setLocalError(err.message);
@@ -30,6 +44,9 @@ function AuthPage() {
   const toggleMode = () => {
     setMode(mode === 'login' ? 'register' : 'login');
     setLocalError('');
+    setMessage('');
+    setPassword('');
+    setConfirmation('');
     clearAuthMessage();
   };
 
@@ -43,7 +60,8 @@ function AuthPage() {
           <h1 className="text-xl font-bold tracking-tight-display text-zinc-900">FinSphere</h1>
         </div>
 
-        <h2 className="widget-title">{mode === 'login' ? 'Log in' : 'Create an account'}</h2>
+        <h2 className="widget-title">{({ login: 'Log in', register: 'Create an account', forgot: 'Forgot password', reset: 'Reset password' })[mode]}</h2>
+        {message && <p role="status" className="mb-4 text-sm text-zinc-700">{message}</p>}
 
         {displayError && (
           <div className="flex items-start gap-2 mb-4 px-3 py-2 rounded-xl bg-zinc-100 border border-zinc-200 text-sm text-zinc-700">
@@ -53,7 +71,7 @@ function AuthPage() {
         )}
 
         <form onSubmit={handleSubmit} className="flex flex-col gap-3">
-          <div className="flex flex-col gap-1">
+          {mode !== 'reset' && <div className="flex flex-col gap-1">
             <label htmlFor="auth-email" className="text-xs font-medium text-zinc-500">Email</label>
             <input
               id="auth-email"
@@ -65,15 +83,15 @@ function AuthPage() {
               className="w-full px-3 py-2 rounded-xl border border-zinc-200 text-sm text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900/20"
               placeholder="you@example.com"
             />
-          </div>
+          </div>}
 
-          <div className="flex flex-col gap-1">
+          {mode !== 'forgot' && <div className="flex flex-col gap-1">
             <label htmlFor="auth-password" className="text-xs font-medium text-zinc-500">Password</label>
             <input
               id="auth-password"
               type="password"
               required
-              minLength={mode === 'register' ? 8 : undefined}
+              minLength={mode === 'register' || mode === 'reset' ? 8 : undefined}
               autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
@@ -83,7 +101,13 @@ function AuthPage() {
             {mode === 'register' && (
               <span className="text-xs text-zinc-400">Must be at least 8 characters.</span>
             )}
-          </div>
+          </div>}
+          {mode === 'reset' && <div className="flex flex-col gap-1">
+            <label htmlFor="auth-confirm-password" className="text-xs font-medium text-zinc-500">Confirm new password</label>
+            <input id="auth-confirm-password" type="password" required autoComplete="new-password" value={confirmation}
+              onChange={(e) => setConfirmation(e.target.value)} className="w-full px-3 py-2 rounded-xl border border-zinc-200 text-sm" />
+            <span className="text-xs text-zinc-400">At least 8 characters; maximum 72 UTF-8 bytes.</span>
+          </div>}
 
           <button
             type="submit"
@@ -91,12 +115,15 @@ function AuthPage() {
             className="mt-2 w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium bg-zinc-900 text-white hover:bg-zinc-800 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
           >
             {isSubmitting && <Loader2 size={16} className="animate-spin" />}
-            {mode === 'login' ? 'Log in' : 'Register'}
+            {({ login: 'Log in', register: 'Register', forgot: 'Send reset link', reset: 'Reset password' })[mode]}
           </button>
         </form>
+        {mode === 'login' && <button type="button" disabled={isSubmitting} onClick={() => { setMode('forgot'); setLocalError(''); setMessage(''); setPassword(''); clearAuthMessage(); }}
+          className="mt-4 w-full text-center text-sm text-zinc-500 hover:text-zinc-900">Forgot password?</button>}
 
         <button
           type="button"
+          disabled={isSubmitting}
           onClick={toggleMode}
           className="mt-4 w-full text-center text-sm text-zinc-500 hover:text-zinc-900 transition-colors"
         >
