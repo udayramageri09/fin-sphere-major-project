@@ -219,6 +219,9 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
   const applyTransactionCreated = (txn) => setTransactions(prev => (prev.some(t => t.id === txn.id) ? prev : [txn, ...prev]));
   const applyGoalUpdated = (goal) => setGoals(prev => prev.map(g => (g.id === goal.id ? goal : g)));
   const applyLiabilityUpdated = (liability) => setLiabilities(prev => prev.map(l => (l.id === liability.id ? liability : l)));
+  // A NEW liability (manual form or a confirmed assistant action): newest first, and never twice (a replayed confirmation
+  // returns the same stored liability, so its id is already there).
+  const applyLiabilityCreated = (liability) => setLiabilities(prev => (prev.some(l => l.id === liability.id) ? prev : [liability, ...prev]));
 
   const addTransaction = async (txn) => {
     setError(null);
@@ -347,7 +350,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     }
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || 'Failed to add liability');
-    setLiabilities(prev => [data, ...prev]);
+    applyLiabilityCreated(data);
     return data;
   };
 
@@ -500,7 +503,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     }
     if (data.transaction) applyTransactionCreated(data.transaction);
     if (data.goal) applyGoalUpdated(data.goal);
-    if (data.liability) applyLiabilityUpdated(data.liability);
+    if (data.liability) (data.kind === 'create_liability' ? applyLiabilityCreated : applyLiabilityUpdated)(data.liability);
     if (data.budget) await applyBudgetSaved(data.budget);
     return data;
   };

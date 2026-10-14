@@ -16,7 +16,7 @@ import {
   initDatabase, closeDatabase, createUser, findUserByEmail, normalizeEmail, DuplicateEmailError,
   listTransactionsByUser, createTransaction, createTransactionsBatch, deleteTransactionByUserAndId,
   listGoalsByUser, createGoal, deleteGoalByUserAndId, addGoalContribution, listGoalContributions,
-  listLiabilitiesByUser, createLiability, deleteLiabilityByUserAndId, sumMonthlyPaymentsByUser, repayLiability, listLiabilityRepayments,
+  listLiabilitiesByUser, insertLiabilityIdempotent, deleteLiabilityByUserAndId, sumMonthlyPaymentsByUser, repayLiability, listLiabilityRepayments,
   getEmergencyFundByUser, upsertEmergencyFund, getTransactionTotalsByUser,
   listBudgetsByUserAndMonth, upsertBudget, deleteBudgetByUserAndId,
   getActiveProposal, replaceActiveProposal, getProposalByUserAndId, claimProposal, finishProposal, cancelProposal,
@@ -734,6 +734,21 @@ async function addGoalContributionFor(userId, goalId, body) {
   return { ok: true, goal: outcome.goal, contribution: outcome.contribution };
 }
 
+// The ONE way a liability is created: the manual route and a confirmed assistant action both call this. It validates
+// with normalizeLiabilityInput (every field required, nothing defaulted), stamps the owner from the caller's verified id
+// and inserts under `id` at most once (a repeat with the same id returns the existing row instead of a second one).
+async function createLiabilityFor(userId, body, { id = randomUUID() } = {}) {
+  const result = normalizeLiabilityInput(body);
+  if (!result.ok) return { ok: false, status: 400, error: result.error };
+  const stored = await insertLiabilityIdempotent({
+    id,
+    userId, // ownership: always the verified session user, never from the body
+    ...result.value,
+    createdAt: new Date().toISOString()
+  });
+  return { ok: true, liability: stored.liability, created: stored.created };
+}
+
 async function repayLiabilityFor(userId, liabilityId, body) {
   const result = normalizeRepaymentInput(body);
   if (!result.ok) return { ok: false, status: 400, error: result.error };
@@ -897,24 +912,16 @@ app.get('/api/liabilities', authenticate, async (req, res) => {
 
 // POST /api/liabilities - validate first; nothing is written on a 400
 app.post('/api/liabilities', authenticate, async (req, res) => {
-  const result = normalizeLiabilityInput(req.body);
-  if (!result.ok) {
-    return res.status(400).json({ error: result.error });
-  }
-
-  const liability = {
-    id: randomUUID(),
-    userId: req.user.id, // ownership stamp: always from the verified JWT, never from req.body
-    ...result.value,
-    createdAt: new Date().toISOString()
-  };
-
+  let out;
   try {
-    await createLiability(liability);
+    out = await createLiabilityFor(req.user.id, req.body);   // owner: always from the verified JWT; a fresh id per request
   } catch (err) {
     return respondDbError(res, err, 'Could not save liability');
   }
-  res.status(201).json(liability);
+  if (!out.ok) {
+    return res.status(out.status).json({ error: out.error });
+  }
+  res.status(201).json(out.liability);
 });
 
 // DELETE /api/liabilities/:id - exactly one liability, and only one owned by the caller
@@ -1590,6 +1597,7 @@ const assistantActions = createAssistantActions({
   normalizeContributionInput,
   normalizeRepaymentInput,
   normalizeBudgetInput,
+  normalizeLiabilityInput,
   formatRupees,
   // Optional language-model FALLBACK for messages the deterministic parser does not understand (Issue #77). It can only
   // describe the message; every value is re-derived from the user's words and the usual preview + confirmation follows.
@@ -1639,6 +1647,22 @@ async function executeProposal(userId, proposal) {
         message: `Done. I recorded a ${formatRupees(out.repayment.amount)} repayment on ${l.name}. Its outstanding balance is now ${formatRupees(l.outstandingAmount)}${l.outstandingAmount === 0 ? ', so it is paid off' : ''}.`,
         liability: l,
         repayment: out.repayment
+      }
+    };
+  }
+  if (proposal.kind === 'create_liability') {
+    // The same validator and insert as POST /api/liabilities, run again on the stored input. The id was fixed when the
+    // proposal was built, so a repeated execution can never create a second row.
+    const out = await createLiabilityFor(userId, p.input, { id: p.liabilityId });
+    if (!out.ok) return { ok: false, error: out.error };
+    const l = out.liability;
+    return {
+      ok: true,
+      result: {
+        kind: proposal.kind,
+        message: `Done. I added ${l.name} with ${formatRupees(l.outstandingAmount)} outstanding.`,
+        liability: l,
+        created: true
       }
     };
   }

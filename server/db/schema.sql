@@ -228,11 +228,12 @@ BEGIN
     SELECT 1 FROM pg_constraint
     WHERE conname = 'assistant_action_proposals_kind_valid' AND conrelid = 'assistant_action_proposals'::regclass
       AND pg_get_constraintdef(oid) LIKE '%record_liability_repayment%' AND pg_get_constraintdef(oid) LIKE '%set_budget%'
+      AND pg_get_constraintdef(oid) LIKE '%create_liability%'
   ) THEN
     ALTER TABLE assistant_action_proposals DROP CONSTRAINT IF EXISTS assistant_action_proposals_kind_check;
     ALTER TABLE assistant_action_proposals DROP CONSTRAINT IF EXISTS assistant_action_proposals_kind_valid;
     ALTER TABLE assistant_action_proposals ADD CONSTRAINT assistant_action_proposals_kind_valid
-      CHECK (kind IN ('create_transaction', 'contribute_to_goal', 'record_liability_repayment', 'set_budget'));
+      CHECK (kind IN ('create_transaction', 'contribute_to_goal', 'record_liability_repayment', 'set_budget', 'create_liability'));
   END IF;
 END $$;
 

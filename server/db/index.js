@@ -511,6 +511,23 @@ async function insertLiabilities(db, rows) {
 
 export const createLiability = (liability) => insertLiabilities(pool, [liability]);
 
+// Inserts ONE validated liability under a caller-chosen id, at most once: a second call with the same (owner, id)
+// inserts nothing and returns the row that is already there (owner-scoped lookup). This is what makes a confirmed
+// assistant action safe to retry: the proposal carries the id, so even a repeated execution can only ever produce one row.
+//   -> { created: true | false, liability }
+export async function insertLiabilityIdempotent(liability) {
+  const inserted = await pool.query(
+    `INSERT INTO liabilities (id, user_id, name, type, outstanding_amount, interest_rate, monthly_payment, created_at)
+     VALUES ($1, $2, $3, $4, $5::numeric, $6::numeric, $7::numeric, $8::timestamptz)
+     ON CONFLICT (user_id, id) DO NOTHING
+     RETURNING ${LIABILITY_COLUMNS}`,
+    [liability.id, liability.userId, liability.name, liability.type, String(liability.outstandingAmount),
+      String(liability.interestRate), String(liability.monthlyPayment), liability.createdAt]);
+  if (inserted.rows.length) return { created: true, liability: toLiability(inserted.rows[0]) };
+  const { rows } = await pool.query(`SELECT ${LIABILITY_COLUMNS} FROM liabilities WHERE user_id = $1 AND id = $2`, [liability.userId, liability.id]);
+  return { created: false, liability: toLiability(rows[0]) };
+}
+
 // Removes exactly one liability and only one owned by userId (the owner is part of the lookup).
 export async function deleteLiabilityByUserAndId(userId, id) {
   const { rowCount } = await pool.query(

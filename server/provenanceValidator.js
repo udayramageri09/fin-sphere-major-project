@@ -13,6 +13,7 @@
 //
 // Pure functions, no I/O.
 import { chooseAmount, parseMoneyText } from './numberParser.js';
+import { parseLiabilityNumbers, hasRateEvidence, hasPaymentEvidence, parseTermSpan } from './liabilityLanguage.js';
 
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const reject = (reason) => ({ ok: false, reason });
@@ -48,6 +49,73 @@ const MONTH_WORDS = {
   last: /\b(?:last month|previous month)\b/i,
 };
 
+const overlaps = (a, b) => a.start < b.end && b.start < a.end;
+const windowAround = (g, normalized, original) => {
+  const text = g.source === 'normalized' ? normalized : original;
+  return { before: text.slice(Math.max(0, g.start - 40), g.start), after: text.slice(g.end, g.end + 30) };
+};
+
+// Numbers of a new liability. The deterministic role parse (liabilityLanguage.js) is the authority: a model span can fill a
+// role the sentence parse could not, but any disagreement about WHICH number is which becomes a question, not a choice.
+// -> null | { ok: false, reason }; writes fields.liability = { outstanding?, rate?, payment?, term?, conflicts: [] }
+function liabilityProvenance(extraction, { normalized, original, spans, fields, notes }) {
+  const det = parseLiabilityNumbers(normalized);
+  const out = { conflicts: [] };
+  fields.liability = out;
+  const named = ['amount', 'rate', 'payment', 'term'].filter((n) => spans[n]);
+  for (let i = 0; i < named.length; i++) {
+    for (let j = i + 1; j < named.length; j++) {
+      if (overlaps(spans[named[i]].original, spans[named[j]].original)) return reject('overlapping-spans');
+    }
+  }
+  const roleOf = (value) => [['outstanding', det.outstanding], ['payment', det.payment], ['rate', det.rate]].find(([, d]) => d && d.value === value)?.[0];
+
+  // outstanding balance
+  const detOut = det.outstanding?.value;
+  if (extraction.amount) {
+    const parsed = parseMoneyText(extraction.amount.text);
+    if (parsed.status === 'none') return reject('amount-not-a-number');
+    if (parsed.status !== 'ok') { out.conflicts.push('outstanding'); notes.push(`amount-${parsed.status}`); }
+    else if ((detOut !== undefined && detOut !== parsed.value) || (roleOf(parsed.value) && roleOf(parsed.value) !== 'outstanding') || det.issues.outstandingAmbiguous) {
+      out.conflicts.push('outstanding'); notes.push('amount-conflict');
+    } else out.outstanding = parsed.value;
+  } else if (detOut !== undefined) out.outstanding = detOut;
+  if (out.outstanding === undefined && det.issues.outstandingAmbiguous && !out.conflicts.includes('outstanding')) out.outstandingAmbiguous = det.issues.outstandingAmbiguous;
+
+  // interest rate: the span must say it is a rate, and must be 0-100
+  if (extraction.rate) {
+    const w = windowAround(spans.rate, normalized, original);
+    if (!hasRateEvidence(w.before, extraction.rate.text)) return reject('rate-no-evidence');
+    const probe = parseLiabilityNumbers(/%|percent|per\s?cent/i.test(extraction.rate.text) ? extraction.rate.text : `${extraction.rate.text}%`);
+    if (probe.issues.rateInvalid) return reject('rate-out-of-range');
+    if (!probe.rate) return reject('rate-not-a-rate');
+    const value = probe.rate.value;
+    if ((det.rate && det.rate.value !== value) || (roleOf(value) && roleOf(value) !== 'rate' && !det.rate)) { out.conflicts.push('rate'); notes.push('rate-conflict'); }
+    else out.rate = value;
+  } else if (det.rate) out.rate = det.rate.value;
+  if (det.issues.rateInvalid || det.issues.rateAmbiguous) out.rateInvalid = true;
+
+  // monthly payment: must sit next to an EMI / monthly cue
+  if (extraction.payment) {
+    const parsed = parseMoneyText(extraction.payment.text);
+    if (parsed.status === 'none') return reject('payment-not-a-number');
+    const w = windowAround(spans.payment, normalized, original);
+    if (!hasPaymentEvidence(w.before, w.after, extraction.payment.text)) return reject('payment-no-evidence');
+    if (parsed.status !== 'ok') { out.conflicts.push('payment'); notes.push(`payment-${parsed.status}`); }
+    else if ((det.payment && det.payment.value !== parsed.value) || (det.outstanding && det.outstanding.value === parsed.value && !det.payment)) { out.conflicts.push('payment'); notes.push('payment-conflict'); }
+    else out.payment = parsed.value;
+  } else if (det.payment) out.payment = det.payment.value;
+  if (det.issues.paymentAmbiguous) out.paymentAmbiguous = true;
+
+  // term: a length of time, never money; recognised but not stored
+  if (extraction.term) {
+    const term = parseTermSpan(extraction.term.text);
+    if (!term) return reject('term-not-a-term');
+    out.term = term;
+  } else if (det.term) out.term = { n: det.term.n, unit: det.term.unit };
+  return null;
+}
+
 // extraction: a validated object from validateExtraction().
 // context: { original, normalized, toOriginal?, localDate, resolvers: { directionCue(text), findDate(text, localDate), findBudgetMonth(text, localDate), shiftDate(iso, days) } }
 // -> { ok: false, reason } | { ok: true, intent, fields, spans, notes }
@@ -60,7 +128,7 @@ export function validateProvenance(extraction, context) {
 
   const spans = {};
   const notes = [];
-  for (const name of ['amount', 'title', 'target', 'date', 'month']) {
+  for (const name of ['amount', 'title', 'target', 'date', 'month', 'rate', 'payment', 'term']) {
     const f = extraction[name];
     if (!f) continue;
     const g = groundSpan(f.text, where);
@@ -71,7 +139,10 @@ export function validateProvenance(extraction, context) {
   const fields = {};
 
   // amount: re-parsed from the user's words; never the model's number
-  if (extraction.amount) {
+  if (extraction.intent === 'create_liability') {
+    const bad = liabilityProvenance(extraction, { normalized, original, spans, fields, notes });
+    if (bad) return bad;
+  } else if (extraction.amount) {
     const parsed = parseMoneyText(extraction.amount.text);
     if (parsed.status === 'none') return reject('amount-not-a-number');
     if (parsed.status === 'ok') {

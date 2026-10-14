@@ -12,7 +12,11 @@
 import { randomUUID } from 'node:crypto';
 import { findAmounts, chooseAmount, scanAmounts } from './numberParser.js';
 import { normalizeActionText, describeCorrections } from './actionNormalization.js';
-import { fuzzyCandidates } from './entityMatcher.js';
+import { fuzzyCandidates, normalizeName } from './entityMatcher.js';
+import {
+  extractLiabilityCreation, parseLiabilityEdit, parseTypeAnswer, parseRateAnswer, parsePaymentAnswer,
+  parseOutstandingAnswer, liabilityName, liabilityTypeOf, extractLender, isAddAnotherAnswer, liabilityCreationCueLoose, TYPE_LABEL, REFUSE_MESSAGE,
+} from './liabilityLanguage.js';
 import { validateProvenance } from './provenanceValidator.js';
 
 export const PROPOSAL_TTL_SECONDS = 180;
@@ -42,6 +46,7 @@ export const CONFIRM_PHRASES = [
 export const CANCEL_PHRASES = [
   'no', 'nope', 'nah', 'cancel', 'cancel it', 'stop', "don't", 'dont', "don't add it", 'dont add it', 'never mind',
   'nevermind', 'forget it', 'leave it', 'no thanks', 'no thank you', 'no cancel', 'nahi', 'nahin', 'abort', 'discard it',
+  "actually don't add it", 'actually dont add it', "don't create it", 'dont create it', 'cancel that',
 ];
 const YES = new Set(CONFIRM_PHRASES);
 const NO = new Set(CANCEL_PHRASES);
@@ -426,15 +431,15 @@ export function directionCue(text) {
 
 // Is this message worth a language-model reading at all? Not a question, not advice-seeking, has something money-like and
 // an action word. Normal financial questions never reach the extractor.
-const ACTION_CUE = /\b(?:pay|paid|repay|repaid|repayment|spend|spent|received|receive|earned|salary|budget|limit|loan|emi|goal|save|saved|put|gave|give|given|set|make|add|record|log|contribute|deposit)\b/i;
-const CHATTY = /\b(?:should|advise|advice|suggest|recommend|tips?|why|what|how|which|can i|could i|would|plan|help me|tell me|explain|show|compare)\b/i;
+const ACTION_CUE = /\b(?:pay|paid|repay|repaid|repayment|spend|spent|received|receive|earned|salary|budget|limit|loan|emi|goal|save|saved|put|gave|give|given|set|make|add|create|record|log|contribute|deposit|owe|owed|took|borrowed|borrow|debt)\b/i;
+const CHATTY = /\b(?:should|advise|advice|suggest|recommend|tips?|why|what|how|can i|could i|would|plan|help me|tell me|explain|show|compare)\b/i;
 export function looksLikeActionAttempt(text) {
   const t = stripPolite(text);
   if (!t || t.length > 200 || isQuestion(t) || CHATTY.test(t)) return false;
   return hasMoney(t) && ACTION_CUE.test(t);
 }
 // Stricter: the message OPENS like an instruction or a first-person payment, so a hint is better than silence.
-const OPENS_LIKE_ACTION = /^(?:i\s+)?(?:'ve\s+|have\s+|just\s+|already\s+|want\s+to\s+|need\s+to\s+)*(?:paid|pay|repaid|repay|spent|spend|gave|give|put|add|record|log|set|make|save|contribute|deposit|received|earned|got)\b/i;
+const OPENS_LIKE_ACTION = /^(?:i\s+)?(?:'ve\s+|have\s+|just\s+|already\s+|want\s+to\s+|need\s+to\s+)*(?:paid|pay|repaid|repay|spent|spend|gave|give|put|add|create|record|log|set|make|save|contribute|deposit|received|earned|got)\b|^(?:i|we)(?:'ve|\s+have|\s+owe|\s+took|\s+borrowed)\b/i;
 export function clearlyAnAction(text) {
   const t = stripPolite(text);
   return looksLikeActionAttempt(t) && (OPENS_LIKE_ACTION.test(t) || BARE_BUDGET.test(t));
@@ -537,7 +542,7 @@ export const parseEdit = (text, kind) => (EDITORS[kind] ? EDITORS[kind](text) : 
 const NOT_HANDLED = { handled: false };
 
 export function createAssistantActions(deps) {
-  const { db, normalizeTransactionInput, normalizeContributionInput, normalizeRepaymentInput, normalizeBudgetInput, formatRupees } = deps;
+  const { db, normalizeTransactionInput, normalizeContributionInput, normalizeRepaymentInput, normalizeBudgetInput, normalizeLiabilityInput, formatRupees } = deps;
   const ttlSeconds = deps.ttlSeconds ?? PROPOSAL_TTL_SECONDS;
   const MAX_ATTEMPTS = 2;
 
@@ -932,6 +937,184 @@ export function createAssistantActions(deps) {
     return buildRepaymentProposal({ ...ctx, preface: '' }, liability, fields.amount, fields);
   }
 
+  // ═════════════ create_liability (Issue #79) ═════════════
+  // All five fields are required and never defaulted (the manual route's rule): the name is generated from the user's own
+  // words, the rest is stated or asked. A stated 0 for the rate or the payment is a real value.
+  const TYPE_QUESTION = 'What kind of liability is it: home loan, personal loan, vehicle loan, education loan, credit card or other?';
+  const SOFT_NO = new Set(['no', 'nope', 'nah', 'nahi', 'nahin']);
+  const sameName = (a, b) => normalizeName(a) === normalizeName(b);
+  const rupeeList = (values) => (values.length === 2 ? `${formatRupees(values[0])} or ${formatRupees(values[1])}` : `${values.slice(0, -1).map(formatRupees).join(', ')} or ${formatRupees(values.at(-1))}`);
+
+  async function advanceLiability(ctx, fields, attempts = 0) {
+    const f = { ...fields };
+    const ask = (stage, question) => askDraft(ctx, 'create_liability', { kind: 'create_liability', stage, fields: f, attempts }, question);
+    const existing = await db.listLiabilitiesByUser(ctx.userId);
+    let name = f.nameGiven ?? (f.type ? liabilityName(f) : null);
+
+    // 1. an existing liability with the same name: never merged, never renamed, asked about
+    if (name && !f.dupConfirmed) {
+      const dup = existing.find((l) => sameName(l.name, name));
+      if (dup) return ask('duplicate', `You already have “${dup.name}” with ${formatRupees(dup.outstandingAmount)} outstanding. Add another liability with the same name?`);
+    }
+    // 2. type
+    if (!f.type) {
+      const lead = f.ambiguousType === 'card' ? 'By “card” do you mean a credit card? ' : '';
+      return ask('type', `${lead}${TYPE_QUESTION}`);
+    }
+    name = f.nameGiven ?? liabilityName(f);
+    if (!f.dupConfirmed && existing.some((l) => sameName(l.name, name))) {
+      const dup = existing.find((l) => sameName(l.name, name));
+      return ask('duplicate', `You already have “${dup.name}” with ${formatRupees(dup.outstandingAmount)} outstanding. Add another liability with the same name?`);
+    }
+    // "I owe ₹1.2 lakh on my education loan" when they already have one: this may be a balance they want updated.
+    // That is only plausible when the request does not set the new liability apart: a stated lender ("HD Bank") that the
+    // existing liability's name does not contain, or a name the user chose, or a duplicate they already agreed to add, all
+    // mean "a different liability", so an unrelated generic "Home Loan" is not a reason to ask.
+    const lenderKey = f.lender ? normalizeName(f.lender) : '';
+    const setApart = (l) => Boolean(f.nameGiven) || f.dupConfirmed || (lenderKey && !` ${normalizeName(l.name)} `.includes(` ${lenderKey} `));
+    if (f.cue === 'possession' && !f.separateOk) {
+      const same = existing.find((l) => l.type === f.type && l.outstandingAmount > 0 && !setApart(l));
+      if (same) {
+        return ask('separate', `You already have “${same.name}” (${formatRupees(same.outstandingAmount)} outstanding). I can't change a balance from chat yet. Add a separate liability?`);
+      }
+    }
+    // 3. outstanding balance
+    if (f.outstandingAmbiguous?.length) return ask('outstanding', `Which of these is the amount you still owe: ${rupeeList(f.outstandingAmbiguous)}?`);
+    if (f.outstandingAmount == null) {
+      const lead = f.amountUnclear ? "I couldn't read that amount exactly. " : '';
+      return ask('outstanding', `${lead}How much is still outstanding on ${name}?`);
+    }
+    // a borrowed amount may be the original principal rather than today's balance
+    if (f.origination && !f.balanceConfirmed) return ask('balance', `Is ${formatRupees(f.outstandingAmount)} what you still owe today?`);
+    // 4. interest rate, 5. monthly payment
+    if (f.interestRate == null) {
+      const lead = f.rateInvalid ? 'The interest rate has to be between 0 and 100. ' : '';
+      return ask('rate', `${lead}What's the annual interest rate on ${name}? Say 0 if there's none.`);
+    }
+    if (f.monthlyPayment == null) {
+      const lead = f.paymentAmbiguous ? 'I found more than one payment amount. ' : '';
+      return ask('payment', `${lead}What's the monthly payment (EMI) on ${name}? Say 0 if there's no fixed payment.`);
+    }
+    return buildLiabilityProposal(ctx, f, name);
+  }
+
+  async function buildLiabilityProposal(ctx, f, name) {
+    const checked = normalizeLiabilityInput({ name, type: f.type, outstandingAmount: f.outstandingAmount, interestRate: f.interestRate, monthlyPayment: f.monthlyPayment });
+    if (!checked.ok) return stopWith(ctx, `I can't add that: ${checked.error}.`);
+    const v = checked.value;
+    const noTerm = f.term ? `The ${f.term.n}-${f.term.unit === 'years' ? 'year' : 'month'} term isn't stored in FinSphere. ` : '';
+    const summary = `I'll add ${v.name}: ${formatRupees(v.outstandingAmount)} outstanding at ${v.interestRate}% a year, ${v.monthlyPayment > 0 ? `with a ${formatRupees(v.monthlyPayment)} monthly payment` : 'with no fixed monthly payment'}. Should I add it?`;
+    const display = [
+      { label: 'Name', value: v.name },
+      { label: 'Type', value: TYPE_LABEL[v.type] },
+      { label: 'Outstanding balance', value: formatRupees(v.outstandingAmount) },
+      { label: 'Interest rate', value: `${v.interestRate}% per year` },
+      { label: 'Monthly payment', value: v.monthlyPayment > 0 ? formatRupees(v.monthlyPayment) : '₹0 (no fixed payment)' },
+      { label: 'Note', value: `${noTerm}Adds a liability only; no transaction is created.` },
+    ];
+    const keep = { ...f };
+    for (const k of ['outstandingAmbiguous', 'amountUnclear', 'rateInvalid', 'paymentAmbiguous', 'ambiguousType']) delete keep[k];
+    return propose(ctx, 'create_liability',
+      { kind: 'create_liability', liabilityId: randomUUID(), input: v, fields: keep, shortLabel: `${v.name} liability` },
+      summary, display);
+  }
+
+  // Turns what extractLiabilityCreation found into draft fields. Nothing is defaulted.
+  function liabilityFieldsFrom(ex) {
+    const f = { cue: ex.cue, origination: ex.origination };
+    if (ex.type) { f.type = ex.type; f.typeWords = ex.typeWords; }
+    if (ex.ambiguousType) f.ambiguousType = ex.ambiguousType;
+    if (ex.lender) f.lender = ex.lender;
+    const n = ex.numbers;
+    if (n.outstanding) f.outstandingAmount = n.outstanding.value;
+    if (n.rate) f.interestRate = n.rate.value;
+    if (n.payment) f.monthlyPayment = n.payment.value;
+    if (n.term) f.term = { n: n.term.n, unit: n.term.unit };
+    if (n.issues.outstandingAmbiguous) f.outstandingAmbiguous = n.issues.outstandingAmbiguous;
+    if (n.issues.rateInvalid || n.issues.rateAmbiguous) f.rateInvalid = true;
+    if (n.issues.paymentAmbiguous) f.paymentAmbiguous = true;
+    if (n.issues.amountUnclear) f.amountUnclear = true;
+    return f;
+  }
+
+  async function startLiability(ctx, t) {
+    const ex = extractLiabilityCreation(t);
+    if (!ex) return null;
+    return advanceLiability(ctx, liabilityFieldsFrom(ex));
+  }
+
+  async function continueLiabilityDraft(ctx, text, p) {
+    const f = { ...p.fields };
+    const yn = parseYesNo(text);
+    switch (p.stage) {
+      case 'type': {
+        const ty = parseTypeAnswer(text);
+        if (!ty) return retryOrGiveUp(ctx, p);
+        f.type = ty.type; delete f.typeWords; delete f.ambiguousType;
+        return advanceLiability(ctx, f);
+      }
+      case 'duplicate': {
+        if (yn === 'yes' || isAddAnotherAnswer(text)) { f.dupConfirmed = true; return advanceLiability(ctx, f); }
+        const edit = parseLiabilityEdit(text);
+        if (edit?.patch?.nameGiven) { f.nameGiven = edit.patch.nameGiven; delete f.dupConfirmed; return advanceLiability(ctx, f); }
+        return retryOrGiveUp(ctx, p);
+      }
+      case 'separate': {
+        if (yn === 'yes' || isAddAnotherAnswer(text)) { f.separateOk = true; return advanceLiability(ctx, f); }
+        return retryOrGiveUp(ctx, p);
+      }
+      case 'outstanding': {
+        const ord = /^(?:the\s+)?(first|second|1st|2nd|1|2)(?:\s+one)?[.!]?$/i.exec(stripPolite(text));
+        if (ord && f.outstandingAmbiguous?.length) {
+          f.outstandingAmount = f.outstandingAmbiguous[/^(?:first|1st|1)$/i.test(ord[1]) ? 0 : 1];
+          if (f.outstandingAmount == null) return retryOrGiveUp(ctx, p);
+          delete f.outstandingAmbiguous; delete f.amountUnclear;
+          return advanceLiability(ctx, f);
+        }
+        const o = parseOutstandingAnswer(text);
+        if (o?.status !== 'ok') return retryOrGiveUp(ctx, p);
+        f.outstandingAmount = o.value; f.balanceConfirmed = true;
+        delete f.outstandingAmbiguous; delete f.amountUnclear;
+        return advanceLiability(ctx, f);
+      }
+      case 'balance': {
+        if (yn === 'yes') { f.balanceConfirmed = true; return advanceLiability(ctx, f); }
+        const o = parseOutstandingAnswer(text);
+        if (o?.status === 'ok') { f.outstandingAmount = o.value; f.balanceConfirmed = true; return advanceLiability(ctx, f); }
+        if (SOFT_NO.has(clean(text))) {
+          delete f.outstandingAmount; f.balanceConfirmed = true;
+          return advanceLiability(ctx, f);
+        }
+        return retryOrGiveUp(ctx, p);
+      }
+      case 'rate': {
+        const r = parseRateAnswer(text);
+        if (r?.status === 'ok') { f.interestRate = r.value; delete f.rateInvalid; return advanceLiability(ctx, f); }
+        if (r?.status === 'invalid') { f.rateInvalid = true; return advanceLiability(ctx, f, p.attempts); }
+        return retryOrGiveUp(ctx, p);
+      }
+      case 'payment': {
+        const pay = parsePaymentAnswer(text);
+        if (pay?.status === 'ok') { f.monthlyPayment = pay.value; delete f.paymentAmbiguous; return advanceLiability(ctx, f); }
+        if (pay?.status === 'many') { f.paymentAmbiguous = true; return advanceLiability(ctx, f, p.attempts); }
+        return retryOrGiveUp(ctx, p);
+      }
+      default:
+        return retryOrGiveUp(ctx, p);
+    }
+  }
+
+  async function editLiability(ctx, text, p, edit) {
+    const stay = (msg) => handled(msg, view(ctx.active, 'pending'));
+    if (edit.refuse) return stay(REFUSE_MESSAGE[edit.refuse]);
+    if (edit.termNotStored) return stay("The loan term isn't stored in FinSphere, so I've left the proposal as it is.");
+    if (edit.rateInvalid) return stay('The interest rate has to be between 0 and 100. Nothing changed.');
+    if (edit.ambiguous) return stay('I found more than one amount. Please tell me the one you want, or cancel.');
+    const f = { ...p.fields, ...edit.patch };
+    if (edit.patch.nameGiven) delete f.dupConfirmed;
+    return advanceLiability({ ...ctx, preface: '' }, f);
+  }
+
   // ═════════════ set_budget ═════════════
   const paise = (n) => Math.round(Number(n) * 100);   // exact integer paise for the 2-decimal amounts the database holds
   const SAFE_PAISE = 1e12;                              // above this (a trillion rupees) skip the derived lines rather than risk precision
@@ -1088,6 +1271,15 @@ export function createAssistantActions(deps) {
   //   parseEdit      this kind's own edit grammar ("make it ₹600", "for next month", ...)
   //   edit           apply an edit and show a NEW preview
   const KINDS = {
+    create_liability: {
+      draftLabel: 'unfinished liability',
+      matches: (t) => extractLiabilityCreation(t) !== null,
+      start: startLiability,
+      continueDraft: continueLiabilityDraft,
+      retry: (ctx, p, attempts) => advanceLiability(ctx, p.fields, attempts),
+      parseEdit: parseLiabilityEdit,
+      edit: editLiability,
+    },
     create_transaction: {
       draftLabel: 'unfinished transaction',
       matches: (t) => looksLikeTransaction(t),
@@ -1127,7 +1319,7 @@ export function createAssistantActions(deps) {
   };
   // Order matters: loans / EMIs and budgets are claimed before goals ("Add ₹5,000 to my car loan" is not a goal), and the
   // broad transaction reading comes last.
-  const START_ORDER = ['record_liability_repayment', 'set_budget', 'contribute_to_goal', 'create_transaction'];
+  const START_ORDER = ['create_liability', 'record_liability_repayment', 'set_budget', 'contribute_to_goal', 'create_transaction'];
 
   function labelOf(p) {
     return p.payload?.shortLabel ?? KINDS[p.kind]?.draftLabel ?? 'unfinished request';
@@ -1157,11 +1349,17 @@ export function createAssistantActions(deps) {
 
     // The intent must be supported by the user's own words, or by one of THEIR entities that the phrase resolves to.
     const lexical = [];
-    if (LIAB_NOUN.test(text)) lexical.push('record_liability_repayment');
+    // a creation / possession / borrowing sentence is NOT a repayment just because it says "loan" (Issue #79)
+    const creating = liabilityCreationCueLoose(text);
+    if (LIAB_NOUN.test(text) || creating) lexical.push(creating ? 'create_liability' : 'record_liability_repayment');
     if (BUDGET_WORD.test(text) || /\blimit\b/i.test(text)) lexical.push('set_budget');
     if (/\bgoals?\b/i.test(text)) lexical.push('contribute_to_goal');
     if (lexical.length > 1) return askWhichAction(ctx);
-    if (lexical.length === 1 && lexical[0] !== ex.intent) return askWhichAction(ctx);
+    if (lexical.length === 1 && lexical[0] !== ex.intent) {
+      if (lexical[0] === 'create_liability' || ex.intent === 'create_liability') return handled(withNotice(ctx.preface, 'Do you want to add a new liability, or record a repayment on an existing one?'));
+      return askWhichAction(ctx);
+    }
+    if (ex.intent === 'create_liability' && !lexical.length) return askWhichAction(ctx);
 
     const target = f.targetText ?? '';
     const fieldsCommon = {};
@@ -1185,6 +1383,24 @@ export function createAssistantActions(deps) {
       if (!lexical.length && !(target && nearGoalMatches(goals, cleanGoalPhrase(target)).length)) return askWhichAction(ctx);
       const rawPhrase = target.replace(/^(?:my|the|our)\s+/i, '');
       return advanceGoal(ctx, { ...fieldsCommon, namePhrase: cleanGoalPhrase(target), rawPhrase }, goals);
+    }
+    if (ex.intent === 'create_liability') {
+      const L = f.liability ?? { conflicts: [] };
+      const typed = liabilityTypeOf(`${target} ${text}`) ?? liabilityTypeOf(text);
+      const lf = { cue: 'create' };
+      if (typed?.type) { lf.type = typed.type; lf.typeWords = typed.typeWords; }
+      else if (typed?.ambiguous) lf.ambiguousType = typed.ambiguous;
+      const lender = extractLender(text, typed?.index ?? LIAB_NOUN.exec(text)?.index);
+      if (lender) lf.lender = lender;
+      if (L.outstanding != null) lf.outstandingAmount = L.outstanding;
+      if (L.outstandingAmbiguous) lf.outstandingAmbiguous = L.outstandingAmbiguous;
+      if (L.conflicts.includes('outstanding')) lf.amountUnclear = true;
+      if (L.rate != null) lf.interestRate = L.rate;
+      if (L.rateInvalid || L.conflicts.includes('rate')) lf.rateInvalid = true;
+      if (L.payment != null) lf.monthlyPayment = L.payment;
+      if (L.paymentAmbiguous || L.conflicts.includes('payment')) lf.paymentAmbiguous = true;
+      if (L.term) lf.term = L.term;
+      return advanceLiability(ctx, lf);
     }
     if (ex.intent === 'record_liability_repayment') {
       const liabilities = await db.listLiabilitiesByUser(ctx.userId);
@@ -1243,7 +1459,7 @@ export function createAssistantActions(deps) {
     const parts = [];
     const fixed = describeCorrections(corrections);
     if (fixed) parts.push(fixed);
-    for (const sp of chooseAmount(n.text).spoken ?? []) parts.push(`“${sp.raw}” → ${formatRupees(sp.value)}`);
+    for (const sp of scanAmounts(n.text).found.filter((a) => a.words)) parts.push(`“${sp.raw}” → ${formatRupees(sp.value)}`);
     return { n, corrections, interpreted: parts.join('; ') };
   }
 
@@ -1260,7 +1476,9 @@ export function createAssistantActions(deps) {
     if (!active) return startNew(ctx, text, { allowModel: true });
 
     const yn = parseYesNo(text);
-    if (yn === 'no') {
+    // "Is ₹5,00,000 what you still owe today?" - a plain "no" there means "a different amount", not "forget it"
+    const softNo = yn === 'no' && active.status === 'draft' && active.payload?.stage === 'balance' && SOFT_NO.has(clean(text));
+    if (yn === 'no' && !softNo) {
       const c = await cancelActive(userId, active);
       return handled('Okay, I cancelled that. Nothing was saved.', { proposalId: c.proposalId, kind: c.kind, status: 'cancelled' });
     }
@@ -1282,7 +1500,10 @@ export function createAssistantActions(deps) {
     }
     // A brand-new request, or an unrelated message: the open proposal is cancelled and the user is told.
     const c = await cancelActive(userId, active);
-    const fresh = await startNew({ ...ctx, active: null, preface: c.notice }, text);
+    // Reaching here means the message was not a yes/no, not an edit of a pending proposal and not the answer to an open
+    // question: it is a genuinely NEW request (or unrelated chat). The old proposal is already cancelled, so the new request
+    // gets the same language-model fallback eligibility as when nothing was open. (Mid-conversation turns returned above.)
+    const fresh = await startNew({ ...ctx, active: null, preface: c.notice }, text, { allowModel: true });
     if (fresh.handled) return fresh;
     return { handled: false, cancelNotice: c.notice, action: { proposalId: c.proposalId, kind: c.kind, status: 'cancelled' } };
   }
