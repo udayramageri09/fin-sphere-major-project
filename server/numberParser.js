@@ -257,6 +257,7 @@ function scanWords(text, relaxed) {
   return { found, unclear };
 }
 
+const PERCENT_AFTER = /^\s*(?:%|per\s?cent\b|percent\b)/i;
 const DANGLING_AFTER = /^\s*(?:and\s+(?:a\s+)?(?:half|quarter)\b|(?:a\s+)?(?:half|quarter)\b)/i;
 const HALF_SCALE_AFTER = /^\s+and\s+(?:a\s+)?half\s+(k|hundred|thousand|lakhs?|lacs?|crores?)\b/i;
 const UNSUPPORTED_AFTER = /^\s*(?:million|billion|trillion|mn|bn|mil)s?\b/i;
@@ -277,6 +278,7 @@ export function scanAmounts(text, { relaxed = false } = {}) {
     const after = masked.slice(end);
     const unit = m[4] ? UNIT[m[4].toLowerCase()] : 1;
     const digits = m[2].replace(/,/g, '');
+    if (PERCENT_AFTER.test(after)) continue;                 // "11.5%" is a rate, never money
     if (!m[4]) {
       const half = HALF_SCALE_AFTER.exec(after);
       if (half) {

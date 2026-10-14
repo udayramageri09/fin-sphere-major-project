@@ -17,6 +17,7 @@ export const CONFIRM_PHRASES = [
 export const CANCEL_PHRASES = [
   'no', 'nope', 'nah', 'cancel', 'cancel it', 'stop', "don't", 'dont', "don't add it", 'dont add it', 'never mind',
   'nevermind', 'forget it', 'leave it', 'no thanks', 'no thank you', 'no cancel', 'nahi', 'nahin', 'abort', 'discard it',
+  "actually don't add it", 'actually dont add it', "don't create it", 'dont create it', 'cancel that',
 ];
 const YES = new Set(CONFIRM_PHRASES);
 const NO = new Set(CANCEL_PHRASES);

@@ -128,7 +128,7 @@ import Goals from '/src/pages/Goals.jsx';
 export function Probe() {
   const f = useFinance();
   globalThis.__finance = f;
-  return h('div', { id: 'probe', 'data-tx': String(f.transactions.length), 'data-tx-first': f.transactions[0]?.title ?? '', 'data-goal': String(f.goals.find((g) => g.id === 'g1')?.currentAmount ?? ''), 'data-liab': String(f.liabilities.find((l) => l.id === 'l1')?.outstandingAmount ?? '') });
+  return h('div', { id: 'probe', 'data-tx': String(f.transactions.length), 'data-tx-first': f.transactions[0]?.title ?? '', 'data-goal': String(f.goals.find((g) => g.id === 'g1')?.currentAmount ?? ''), 'data-liab': String(f.liabilities.find((l) => l.id === 'l1')?.outstandingAmount ?? ''), 'data-liab-count': String(f.liabilities.length), 'data-liab-first': f.liabilities[0]?.name ?? '' });
 }
 export function App({ onView }) {
   const [view, setView] = useState('dashboard');
@@ -760,6 +760,44 @@ try {
   confirmMode = 'ok';
   await settle();
 
+  // C6. create_liability (Issue #79): the card is titled, nothing is written before confirmation, the NEW liability is
+  // prepended (never a replace-only update) and a replayed result does not add it twice
+  const newLiab = (id, name, outstanding) => ({ id, userId: 1, name, type: 'personal_loan', outstandingAmount: outstanding, interestRate: 11.5, monthlyPayment: 9200, createdAt: '2026-10-13T00:00:00.000Z' });
+  const liabCount = () => Number(probe().getAttribute('data-liab-count'));
+  const liabFirst = () => probe().getAttribute('data-liab-first');
+  const createDisplay = [
+    { label: 'Name', value: 'HDFC Personal Loan' }, { label: 'Type', value: 'Personal loan' }, { label: 'Outstanding balance', value: '₹3,00,000' },
+    { label: 'Interest rate', value: '11.5% per year' }, { label: 'Monthly payment', value: '₹9,200' },
+    { label: 'Note', value: 'Adds a liability only; no transaction is created.' }, { label: 'Interpreted', value: '“persnal” → “personal”' },
+  ];
+  const createSummary = "I'll add HDFC Personal Loan: ₹3,00,000 outstanding at 11.5% a year, with a ₹9,200 monthly payment. Should I add it?";
+  const createResult = (id) => ({ kind: 'create_liability', message: 'Done. I added HDFC Personal Loan with ₹3,00,000 outstanding.', liability: newLiab(id, 'HDFC Personal Loan', 300000), created: true });
+  const liabBefore = liabCount();
+  const txBeforeCreate = txCount();
+  const confirmsBeforeCreate = confirmCalls.length;
+  const pc1 = propose('create_liability', createSummary, createDisplay, createResult('l-new-1'));
+  await type('Add my 3 lakh HDFC persnal loan', 120);
+  ok(Boolean(card()) && card().querySelector('.action-card-title').textContent === 'Add liability', 'CREATE LIABILITY: the card is titled "Add liability"', card()?.textContent);
+  ok(cardRows().includes('NameHDFC Personal Loan') && cardRows().includes('Interest rate11.5% per year') && cardRows().includes('Monthly payment₹9,200') && cardRows().some((r) => r.startsWith('Note') && r.includes('no transaction is created')), 'CREATE LIABILITY: the preview shows the five fields and the disclosure', cardRows().join(' | '));
+  ok(liabCount() === liabBefore && confirmCalls.length === confirmsBeforeCreate, 'CREATE LIABILITY: nothing is written before confirmation');
+  await press('.action-card-btn--confirm', card());
+  ok(confirmCalls.at(-1).id === pc1 && confirmCalls.at(-1).body === undefined, 'CREATE LIABILITY: Confirm sends only the proposal id');
+  ok(liabCount() === liabBefore + 1 && liabFirst() === 'HDFC Personal Loan' && txCount() === txBeforeCreate, 'CREATE LIABILITY: the new liability is prepended to shared state; no transaction is added', `${liabCount()} ${liabFirst()}`);
+  ok(transcript().at(-1) === 'B: Done. I added HDFC Personal Loan with ₹3,00,000 outstanding.' && !card(), 'CREATE LIABILITY: the stored message is shown', transcript().at(-1));
+  await settle();
+  // a replayed confirmation returns the same stored liability: applying it again must not add a second row
+  propose('create_liability', createSummary, createDisplay, createResult('l-new-1'));
+  await type('Add my 3 lakh HDFC persnal loan', 120);
+  await press('.action-card-btn--confirm', card());
+  await settle();
+  ok(liabCount() === liabBefore + 1, 'CREATE LIABILITY: applying the same liability again (a replay) does not duplicate it', String(liabCount()));
+  // typed natural cancel
+  propose('create_liability', createSummary, createDisplay, createResult('l-new-2'));
+  await type('Add my 3 lakh HDFC persnal loan', 120);
+  await type("actually don't add it", 120);
+  ok(cancelCalls.length >= 1 && liabCount() === liabBefore + 1 && !card(), 'CREATE LIABILITY: "actually don\'t add it" cancels through the endpoint; nothing written');
+  await settle();
+
   // ── Budgets ──
   const budgetResult = (month, category, amount, created, message) => ({ kind: 'set_budget', message, budget: budgetRow(month, category, amount), created });
   await act(async () => { await globalThis.__finance.fetchBudgets('2026-10'); });
@@ -861,6 +899,15 @@ try {
   await act(async () => { synth.finish(); await tick(30); });
   await act(async () => { say('ok do it', 0.9); await tick(150); });
   ok(confirmCalls.at(-1).id === pv5 && /^Done\. I created the transport budget/.test(replyCaption()), 'VOICE: a spoken "ok do it" confirms exactly like the typed one', replyCaption());
+  await act(async () => { synth.finish(); await tick(30); });
+  // create_liability by voice: "yeah sure" confirms exactly like the typed one
+  const pv9 = propose('create_liability', createSummary, createDisplay, createResult('l-voice-1'));
+  await act(async () => { say('add my 3 lakh HDFC personal loan'); await tick(150); });
+  ok(Boolean(stageCard()) && stageCard().querySelector('.action-card-title').textContent === 'Add liability', 'VOICE LIABILITY: the card is on the stage');
+  await act(async () => { synth.finish(); await tick(30); });
+  const liabVoiceBefore = liabCount();
+  await act(async () => { say('yeah sure', 0.9); await tick(150); });
+  ok(confirmCalls.at(-1).id === pv9 && liabCount() === liabVoiceBefore + 1 && liabFirst() === 'HDFC Personal Loan', 'VOICE LIABILITY: a spoken "yeah sure" confirms; the new liability appears once', `${liabCount()} ${liabFirst()}`);
   await act(async () => { synth.finish(); await tick(30); });
   await click(document.querySelector('.voice-stage-btn--end'));
   ok(!stage(), 'VOICE: the session ends cleanly');

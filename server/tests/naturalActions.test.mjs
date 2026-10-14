@@ -437,7 +437,8 @@ test('schema: a valid extraction passes; everything outside the closed schema re
   const bad = (o) => validateExtraction(okExtraction(o));
   assert.equal(bad({ extra: 1 }).reason, 'unknown-key');
   assert.equal(bad({ intent: 'delete_everything' }).reason, 'unknown-intent');
-  assert.equal(bad({ intent: 'create_liability' }).reason, 'unknown-intent');
+  assert.equal(bad({ intent: 'delete_liability' }).reason, 'unknown-intent');
+  assert.equal(bad({ intent: 'create_liability' }).ok, true, 'create_liability is an allowed intent since Issue #79');
   for (const key of ['id', 'userId', 'goalId', 'liabilityId', 'proposalId', 'confirmed', 'confirmation', 'confirm', 'execute', 'authorization', 'sql', 'endpoint', 'route', 'command', 'tool_call', 'confidence']) {
     assert.match(bad({ [key]: key === 'confidence' ? 0.99 : 'x' }).reason, /^forbidden-key:/, key);
   }
@@ -639,12 +640,70 @@ test('LLM fallback: fails closed - provider trouble, bad output, ungrounded span
   assert.equal(w.proposal, null);
 });
 
-test('LLM fallback: never called while a proposal or a clarification is open', async () => {
-  const w = makeWorld({ liabilities: [loan('l1', 'Bike Loan')], extract: modelSays(okExtraction()) });
+const NEW_REQUEST = 'settling five thousand with the bike loan folks';
+
+test('LLM fallback eligibility: a NEW request is eligible whether or not a proposal was open; mid-conversation turns never are', async () => {
+  const world = { liabilities: [loan('l1', 'Bike Loan')] };
+  const answer = modelSays(okExtraction({ intent: 'record_liability_repayment', amount: { text: 'five thousand' }, target: { text: 'bike loan' } }));
+
+  // a) nothing open: eligible
+  let w = makeWorld({ ...world, extract: answer });
+  await w.say(NEW_REQUEST);
+  assert.equal(w.calls.extract, 1, 'no proposal open: the extractor may run');
+  assert.equal(w.last.action.kind, 'record_liability_repayment');
+  assert.equal(w.last.action.status, 'pending');
+
+  // b) a proposal is open and the message is a clearly NEW request: old one cancelled (with its notice), extractor may run
+  w = makeWorld({ ...world, extract: answer });
   await w.say('add 450 for lunch');
-  await w.say('settling five thousand with the bike loan folks');
+  const oldId = w.last.action.proposalId;
+  assert.equal(w.calls.extract, 0);
+  await w.say(NEW_REQUEST);
+  assert.equal(w.calls.extract, 1, 'the replacing request is eligible for the fallback');
+  assert.match(w.last.reply, /^I cancelled the ₹450 expense\. Nothing was saved\. /, 'the cancellation notice is kept');
+  assert.equal(w.last.action.kind, 'record_liability_repayment');
+  assert.equal(w.last.action.status, 'pending');
+  assert.notEqual(w.last.action.proposalId, oldId);
+  assert.equal(w.proposal.status, 'pending', 'the replacement still waits for the explicit confirmation');
+  assert.ok(!['executed', 'executing'].includes(w.proposal.status));
+
+  // c) the answer to an open clarification: never
+  w = makeWorld({ ...world, extract: answer });
+  await w.say('log 500 coffe');
+  assert.equal(w.last.action.status, 'needs_clarification');
+  await w.say(NEW_REQUEST);
+  assert.equal(w.calls.extract, 0, 'an open clarification is answered by rules only');
+  await w.say('spent');
+  assert.equal(w.calls.extract, 0);
+  assert.equal(w.last.action.status, 'pending');
+
+  // d) an edit of a pending proposal: never
+  w = makeWorld({ ...world, extract: answer });
+  await w.say('add 450 for lunch');
+  await w.say('yeah make it 600 instead');
+  await w.say('actually make it six hundred');
+  assert.equal(w.calls.extract, 0, 'edits are parsed by rules');
+  assert.equal(w.row('Amount'), '₹600');
+
+  // e) yes / confirmation / cancel: never, and nothing executes
+  w = makeWorld({ ...world, extract: answer });
+  await w.say('add 450 for lunch');
+  for (const phrase of ['yes', 'yeah sure', 'ok do it', 'confirm it']) {
+    await w.say(phrase);
+    assert.match(w.last.reply, /Tap Confirm/, phrase);
+    assert.equal(w.proposal.status, 'pending', phrase);
+  }
+  await w.say('cancel');
+  assert.equal(w.proposal.status, 'cancelled');
+  assert.equal(w.calls.extract, 0, 'confirmation and cancellation never involve the model');
+
+  // unrelated chat while a proposal is open still just cancels it and goes to normal chat
+  w = makeWorld({ ...world, extract: answer });
+  await w.say('add 450 for lunch');
   await w.say('what is this');
-  assert.equal(w.calls.extract, 0, 'a pending proposal means no extraction, even for an action-like message');
+  assert.equal(w.last.handled, false);
+  assert.match(w.last.cancelNotice, /cancelled/);
+  assert.equal(w.calls.extract, 0);
 });
 
 // ═══ prompt injection and entity names ══════════════════════════════════════════════════════════════════════════════
@@ -714,4 +773,40 @@ test('confirmation vs edit: natural confirmations only remind; edits and conditi
     assert.notEqual(w.proposal.status, 'executed', phrase);
     assert.doesNotMatch(w.last.reply ?? '', /Tap Confirm/, phrase);
   }
+});
+
+test('extractor request: model-specific reasoning field, everything else identical', async () => {
+  const { modelRequestFields, DEFAULT_ACTION_MODEL } = await import('../structuredActionExtractor.js');
+  assert.equal(DEFAULT_ACTION_MODEL, 'openai/gpt-oss-120b');
+  assert.deepEqual(modelRequestFields('openai/gpt-oss-120b'), { reasoning_effort: 'low' });
+  assert.deepEqual(modelRequestFields('openai/gpt-oss-20b'), { reasoning_effort: 'low' });
+  for (const other of ['llama-3.3-70b-versatile', 'my-model', '', undefined]) assert.deepEqual(modelRequestFields(other), {}, String(other));
+  const bodyFor = async (env) => {
+    let seen;
+    const f = async (url, init) => { seen = { url, init, body: JSON.parse(init.body) }; return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: JSON.stringify(okExtraction()) } }] }) }; };
+    const result = await createStructuredExtractor({ fetchImpl: f, env, log: () => {}, isConfigured: () => true })('paid five thousand on my bike lon');
+    return { seen, result };
+  };
+  const gpt = await bodyFor({ GROQ_API_KEY: 'k' });
+  assert.equal(gpt.result.status, 'ok', 'validation is unchanged');
+  assert.equal(gpt.seen.url, 'https://api.groq.com/openai/v1/chat/completions');
+  assert.deepEqual(Object.keys(gpt.seen.body).sort(), ['max_tokens', 'messages', 'model', 'reasoning_effort', 'response_format', 'temperature']);
+  assert.equal(gpt.seen.body.model, 'openai/gpt-oss-120b');
+  assert.equal(gpt.seen.body.reasoning_effort, 'low');
+  assert.equal(gpt.seen.body.temperature, 0);
+  assert.equal(gpt.seen.body.max_tokens, 250);
+  assert.deepEqual(gpt.seen.body.response_format, { type: 'json_object' });
+  assert.ok(!('reasoning_format' in gpt.seen.body) && !('tools' in gpt.seen.body));
+  assert.equal(gpt.seen.body.messages.length, 2, 'only the system prompt and the one message');
+  assert.ok(gpt.seen.init.signal instanceof AbortSignal);
+  const llama = await bodyFor({ GROQ_API_KEY: 'k', GROQ_ACTION_MODEL: 'llama-3.3-70b-versatile' });
+  assert.ok(!('reasoning_effort' in llama.seen.body) && !('reasoning_format' in llama.seen.body), 'no reasoning fields for a non-reasoning model');
+  assert.deepEqual(Object.keys(llama.seen.body).sort(), ['max_tokens', 'messages', 'model', 'response_format', 'temperature']);
+  const small = await bodyFor({ GROQ_API_KEY: 'k', GROQ_ACTION_MODEL: 'openai/gpt-oss-20b' });
+  assert.equal(small.seen.body.reasoning_effort, 'low');
+  // a provider 400 (e.g. json_validate_failed) still fails closed and logs only the status
+  const logs = [];
+  const failing = createStructuredExtractor({ fetchImpl: async () => ({ ok: false, status: 400, json: async () => ({ error: { message: 'secret user text 5000' } }) }), env: { GROQ_API_KEY: 'k' }, log: (...a) => logs.push(a), isConfigured: () => true });
+  assert.equal((await failing('paid 5000 secretly')).status, 'http_error');
+  assert.ok(!JSON.stringify(logs).includes('secret') && !JSON.stringify(logs).includes('5000'));
 });

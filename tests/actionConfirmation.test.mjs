@@ -74,3 +74,15 @@ test('Issue #77: confirmations are whole-utterance only; edits and conditions ne
     assert.equal(parseYesNo(t), null, `server: ${t}`);
   }
 });
+
+test("Issue #79: natural cancellations (actually don't add it, don't create it, cancel that), whole utterance, browser and server agree", () => {
+  for (const t of ["actually don't add it", 'Actually dont add it', "don't create it", 'Dont create it!', 'cancel that', 'Cancel that.']) {
+    assert.equal(parseConfirmation(t), 'no', t);
+    assert.equal(parseYesNo(t), 'no', `server: ${t}`);
+  }
+  for (const t of ["actually don't add it but make it 4 lakh", "don't create it yet", 'cancel that and add a goal', 'create it', 'cancel that later']) {
+    assert.notEqual(parseConfirmation(t), 'no', t);
+    assert.equal(parseConfirmation(t), parseYesNo(t), `parity: ${t}`);
+  }
+  assert.equal(parseConfirmation('create it'), 'yes');
+});

@@ -587,6 +587,119 @@ async function run() {
   r = await call(B2, 'PUT', '/budgets', { month: month0, category: '  ', amount: 1 });
   ok(r.status === 400 && r.json.error === 'Category is required', 'manual PUT: category validation unchanged');
 
+  // ════════════════════ create_liability (Issue #79) ════════════════════
+  { // own scope: this block declares many short names
+  const CL = await newUser('act-createliab');
+  const CL2 = await newUser('act-createliab2');
+  const cRow = (resp, label) => resp.json?.action?.display?.find((d) => d.label === label)?.value;
+  const liabCount = async (c) => (await liabs(c)).length;
+
+  r = await say(CL, 'Add my ₹3 lakh HDFC personal loan.');
+  ok(r.json.action?.kind === 'create_liability' && r.json.action.status === 'needs_clarification' && r.json.reply === "What's the annual interest rate on HDFC Personal Loan? Say 0 if there's none.", 'create_liability: the missing rate is asked, never defaulted', r.text);
+  r = await say(CL, '11.5%');
+  ok(/monthly payment \(EMI\) on HDFC Personal Loan/.test(r.json.reply), 'create_liability: then the monthly payment', r.json?.reply);
+  r = await say(CL, '9,200');
+  ok(r.json.action?.status === 'pending' && cRow(r, 'Name') === 'HDFC Personal Loan' && cRow(r, 'Type') === 'Personal loan' && cRow(r, 'Outstanding balance') === '₹3,00,000'
+    && cRow(r, 'Interest rate') === '11.5% per year' && cRow(r, 'Monthly payment') === '₹9,200' && /no transaction is created/.test(cRow(r, 'Note')), 'create_liability: the preview shows all five fields', r.text);
+  ok(r.json.reply === "I'll add HDFC Personal Loan: ₹3,00,000 outstanding at 11.5% a year, with a ₹9,200 monthly payment. Should I add it?", 'create_liability: concise summary', r.json?.reply);
+  const clId = r.json.action.proposalId;
+  ok(await liabCount(CL) === 0, 'create_liability: NOTHING is written before the confirmation');
+  const stored = (await rowsOf('SELECT payload FROM assistant_action_proposals WHERE id = $1', [clId]))[0].payload;
+  ok(stored.kind === 'create_liability' && /^[0-9a-f-]{36}$/.test(stored.liabilityId) && !('userId' in stored) && !('owner' in stored) && Object.keys(stored.input).sort().join() === 'interestRate,monthlyPayment,name,outstandingAmount,type', 'create_liability: the proposal holds the id and the five fields, and no owner', JSON.stringify(stored));
+  r = await say(CL, 'yes');
+  ok(/Tap Confirm/.test(r.json.reply) && await liabCount(CL) === 0, 'create_liability: a typed "yes" never writes');
+  r = await confirm(CL2, clId);
+  ok(r.status === 404 && await liabCount(CL2) === 0 && await liabCount(CL) === 0, 'create_liability: another user cannot confirm it (404, nothing written)', r.text);
+  r = await confirm(CL, clId, { name: 'Hacked', outstandingAmount: 1, userId: 1, type: 'other' });
+  ok(r.status === 200 && r.json.kind === 'create_liability' && r.json.created === true && r.json.liability.name === 'HDFC Personal Loan' && r.json.liability.id === stored.liabilityId
+    && r.json.message === 'Done. I added HDFC Personal Loan with ₹3,00,000 outstanding.', 'create_liability: the confirm body is ignored; the stored liability is created under the stored id', r.text);
+  const made = (await liabs(CL))[0];
+  ok(await liabCount(CL) === 1 && made.outstandingAmount === 300000 && made.interestRate === 11.5 && made.monthlyPayment === 9200 && made.type === 'personal_loan', 'create_liability: exactly one row with the confirmed values');
+  const replay = await confirm(CL, clId);
+  ok(replay.status === 200 && replay.json.replay === true && replay.json.liability.id === made.id && await liabCount(CL) === 1, 'create_liability: a replayed confirmation returns the stored result and writes nothing', replay.text);
+  ok((await rowsOf('SELECT count(*)::int AS n FROM transactions WHERE user_id = (SELECT id FROM users WHERE email = $1)', ['act-createliab@example.com']))[0].n === 0, 'create_liability: no transaction is created');
+
+  // two simultaneous confirmations: one row
+  r = await say(CL, 'Add my car loan of 2 lakh at 9% EMI 5000');
+  const raceId = r.json.action.proposalId;
+  const both = await Promise.all([confirm(CL, raceId), confirm(CL, raceId)]);
+  ok(both.every((x) => x.status === 200 || x.status === 409) && both.some((x) => x.status === 200) && await liabCount(CL) === 2, 'create_liability: simultaneous confirmations create exactly one liability', JSON.stringify(both.map((x) => x.status)));
+
+  // edit then reconfirm
+  r = await say(CL, 'Add my bike loan of 1 lakh at 8% EMI 3000');
+  const e1 = r.json.action.proposalId;
+  r = await say(CL, 'make it 1.5 lakh');
+  ok(r.json.action.status === 'pending' && r.json.action.proposalId !== e1 && cRow(r, 'Outstanding balance') === '₹1,50,000', 'create_liability: an edit makes a NEW proposal', r.text);
+  const e2 = r.json.action.proposalId;
+  r = await confirm(CL, e1);
+  ok(r.status !== 200 && await liabCount(CL) === 2, 'create_liability: the old proposal is invalidated', r.text);
+  r = await say(CL, "3 years instead");
+  ok(/term isn't stored/.test(r.json.reply) && r.json.action.proposalId === e2, 'create_liability: a term edit changes nothing and keeps the proposal', r.text);
+  r = await say(CL, 'remove the interest rate');
+  ok(/The interest rate is required; say 0 if there isn't one\./.test(r.json.reply) && r.json.action.proposalId === e2, 'create_liability: the rate cannot be removed');
+  r = await confirm(CL, e2);
+  ok(r.status === 200 && (await liabs(CL)).some((l) => l.name === 'Bike Loan' && l.outstandingAmount === 150000) && await liabCount(CL) === 3, 'create_liability: the edited proposal is what is saved', r.text);
+
+  // cancel, expiry
+  r = await say(CL, 'Add my education loan of 2 lakh at 7% EMI 0');
+  const cx = r.json.action.proposalId;
+  r = await say(CL, "actually don't add it");
+  ok(/cancelled/.test(r.json.reply) && await liabCount(CL) === 3, 'create_liability: "actually don\'t add it" cancels', r.json?.reply);
+  r = await confirm(CL, cx);
+  ok(r.status === 409 && await liabCount(CL) === 3, 'create_liability: a cancelled proposal cannot be confirmed', r.text);
+  r = await say(CL, 'Add my education loan of 2 lakh at 7% EMI 0');
+  const ex = r.json.action.proposalId;
+  await direct.query("UPDATE assistant_action_proposals SET expires_at = now() - interval '1 minute' WHERE id = $1", [ex]);
+  r = await confirm(CL, ex);
+  ok(r.status === 410 && await liabCount(CL) === 3, 'create_liability: an expired proposal writes nothing', r.text);
+
+  // duplicate name, then a different explicit zero rate and payment
+  r = await say(CL, 'Add my HDFC personal loan 1 lakh');
+  ok(/You already have “HDFC Personal Loan” with ₹3,00,000 outstanding\. Add another liability with the same name\?/.test(r.json.reply), 'create_liability: a duplicate name is asked about', r.json?.reply);
+  await say(CL, 'yes'); await say(CL, '0'); r = await say(CL, 'no emi');
+  ok(r.json.action?.status === 'pending' && cRow(r, 'Interest rate') === '0% per year' && cRow(r, 'Monthly payment') === '₹0 (no fixed payment)', 'create_liability: an explicit 0 is accepted as a stated value', r.text);
+  await cancel(CL, r.json.action.proposalId);
+
+  // the model path with no key: nothing is invented
+  r = await say(CL, 'took a 5 lakh loan from sbi last year');
+  ok(!r.json.action && await liabCount(CL) === 3, 'create_liability: with no model configured an unreadable sentence proposes nothing');
+
+  // repayment routing is unchanged
+  const rb = (await addLiab(CL, { name: 'Car Loan', type: 'vehicle_loan', outstandingAmount: 100000 })).json;
+  r = await say(CL, 'add ₹5,000 to my car loan');
+  ok(r.json.action?.kind === 'record_liability_repayment', 'routing: "add ₹5,000 to my car loan" is still a repayment', r.text);
+  await cancel(CL, r.json.action.proposalId);
+  void rb;
+
+  // manual route regression: same request, response and validation as before; duplicates by name still allowed
+  r = await call(CL, 'POST', '/liabilities', { name: 'Manual Loan', type: 'other', outstandingAmount: 1000, interestRate: 5, monthlyPayment: 0 });
+  ok(r.status === 201 && r.json.name === 'Manual Loan' && r.json.userId && r.json.id && r.json.createdAt && Object.keys(r.json).sort().join() === 'createdAt,id,interestRate,monthlyPayment,name,outstandingAmount,type,userId', 'manual liability route: 201 with the same shape', r.text);
+  r = await call(CL, 'POST', '/liabilities', { name: 'Manual Loan', type: 'other', outstandingAmount: 1000, interestRate: 5, monthlyPayment: 0 });
+  ok(r.status === 201 && (await liabs(CL)).filter((l) => l.name === 'Manual Loan').length === 2, 'manual liability route: duplicate names are still allowed');
+  r = await call(CL, 'POST', '/liabilities', { name: 'X', type: 'bogus', outstandingAmount: 1, interestRate: 1, monthlyPayment: 1 });
+  ok(r.status === 400 && /^Type must be one of/.test(r.json.error), 'manual liability route: validation message unchanged');
+  r = await call(CL, 'POST', '/liabilities', { name: 'X', type: 'other', outstandingAmount: 1, interestRate: 101, monthlyPayment: 1 });
+  ok(r.status === 400 && r.json.error === 'Interest rate cannot exceed 100', 'manual liability route: rate validation unchanged');
+  r = await call(CL, 'POST', '/liabilities', { name: 'X', type: 'other', outstandingAmount: 1, interestRate: 1 });
+  ok(r.status === 400 && r.json.error === 'Monthly payment must be a number', 'manual liability route: every field is still required');
+  r = await call(CL, 'POST', '/liabilities', { id: 'forced', userId: 99999, name: 'Forced', type: 'other', outstandingAmount: 1, interestRate: 1, monthlyPayment: 0 });
+  ok(r.status === 201 && r.json.id !== 'forced' && r.json.userId !== 99999, 'manual liability route: id and owner still come from the server');
+
+  // insert-level idempotency (the helper the executor uses)
+  const dbmod = await import('../db/index.js');
+  await dbmod.initDatabase({ env: { ...process.env, DATABASE_URL: urlFor(DB) } });
+  try {
+    const uid = (await rowsOf("SELECT id FROM users WHERE email = 'act-createliab@example.com'"))[0].id;
+    const row = { id: 'idem-fixed-id', userId: Number(uid), name: 'Idem', type: 'other', outstandingAmount: 10, interestRate: 0, monthlyPayment: 0, createdAt: new Date().toISOString() };
+    const a = await dbmod.insertLiabilityIdempotent(row);
+    const b = await dbmod.insertLiabilityIdempotent({ ...row, name: 'DIFFERENT', outstandingAmount: 999 });
+    ok(a.created === true && b.created === false && b.liability.name === 'Idem' && b.liability.outstandingAmount === 10, 'insertLiabilityIdempotent: the second call inserts nothing and returns the existing row');
+    ok((await rowsOf("SELECT count(*)::int AS n FROM liabilities WHERE id = 'idem-fixed-id'"))[0].n === 1, 'insertLiabilityIdempotent: exactly one row');
+  } finally {
+    await dbmod.closeDatabase();
+  }
+  }
+
   // ════════════════════ schema migration (Issue #75) ════════════════════
   const schemaSql = fs.readFileSync(path.join(SERVER_DIR, 'db', 'schema.sql'), 'utf8');
   const insertKind = (kind, id) => direct.query(
@@ -616,6 +729,24 @@ async function run() {
   let bogus = false;
   try { await insertKind('delete_everything', 'bogus'); } catch { bogus = true; }
   ok(bogus, 'migration: unknown kinds are still rejected');
+
+  // ════════════════════ schema migration (Issue #79): create_liability ════════════════════
+  await direct.query("DELETE FROM assistant_action_proposals WHERE kind = 'create_liability'");
+  await direct.query('ALTER TABLE assistant_action_proposals DROP CONSTRAINT assistant_action_proposals_kind_valid');
+  await direct.query("ALTER TABLE assistant_action_proposals ADD CONSTRAINT assistant_action_proposals_kind_valid CHECK (kind IN ('create_transaction', 'contribute_to_goal', 'record_liability_repayment', 'set_budget'))");   // a #75-era database
+  let rejected79 = false;
+  try { await insertKind('create_liability', 'old79-create-liability'); } catch { rejected79 = true; }
+  ok(rejected79, 'migration #79: a database with the #75 constraint rejects create_liability');
+  await direct.query(schemaSql);
+  let accepted79 = 0;
+  for (const kind of ['create_transaction', 'contribute_to_goal', 'record_liability_repayment', 'set_budget', 'create_liability']) { try { await insertKind(kind, `n79-${kind}`); accepted79++; } catch (e) { console.log(e.message); } }
+  ok(accepted79 === 5, 'migration #79: all five current kinds are accepted after the schema runs again');
+  const def79 = (await constraintNames()).find((c) => c.conname === 'assistant_action_proposals_kind_valid').def;
+  await direct.query(schemaSql); await direct.query(schemaSql);
+  ok((await constraintNames()).find((c) => c.conname === 'assistant_action_proposals_kind_valid').def === def79 && (await constraintNames()).filter((c) => /kind/.test(c.conname)).length === 1, 'migration #79: running the schema again is a no-op');
+  let bogus79 = false;
+  try { await insertKind('delete_everything', 'bogus79'); } catch { bogus79 = true; }
+  ok(bogus79, 'migration #79: unknown kinds are still rejected');
 
   // ════════════════════ general ════════════════════
   r = await say(T, 'How much did I spend this month?');

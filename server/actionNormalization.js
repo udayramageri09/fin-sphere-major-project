@@ -34,6 +34,9 @@ export const ALIASES = Object.freeze({
   salry: 'salary', salery: 'salary', sallary: 'salary', slary: 'salary',
   recieved: 'received', receved: 'received', recived: 'received',
   rupes: 'rupees', rupess: 'rupees',
+  persnal: 'personal', personel: 'personal', personl: 'personal', vehical: 'vehicle', vehicel: 'vehicle', vechile: 'vehicle',
+  educaton: 'education', eduction: 'education', educatin: 'education', mortage: 'mortgage', borowed: 'borrowed', borrowd: 'borrowed',
+  intrest: 'interest', intrst: 'interest', percnt: 'percent', precent: 'percent',
 });
 
 // "gol" is a typo of "goal" at the end of a request ("...to my goa gol") but also half of "gol gappa": only the former.

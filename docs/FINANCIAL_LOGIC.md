@@ -45,7 +45,13 @@ The Balance figure is different on purpose: it is the raw signed total of all ro
 * **Savings rate** = (analytical income - net spending) / analytical income x 100 (0 when there is no income). **Expense ratio** = net spending / income x 100 (100 when there is no income).
 * **Budget actuals**: for a month and a category, actual = `max(spending in that category - refunds in that category, 0)`, classification-aware, net of matching refunds. Categories match as `lower(btrim(category))` with no aliases.
 
-## 5. Not modelled
+## 5. Adding a liability (manual form and assistant)
+
+A liability has five fields and **all five are required**: name, type (`home_loan`, `personal_loan`, `vehicle_loan`, `education_loan`, `credit_card` or `other`), outstanding balance (greater than 0), interest rate (0 to 100, percent per year) and monthly payment (0 or more). Nothing is defaulted or inferred: a missing rate or payment is asked for, and a stated **0** (an interest-free loan, no fixed payment) is a real value, not a default. A loan **term**, a **lender** and start or maturity dates have no columns; a lender can only be part of the name ("HDFC Personal Loan"), and a term the user mentions is recognised and disclosed on the preview but not stored.
+
+The assistant (`create_liability`) and `POST /api/liabilities` share one validator and one insert (`createLiabilityFor`), so they cannot disagree. Adding a liability changes a balance sheet row only: **no transaction is created**, and repayments, DTI and every other metric keep their definitions (DTI still uses only the monthly payments of unpaid liabilities). Names need not be unique in the database; the assistant asks before creating a second liability with the same name. "I owe ₹X on my education loan" never edits an existing balance from chat.
+
+## 6. Not modelled
 
 * **No transfer pairing.** A transfer is excluded because it is marked as one; it is not matched with the opposite leg in another account.
 * **No refund linking.** A refund reduces spending in the period it is dated (and, for budgets, in its category); it is not tied to the original purchase.
