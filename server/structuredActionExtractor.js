@@ -12,15 +12,11 @@
 //
 // Configuration (all optional): GROQ_API_KEY (shared with chat), GROQ_ACTION_MODEL, ASSISTANT_ACTION_LLM=off (kill switch).
 
-export const DEFAULT_ACTION_MODEL = 'openai/gpt-oss-120b';
+import { DEFAULT_ACTION_MODEL, getActionModel, groqChatUrl, modelRequestFields } from './groqModels.js';
 
-// Model-specific request fields. A GPT-OSS model reasons before it answers and the reasoning counts against max_tokens;
-// at its default effort the ~250-token cap is used up and the JSON is cut off, which Groq reports as HTTP 400
-// (json_validate_failed). "low" effort keeps the answer inside the cap. Other models get no extra fields.
-// (reasoning_format does not help here: the reasoning is not the problem, its token use is.)
-export function modelRequestFields(model) {
-  return /^openai\/gpt-oss-/i.test(String(model ?? '')) ? { reasoning_effort: 'low' } : {};
-}
+// Model selection and the model-specific request fields live in groqModels.js (one source of truth for every Groq call);
+// they are re-exported here because the extractor's callers and tests import them from this module.
+export { DEFAULT_ACTION_MODEL, modelRequestFields };
 export const ACTION_TIMEOUT_MS = 4000;
 export const ACTION_INTENTS = Object.freeze(['create_transaction', 'contribute_to_goal', 'record_liability_repayment', 'set_budget', 'create_liability', 'none']);
 const ROOT_KEYS = Object.freeze(['intent', 'amount', 'direction', 'title', 'target', 'date', 'month', 'rate', 'payment', 'term', 'missing', 'ambiguous']);
@@ -166,12 +162,12 @@ const offValue = (v) => ['off', 'false', '0', 'disabled', 'no'].includes(String(
 // never the user's message and never the key.
 export function createStructuredExtractor({
   isConfigured, fetchImpl = globalThis.fetch, env = globalThis.process?.env ?? {}, log = console.error,
-  timeoutMs = ACTION_TIMEOUT_MS, endpoint = 'https://api.groq.com/openai/v1/chat/completions',
+  timeoutMs = ACTION_TIMEOUT_MS, endpoint = groqChatUrl(env),
 } = {}) {
   return async function extractStructured(text) {
     if (offValue(env.ASSISTANT_ACTION_LLM)) return { status: 'disabled' };
     if (typeof isConfigured === 'function' ? !isConfigured() : !env.GROQ_API_KEY) return { status: 'unconfigured' };
-    const model = env.GROQ_ACTION_MODEL || DEFAULT_ACTION_MODEL;
+    const model = getActionModel(env);
     let response;
     try {
       response = await fetchImpl(endpoint, {

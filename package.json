@@ -12,6 +12,7 @@
     "test:assistant": "node --test tests/assistantIntent.test.mjs",
     "test:confirmation": "node --test tests/actionConfirmation.test.mjs",
     "test:copilot": "node tests/financialCopilot.test.mjs",
+    "test:plans": "node tests/plansIntelligence.test.mjs",
     "test:companion": "node --test tests/companionState.test.mjs tests/speechText.test.mjs"
   },
   "dependencies": {

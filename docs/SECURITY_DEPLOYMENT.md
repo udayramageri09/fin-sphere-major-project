@@ -14,7 +14,12 @@ What the current code does for production, what you must configure, and what is 
 | `DATABASE_SSL`, `DATABASE_SSL_CA` | database TLS | verified TLS is on in production; `DATABASE_SSL=false` for a private network without TLS; `DATABASE_SSL_CA` for a private CA. Verification is never disabled. An explicit `sslmode` in the URL is honoured. |
 | `ML_SERVICE_URL` | where the API finds FastAPI | default `http://localhost:8000`. |
 | `GROQ_API_KEY` | optional LLM | placeholder values are treated as "not configured". |
-| `GROQ_ACTION_MODEL` | optional model for the assistant-action fallback (section 10) | defaults to `openai/gpt-oss-120b` (sent with `reasoning_effort: low`, which GPT-OSS models need to fit the 250-token cap). |
+| `GROQ_CHAT_MODEL` | optional model for `/api/chat` and `/api/plan-chat` | default configured model `openai/gpt-oss-120b`. |
+| `GROQ_PARSE_MODEL` | optional model for statement parsing | default configured model `openai/gpt-oss-20b`. |
+| `GROQ_ACTION_MODEL` | optional model for the assistant-action fallback (section 10) | default configured model `openai/gpt-oss-120b`. |
+| `GROQ_API_BASE` | optional Groq API base URL (test-oriented; leave unset in production) | default `https://api.groq.com/openai/v1`; only an http(s) URL is accepted. |
+
+Models named `openai/gpt-oss-*` are sent `reasoning_effort: low` (their reasoning counts against the token cap); other models get no extra fields. Set the variable if the provider retires a default. A failed provider call (unknown model, rate limit, malformed reply) falls back to the deterministic behaviour, and statement parsing logs only the HTTP status or error name, never the statement text or the provider's response body.
 | `ASSISTANT_ACTION_LLM` | kill switch for that fallback | `off` (also `false`, `0`, `disabled`) turns the structured extractor off completely; the deterministic parser keeps working. |
 
 Frontend: `VITE_API_URL` is baked in at build time (`.env.example`). No secret may be placed in a `VITE_` variable.

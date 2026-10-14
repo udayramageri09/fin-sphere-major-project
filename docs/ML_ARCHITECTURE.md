@@ -34,17 +34,21 @@ Browser ──(httpOnly JWT cookie)──▶ Express
                                     ▼
                          { forecast, anomalies, clusters, health, plan, metadata }
                                     │
-Express relays it unchanged ◀───────┘   (ML error → 502, ML service unreachable → 503)
+Express sanitises it ◀──────────────┘   (ML error → 502, ML service unreachable → 503)
+   · removes clusters.labeled_transactions
+   · metadata.errors → { section: true }   (no exception text)
+   · stores it as that user's snapshot (in memory, 30 minutes, ≤ 1000 users)
 ```
 
-The plan generator runs last and consumes the other four outputs. If one model throws, its error is recorded in `metadata.errors` and its section is `{}`; the rest still run.
+The plan generator runs last and consumes the other four outputs. If one model throws, the failure is recorded as `metadata.errors.<section> = true` (the Python message is never sent to the browser) and its section is `{}`; the rest still run. Only the three models (forecaster, anomaly detector, clustering) are machine learning; the health scorer and the plan generator are deterministic rule engines, and `metadata` lists them separately (`models_run` and `rule_engines_run`).
 
 ## 3. The Express / FastAPI trust boundary
 
 * **Express is the security boundary.** It authenticates the caller, derives the owner from the verified JWT, validates and normalises every write, and decides which rows are sent to the ML service.
 * **FastAPI has no authentication.** `ml_service/main.py` says so in a comment; it restricts browser origins with CORS (`localhost:5173` and `localhost:5000`) but does not check who is calling. It trusts whatever transactions it receives. In any deployment it must be reachable only from the API, not from the internet (see [SECURITY_DEPLOYMENT.md](SECURITY_DEPLOYMENT.md)); `python main.py` now binds to `127.0.0.1` unless `ML_SERVICE_HOST` is set.
 * The ML service never reads the database and never stores anything.
-* `POST /api/plan-chat` receives the ML results (`mlContext`) **from the client** and narrates them. The server does not re-validate that context (a code comment records this as a known follow-up). `/api/ml/analyze` itself is fully server-derived.
+* `POST /api/plan-chat` narrates the analysis the **server** produced for the caller. After a successful `/api/ml/analyze`, Express keeps that (sanitised) result in a per-user, in-memory snapshot (`server/planSnapshot.js`: keyed by the authenticated user id, 30 minute TTL, at most about 1000 users, least recently used evicted first; nothing is persisted). The prompt is built from that snapshot. A `mlContext` sent by the browser is still accepted so old clients keep working, but it is only shape-checked and then ignored, so a forged context cannot change what the advisor says. With no snapshot the reply is "Run the analysis first." One user's snapshot is never returned for another user.
+* Express never returns FastAPI's error body: a 502 carries a generic message, the server log records the status only, and `metadata.errors` is reduced to section-presence booleans.
 
 ## 4. PostgreSQL-owned financial state
 
@@ -81,7 +85,13 @@ Every historical and every imported row is `unknown`, because those rows only ev
 
 **Health scorer** (`models/health_scorer.py`). Computes six ratios (savings rate, expense ratio, debt-to-income, emergency coverage, investment rate, cash-flow positivity), scores each 0-100 from fixed benchmark curves, and combines them with fixed weights (0.25, 0.20, 0.20, 0.15, 0.10, 0.10). A ratio whose input is missing (no debt payments supplied, no emergency fund, no usable income or spending) is **omitted, never defaulted**, and the weights are renormalised over the ratios that exist. The grade is A at 85 or more, B at 70, C at 55, otherwise D. The benchmarks are conventional rules of thumb, not values fitted to data.
 
-**Plan generator** (`models/plan_generator.py`). Twelve rules: `HS-01..06` (savings, debt-to-income, emergency coverage), `FC-01..03` (forecast), `AN-01` (anomalies), `CL-01..02` (clusters). Rules only fire when their input exists; missing data never creates an alert. The emergency rules use the exact, unrounded coverage reconstructed from the health metadata, not the one-decimal value shown to users.
+**Plan generator** (`models/plan_generator.py`). Twelve rules: `HS-01..06` (savings, debt-to-income, emergency coverage), `FC-01..03` (forecast), `AN-01` (anomalies), `CL-01..02` (clusters). Rules only fire when their input exists; missing data never creates an alert. The emergency rules use the exact, unrounded coverage reconstructed from the health metadata, not the one-decimal value shown to users. Thresholds are unchanged by Issue #80.
+
+Each step also carries, since Issue #80: `kind` (`risk`, `opportunity` or `maintenance`), `method` (`rule` for the health-score rules `HS-*`, `ml_signal` for a rule applied to a forecast, anomaly or cluster output), a truthful `source_model` ("Health score rules", "LinearRegression forecast", "IsolationForest", "Agglomerative clustering (Ward)"), `category_order`, `action` (`{ destination }` naming an existing page or section, or `null`) and structured `evidence` (`metric`, `label`, `value`, `unit`, `threshold`, `formula`, `inputs`, `contributors`, `caveats`). **Order:** priority first (critical, high, medium, low); within a priority a fixed category order breaks ties (1 cash-flow survival: FC-03, HS-01; 2 debt: HS-03, HS-04; 3 emergency fund: HS-05, HS-06; 4 savings and spending: HS-02, FC-01; 5 transaction review: AN-01; 6 behaviour and opportunity: CL-01, CL-02, FC-02), then the step id. There is no score and no model: the order is a pure function of which rules fired. The plan also carries `forecast_caveats` (short history, low R²) computed on the server.
+
+**Health scorer additions (Issue #80).** The score, ratios, weights and grades are unchanged. `metadata` now also reports `monthly_income`, `avg_monthly_net_spending`, `period` (`months`, `first_month`, `last_month`), `ratios_used` and `ratios_total`; each ratio has its `weight_pct` (the weight actually used after renormalising); `unavailable_reasons` says why DTI (`no_income` or `debt_total_unavailable`) or emergency coverage (`no_fund` or `no_spending`) is missing; and `breakdown` lists the top five spending categories (see [FINANCIAL_LOGIC.md](FINANCIAL_LOGIC.md)). The generic "tax-loss harvesting" advice was replaced by "No issues found in the computed ratios.".
+
+**What the Plans page shows.** `src/pages/Plans.jsx` and `src/components/plans/*` present the server's output as Current State, Top risks and opportunities (at most 3 and 2, in the server's order), Next actions (the server's order, with a button to an existing page through the shared navigation destinations) and a collapsed Analysis details section. "Why?", "How calculated?", "What caused this?" and "Show breakdown" render the returned `evidence` and health breakdown; the browser computes no ratio, score, threshold test or ranking (`src/utils/planIntelligence.js` only groups, slices and formats).
 
 ## 9. How the outputs relate
 
@@ -132,7 +142,7 @@ user text -> safe deterministic normalization -> deterministic action parser
 
 See [SECURITY_DEPLOYMENT.md](SECURITY_DEPLOYMENT.md) for the security properties of proposals.
 
-The model names in the code are `llama-3.3-70b-versatile` (chat and plan-chat), `openai/gpt-oss-120b` (the action extractor, overridable with `GROQ_ACTION_MODEL`) and `llama3-8b-8192` (parsing). No LLM output feeds a financial metric.
+Model selection lives in one module, `server/groqModels.js`. The **default configured models** are `openai/gpt-oss-120b` for chat and plan-chat (`GROQ_CHAT_MODEL`), `openai/gpt-oss-20b` for statement parsing (`GROQ_PARSE_MODEL`) and `openai/gpt-oss-120b` for the action extractor (`GROQ_ACTION_MODEL`). Each can be overridden by an environment variable, so a model the provider retires is a configuration change, not a code change; the defaults are not a promise about the provider's catalogue. Models whose name starts with `openai/gpt-oss-` are sent `reasoning_effort: low` (their reasoning counts against `max_tokens`); any other model gets no extra fields, and only GPT-OSS models are supported by that mapping. Request parameters that differ per call (`temperature`, `max_tokens`, `response_format`) stay with the call site: chat 0.4 / 500, plan-chat 0.4 / 600, statement parsing 0.1 with neither `max_tokens` nor `response_format` (it expects a top-level JSON array, which JSON mode cannot return), the extractor 0 / 250 with `response_format: json_object`. Only `message.content` is ever read; the separate reasoning text is never returned to the user. An optional `GROQ_API_BASE` overrides the API base URL (used by the tests to point at a local stub). No LLM output feeds a financial metric.
 
 ## 11. No persisted model artifacts
 
@@ -144,11 +154,7 @@ FinSphere is not an LLM wrapper. Its financial figures come from persisted Postg
 
 ## 13. Runtime wording that does not match the implementation
 
-Documentation here uses the correct names. The following user-visible or API-visible strings still say "KMeans" although the algorithm is Agglomerative clustering. They are reported, not changed, by the documentation issue:
-
-* `ml_service/main.py`: the API description, the `/health` model list and `metadata.models_run` in `/ml/full-analysis`.
-* `ml_service/models/plan_generator.py`: the CL-01 step text ("K-Means clustering shows ...") and the `source_model` value `KMeans Clustering` on CL-01 and CL-02.
-* `server/server.js`: a `=== K-MEANS SPENDING CLUSTER ===` heading in the plan-chat prompt.
+Documentation here uses the correct names. Issue #80 corrected the runtime strings that said "KMeans" (the algorithm is Agglomerative clustering with Ward linkage) and that presented the rule engines as ML: the FastAPI description, the `/health` model list, `metadata.models_run` (now only the three ML models, with `rule_engines_run` beside it), the CL-01 step text and `source_model`, the plan summary ("ML models analysed ..."), the plan-chat prompt headings, the Plans page title and its chat greeting. If a string still says "KMeans" or calls the health score or plan "ML", that is a defect.
 
 Also, `Transactions.jsx` labels the statement buttons "AI-Powered". That is accurate only when a Groq key is configured; without one the rule-based parser runs.
 
@@ -161,8 +167,9 @@ Also, `Transactions.jsx` labels the statement buttons "AI-Powered". That is accu
 | The 12 rules and their thresholds | `ml_service/models/plan_generator.py` |
 | Classification rules (Python / SQL / JS) | `ml_service/models/analytics.py`, `server/db/index.js`, `src/utils/finance.js` |
 | Endpoint list, CORS, no authentication on FastAPI | `ml_service/main.py` |
-| Payload, timeouts, 502 / 503, owner scoping | `server/server.js` (`/api/ml/analyze`) |
-| `mlContext` is client-supplied | comment above `/api/plan-chat` in `server/server.js` |
+| Payload, timeouts, 502 / 503, owner scoping, sanitising | `server/server.js` (`/api/ml/analyze`), `server/planSnapshot.js` |
+| plan-chat narrates the server snapshot, client `mlContext` ignored | `server/server.js` (`/api/plan-chat`), `server/tests/plans.test.mjs` |
+| Step evidence, order, destinations, wording | `ml_service/models/plan_generator.py`, `ml_service/tests/` |
 | Type/classification constraints, `NUMERIC` money | `server/db/schema.sql` |
 | No model artifacts | repository search for model/data files (none) |
 | Measured behaviour | `ml_service/evaluation/results/` |

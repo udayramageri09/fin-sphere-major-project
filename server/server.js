@@ -24,6 +24,8 @@ import {
 } from './db/index.js';
 import { createAssistantActions, shiftDate, monthLabel } from './assistantActions.js';
 import { createStructuredExtractor } from './structuredActionExtractor.js';
+import { getChatModel, getParseModel, groqChatUrl, modelRequestFields } from './groqModels.js';
+import { createSnapshotStore, sanitizeAnalysis } from './planSnapshot.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1242,7 +1244,10 @@ app.post('/api/transactions/parse-statement', authenticate, parseLimiter, (req, 
   // If Groq is configured, use it for parsing
   if (isGroqConfigured()) {
     try {
-      const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      // Model: GROQ_PARSE_MODEL (default openai/gpt-oss-20b). No response_format (the prompt asks for a top-level JSON array,
+      // which JSON mode cannot return) and no max_tokens (the output grows with the statement).
+      const parseModel = getParseModel(process.env);
+      const response = await fetch(groqChatUrl(process.env), {
         method: 'POST',
         signal: AbortSignal.timeout(30_000),
         headers: {
@@ -1250,7 +1255,7 @@ app.post('/api/transactions/parse-statement', authenticate, parseLimiter, (req, 
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          model: 'llama3-8b-8192',
+          model: parseModel,
           messages: [
             {
               role: 'system',
@@ -1270,7 +1275,8 @@ Return only the valid JSON array, like: [{"title": "Salary", "amount": 50000, "d
               content: statementText
             }
           ],
-          temperature: 0.1
+          temperature: 0.1,
+          ...modelRequestFields(parseModel)
         })
       });
 
@@ -1309,11 +1315,11 @@ Return only the valid JSON array, like: [{"title": "Salary", "amount": 50000, "d
           // No valid rows from the AI: fall through to the rule-based parser below.
         }
       } else {
-        const errText = await response.text();
-        console.error('Groq API Error during parsing:', errText);
+        // The status only: a provider error body can echo the generated text, and so the user's statement.
+        console.error('Groq API Error during parsing: status', response.status);
       }
     } catch (err) {
-      console.error('Error invoking Groq API for parsing:', err);
+      console.error('Error invoking Groq API for parsing:', err?.name ?? 'error');
     }
   }
 
@@ -1846,7 +1852,8 @@ Rules:
 
     if (isGroqConfigured()) {
       try {
-        const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        const chatModel = getChatModel(process.env);   // GROQ_CHAT_MODEL (default openai/gpt-oss-120b)
+        const response = await fetch(groqChatUrl(process.env), {
           method: 'POST',
           signal: AbortSignal.timeout(30_000),
           headers: {
@@ -1854,10 +1861,11 @@ Rules:
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({
-            model: 'llama-3.3-70b-versatile',
+            model: chatModel,
             messages: [systemMessage, ...history],
             temperature: 0.4,
-            max_tokens: 500
+            max_tokens: 500,
+            ...modelRequestFields(chatModel)
           })
         });
 
@@ -1884,7 +1892,11 @@ Rules:
   }
 });
 
-// 6. GET /api/ml/analyze — proxies full ML analysis to Python microservice
+// The last successful Plans analysis per signed-in user (in memory, 30 minutes, bounded). /api/plan-chat narrates THIS, never a
+// context the browser sends.
+const planSnapshots = createSnapshotStore();
+
+// 6. GET /api/ml/analyze — proxies full analysis (ML models + rule engines) to the Python microservice
 app.get('/api/ml/analyze', authenticate, mlLimiter, async (req, res) => {
   try {
     // Scope ML analysis to the authenticated user's own data only (ownership always comes
@@ -1932,15 +1944,17 @@ app.get('/api/ml/analyze', authenticate, mlLimiter, async (req, res) => {
     });
 
     if (!mlRes.ok) {
-      const errText = await mlRes.text();
-      console.error('ML Service Error:', errText);
-      return res.status(502).json({ error: 'ML service returned an error', detail: errText });
+      // Only the status is logged and nothing upstream is returned: the body can echo the user's transactions.
+      console.error('ML Service Error: HTTP', mlRes.status);
+      return res.status(502).json({ error: 'ML service returned an error' });
     }
 
-    const mlData = await mlRes.json();
+    // Failure texts reduced to "this section failed", the per-transaction cluster labels removed.
+    const mlData = sanitizeAnalysis(await mlRes.json());
+    planSnapshots.set(req.user.id, mlData);   // owner: the verified session user
     res.json(mlData);
   } catch (err) {
-    console.error('Failed to reach ML service:', err.message);
+    console.error('Failed to reach ML service:', err?.name ?? 'error');
     res.status(503).json({
       error: 'ML service unavailable',
       detail: 'Make sure the Python ML service is running on port 8000 (npm run start-ml)'
@@ -1948,20 +1962,23 @@ app.get('/api/ml/analyze', authenticate, mlLimiter, async (req, res) => {
   }
 });
 
-// 7. POST /api/plan-chat — LLM narrates ML results only (strict narrate-only prompt)
-// Authentication is enforced. mlContext is client-provided state derived from /api/ml/analyze
-// (which is now scoped to the authenticated user). Full server-side re-validation of mlContext
-// is a follow-up task (tracked separately; a redesign of the plan-chat architecture is required).
+// 7. POST /api/plan-chat — the LLM narrates the analysis (strict narrate-only prompt)
+// Authentication is enforced. The prompt is built from the SERVER's own snapshot of the caller's last /api/ml/analyze
+// (see planSnapshots): a `mlContext` sent by the browser is still accepted so old clients keep working, but it is only
+// shape-checked and then IGNORED, so a forged context cannot change what the advisor says.
+const NO_ANALYSIS_REPLY = 'Run the analysis first.';
 app.post('/api/plan-chat', authenticate, chatLimiter, async (req, res) => {
-  const { messages, mlContext } = req.body ?? {};
+  const { messages, mlContext: legacyClientContext } = req.body ?? {};
   const invalid = validateChatMessages(messages);
   if (invalid) return res.status(400).json({ error: invalid });
-  if (mlContext !== undefined && mlContext !== null && !isPlainObject(mlContext)) {
+  if (legacyClientContext !== undefined && legacyClientContext !== null && !isPlainObject(legacyClientContext)) {
     return res.status(400).json({ error: 'mlContext must be an object' });
   }
+  const snapshot = planSnapshots.get(req.user.id);
+  if (!snapshot) return res.json({ reply: NO_ANALYSIS_REPLY });
   try {
-  // Build a tightly constrained system prompt from ML data. mlContext is still client-supplied (see above); these
-  // guards only stop a malformed shape from throwing, they do not make it trusted.
+  const mlContext = snapshot.data;
+  // The data is the server's own, but the shapes are still guarded so an unexpected section cannot throw.
   const section = (v) => (isPlainObject(v) ? v : {});
   const strings = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string' || typeof x === 'number').map(String) : []);
   const health = section(mlContext?.health);
@@ -1998,43 +2015,57 @@ app.post('/api/plan-chat', authenticate, chatLimiter, async (req, res) => {
   const topAnomaly = (Array.isArray(anomalies.anomalies) && isPlainObject(anomalies.anomalies[0]) ? anomalies.anomalies[0].title : null) ?? 'None';
 
   const dominantCluster = clusters.insights?.dominant_cluster ?? 'unknown';
+  // Structured evidence per step (value, threshold, formula, inputs) so "why" answers quote the same numbers as the page.
+  const evidenceLine = (e) => {
+    if (!isPlainObject(e)) return '';
+    const th = isPlainObject(e.threshold) ? `, threshold: ${e.threshold.comparator} ${e.threshold.value}` : '';
+    const inputs = (Array.isArray(e.inputs) ? e.inputs.filter(isPlainObject) : []).map((i) => `${i.label}: ${i.value}${i.unit ? ` ${i.unit}` : ''}`).join('; ');
+    return `\n   Evidence: ${String(e.label ?? '')} = ${e.value}${e.unit ? ` ${e.unit}` : ''}${th}. Formula: ${String(e.formula ?? '')}. Inputs: ${inputs || 'none'}.`;
+  };
   const planSteps = (Array.isArray(plan.steps) ? plan.steps.filter(isPlainObject) : [])
-    .map((s, i) => `${i+1}. [${String(s.priority ?? 'info').toUpperCase()}] ${String(s.title ?? '')}: ${String(s.description ?? '')}`).join('\n');
+    .map((s, i) => `${i+1}. [${String(s.priority ?? 'info').toUpperCase()}] (${s.method === 'rule' ? 'rule-based' : 'rule applied to an ML signal'}) ${String(s.title ?? '')}: ${String(s.description ?? '')}${evidenceLine(s.evidence)}`).join('\n');
+  const hMeta = isPlainObject(health.metadata) ? health.metadata : {};
+  const periodLine = isPlainObject(hMeta.period) && hMeta.period.months
+    ? `- Period analysed: ${hMeta.period.months} month(s), ${hMeta.period.first_month} to ${hMeta.period.last_month}. Average monthly income: ₹${hMeta.monthly_income}; average monthly net spending: ₹${hMeta.avg_monthly_net_spending}\n`
+    : '';
+  const forecastCaveats = strings(plan.forecast_caveats);
+  const caveatLine = forecastCaveats.length ? `- Forecast caveats: ${forecastCaveats.join(' ')}\n` : '';
 
   const systemPrompt = `You are the FinFlow AI Plan Advisor. Your ONLY job is to NARRATE and EXPLAIN the results 
-produced by our ML models to the user in a conversational way. You must NOT invent, assume, 
-or generate any financial analysis yourself — all numbers come from our ML pipeline.
+produced by our analysis pipeline to the user in a conversational way. The health score and the plan are RULE-BASED (fixed formulas and thresholds, not machine learning); only the forecast, the anomalies and the spending clusters come from machine-learning models. You must NOT invent, assume,
+or generate any financial analysis yourself — all numbers come from the pipeline output below.
 
-Here are the EXACT ML model outputs you must narrate:
+Here are the EXACT outputs you must narrate:
 
-=== FINANCIAL HEALTH SCORER (Rule-Based Ratio Engine) ===
+=== FINANCIAL HEALTH SCORE (RULE-BASED, not machine learning) ===
 - Composite Score: ${healthScore}/100 (Grade: ${healthGrade})
-- Savings Rate: ${savingsRate}%  (benchmark: ≥20%)
+${periodLine}- Savings Rate: ${savingsRate}%  (benchmark: ≥20%)
 ${optionalHealthLines}${notAnalysedLine}- Strengths:${strings(health.strengths).join(', ') || 'None identified'}
 - Weaknesses: ${strings(health.weaknesses).join(', ') || 'None identified'}
 
-=== LINEAR REGRESSION FORECASTER ===
+=== FORECAST (ML: linear regression) ===
 - Income Trend: ${incomeTrend}
 - Expense Trend: ${expenseTrend}
 - Projected Net Savings (next 3 months): ₹${projectedSavings}
-
-=== ISOLATION FOREST ANOMALY DETECTOR ===
+${caveatLine}
+=== ANOMALIES (ML: Isolation Forest) ===
 - Transactions Flagged: ${anomalyCount}
 - Most Anomalous: "${topAnomaly}"
 
-=== K-MEANS SPENDING CLUSTER ===
+=== SPENDING CLUSTERS (Agglomerative, Ward) (ML) ===
 - Dominant Behaviour Cluster: ${dominantCluster}
 - High-Value Exposure: ${clusters.insights?.high_value_exposure_pct ?? 'N/A'}%
 
-=== RULE-BASED PLAN GENERATOR OUTPUT ===
+=== PLAN (deterministic rules; some rules read the ML outputs above) ===
 ${planSteps || 'No plan steps generated.'}
 
 Guidelines:
-1. ONLY discuss the above ML-computed numbers. Never say "I think" or invent figures.
-2. When explaining a step, say which ML model found it (e.g., "Our Isolation Forest flagged...").
+1. ONLY discuss the numbers above. Never say "I think" or invent figures.
+2. When explaining a step, say how it was found: health-score steps (HS-) are rule-based; forecast, anomaly and cluster findings come from ML models (e.g., "Our Isolation Forest flagged...").
+   When asked "why" or "how was it calculated", quote the step's Evidence line.
 3. Be conversational, encouraging, and specific. Use ₹ for amounts.
 4. Keep responses concise (2–4 sentences) unless asked for detail.
-5. If asked something not in the ML output, say: "That falls outside what our ML models analysed in this run."`;
+5. If asked something not in the output above, say: "That falls outside what this analysis computed."`;
 
   const fullMessages = [
     { role: 'system', content: systemPrompt },
@@ -2043,7 +2074,8 @@ Guidelines:
 
   if (isGroqConfigured()) {
     try {
-      const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      const planModel = getChatModel(process.env);   // GROQ_CHAT_MODEL (default openai/gpt-oss-120b)
+      const response = await fetch(groqChatUrl(process.env), {
         method: 'POST',
         signal: AbortSignal.timeout(30_000),
         headers: {
@@ -2051,10 +2083,11 @@ Guidelines:
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          model: 'llama-3.3-70b-versatile',
+          model: planModel,
           messages: fullMessages,
           temperature: 0.4,
-          max_tokens: 600
+          max_tokens: 600,
+          ...modelRequestFields(planModel)
         })
       });
 
@@ -2070,8 +2103,8 @@ Guidelines:
 
   // Fallback: summarise plan without LLM
   const fallbackReply = typeof plan.plan_summary === 'string' && plan.plan_summary
-    ? `${plan.plan_summary} The ML models identified ${Number(plan.step_count) || 0} action items for you.`
-    : 'ML analysis complete. Please configure Groq API key for AI narration.';
+    ? `${plan.plan_summary} The analysis identified ${Number(plan.step_count) || 0} action items for you.`
+    : 'Analysis complete. Please configure Groq API key for AI narration.';
   res.json({ reply: fallbackReply });
   } catch (err) {
     console.error('Plan chat request failed:', err?.name ?? 'unknown');
