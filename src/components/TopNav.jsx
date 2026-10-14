@@ -9,7 +9,7 @@ const navItems = [
   { id: 'portfolio', label: 'Portfolio', icon: PieChart },
   { id: 'goals', label: 'Goals', icon: Target },
   { id: 'subscriptions', label: 'SIPs & Subs', icon: CalendarRange },
-  { id: 'plans', label: 'ML Plans', icon: Brain },
+  { id: 'plans', label: 'Financial Intelligence', icon: Brain },
 ];
 
 function TopNav({ currentView, setCurrentView }) {

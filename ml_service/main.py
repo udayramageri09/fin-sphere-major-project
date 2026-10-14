@@ -3,7 +3,7 @@ main.py — FinFlow ML Microservice (FastAPI)
 
 Endpoints:
   GET  /health             — service health check
-  POST /ml/full-analysis   — runs all 4 models + plan generator
+  POST /ml/full-analysis   — runs the 3 ML models, then the rule-based health scorer and plan generator
   POST /ml/forecast        — forecaster only
   POST /ml/anomalies       — anomaly detection only
   POST /ml/clusters        — clustering only
@@ -28,7 +28,7 @@ from models.plan_generator import generate_plan
 
 app = FastAPI(
     title="FinFlow ML Intelligence Service",
-    description="Real ML models powering FinFlow financial analysis — Linear Regression, Isolation Forest, K-Means, Health Scoring",
+    description="FinSphere analytics: ML (Linear Regression forecast, Isolation Forest anomalies, Agglomerative/Ward clustering) plus deterministic rules (health score, plan generator)",
     version="1.0.0"
 )
 
@@ -87,7 +87,8 @@ def health_check():
     return {
         "status": "ok",
         "service": "FinFlow ML Intelligence Service",
-        "models": ["LinearRegression", "IsolationForest", "KMeans", "HealthScorer", "RulePlanGenerator"],
+        "models": ["LinearRegression", "IsolationForest", "AgglomerativeClustering (Ward)"],
+        "rule_engines": ["HealthScorer (rules)", "PlanGenerator (rules)"],
         "version": "1.0.0"
     }
 
@@ -154,7 +155,8 @@ def full_analysis(req: AnalysisRequest):
         **results,
         'metadata': {
             'transaction_count': len(txns),
-            'models_run': ['LinearRegression', 'IsolationForest', 'KMeans', 'HealthScorer', 'RulePlanGenerator'],
+            'models_run': ['LinearRegression', 'IsolationForest', 'AgglomerativeClustering (Ward)'],
+            'rule_engines_run': ['HealthScorer (rules)', 'PlanGenerator (rules)'],
             'elapsed_ms': elapsed_ms,
             'errors': errors if errors else None
         }

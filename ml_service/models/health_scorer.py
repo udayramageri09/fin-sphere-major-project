@@ -176,6 +176,31 @@ def run_health_scorer(
     is_investment = df.get('category', pd.Series('', index=df.index)).astype(str).str.lower().str.contains('invest|dividend|mutual|stock', na=False)
     investment_credits = int(df.loc[(df['income_p'] > 0) & is_investment, 'income_p'].sum()) / 100
 
+    # Spending by category (Issue #80): DESCRIPTIVE only, never scored. The same rule as the budget actuals: per month and
+    # per category (key = lower(btrim(category))), net = max(spending - refunds, 0); transfers are excluded because
+    # add_analytical_columns gives them no spending. Exact integer paise throughout.
+    category_label = df.get('category', pd.Series('', index=df.index)).fillna('').astype(str).str.strip()
+    cat_frame = pd.DataFrame({
+        'month': df['year_month'].astype(str),
+        'key': category_label.str.lower(),
+        'spending_p': df['spending_p'],
+        'refund_p': df['refund_p'],
+    })
+    cat_month = cat_frame.groupby(['month', 'key'])[['spending_p', 'refund_p']].sum()
+    cat_net_p = (cat_month['spending_p'] - cat_month['refund_p']).clip(lower=0).groupby(level='key').sum()
+    first_label = category_label.groupby(category_label.str.lower()).first()
+    ranked = sorted(((int(p), key) for key, p in cat_net_p.items() if int(p) > 0), key=lambda item: (-item[0], item[1]))
+    categories_total_p = sum(p for p, _ in ranked)
+    spending_by_category = [
+        {
+            'category': first_label.get(key) or 'Uncategorised',
+            'net_spending': p / 100,
+            'share_pct': round(p / categories_total_p * 100, 1) if categories_total_p else 0.0,
+        }
+        for p, key in ranked[:5]
+    ]
+    other_net_p = categories_total_p - sum(p for p, _ in ranked[:5])
+
     # Monthly cash flow positivity: analytical income minus net spending, per month
     month_flow = by_month['income_p'] - net_spending_by_month
     positive_months = int((month_flow > 0).sum())
@@ -229,6 +254,9 @@ def run_health_scorer(
         elif s >= 50: return 'fair'
         return 'poor'
 
+    def _weight_pct(key: str) -> float:
+        return round(_WEIGHTS[key] / weight_total * 100, 1)   # the weight actually used (renormalised over the ratios that exist)
+
     ratios = {
         'savings_rate': {
             'value': round(savings_rate, 1),
@@ -236,7 +264,8 @@ def run_health_scorer(
             'unit': '%',
             'benchmark': f"Ideal: ≥{_BENCHMARKS['savings_rate']['ideal']}%",
             'status': _status(s_savings),
-            'description': 'Percentage of income saved'
+            'description': 'Percentage of income saved',
+            'weight_pct': _weight_pct('savings_rate')
         },
         'expense_ratio': {
             'value': round(expense_ratio, 1),
@@ -244,7 +273,8 @@ def run_health_scorer(
             'unit': '%',
             'benchmark': f"Ideal: ≤{_BENCHMARKS['expense_ratio']['ideal']}%",
             'status': _status(s_expense),
-            'description': 'Expenses as a share of income'
+            'description': 'Expenses as a share of income',
+            'weight_pct': _weight_pct('expense_ratio')
         },
     }
     if dti is not None:
@@ -254,7 +284,8 @@ def run_health_scorer(
             'unit': '%',
             'benchmark': f"Ideal: ≤{_BENCHMARKS['dti']['ideal']}%",
             'status': _status(s_dti),
-            'description': 'Monthly debt payments as a share of monthly income'
+            'description': 'Monthly debt payments as a share of monthly income',
+            'weight_pct': _weight_pct('dti')
         }
     if emergency_months is not None:
         ratios['emergency_coverage'] = {
@@ -263,7 +294,8 @@ def run_health_scorer(
             'unit': 'months',
             'benchmark': f"Ideal: ≥{_BENCHMARKS['emergency_months']['ideal']} months",
             'status': _status(s_emergency),
-            'description': 'Emergency fund runway'
+            'description': 'Emergency fund runway',
+            'weight_pct': _weight_pct('emergency_coverage')
         }
     ratios['investment_rate'] = {
         'value': round(investment_rate, 1),
@@ -271,7 +303,8 @@ def run_health_scorer(
         'unit': '%',
         'benchmark': f"Ideal: ≥{_BENCHMARKS['investment_rate']['ideal']}%",
         'status': _status(s_invest),
-        'description': 'Investments as share of income'
+        'description': 'Investments as share of income',
+        'weight_pct': _weight_pct('investment_rate')
     }
     ratios['cash_flow_positivity'] = {
         'value': round(positive_cf_rate, 1),
@@ -279,10 +312,18 @@ def run_health_scorer(
         'unit': '%',
         'benchmark': f"Ideal: ≥{_BENCHMARKS['positive_cf_rate']['ideal']}%",
         'status': _status(s_cf),
-        'description': 'Months with positive net cash flow'
+        'description': 'Months with positive net cash flow',
+        'weight_pct': _weight_pct('cash_flow_positivity')
     }
 
     unavailable_ratios = [key for key in ('dti', 'emergency_coverage') if key not in ratios]
+    # Why (Issue #80). No income wins over a missing debt total (supplying the total would not help); a missing fund wins over
+    # "no spending to measure it against" (the user can act on the fund).
+    unavailable_reasons = {}
+    if 'dti' not in ratios:
+        unavailable_reasons['dti'] = 'no_income' if monthly_income <= 0 else 'debt_total_unavailable'
+    if 'emergency_coverage' not in ratios:
+        unavailable_reasons['emergency_coverage'] = 'no_fund' if not _is_supplied(emergency_fund) else 'no_spending'
 
     # Strengths and weaknesses (available components only)
     sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
@@ -305,9 +346,9 @@ def run_health_scorer(
         recommendations.append(f"Investment rate is {investment_rate:.1f}%. Allocate at least 15% of income to growth assets")
     if not recommendations:
         if unavailable_ratios:
-            recommendations.append("No issues found in the metrics that could be computed from your transactions")
+            recommendations.append("No issues found in the computed ratios.")
         else:
-            recommendations.append("Financial health is strong — consider tax-loss harvesting and international diversification")
+            recommendations.append("No issues found in the computed ratios.")
 
     grade_info = _grade(composite)
 
@@ -316,6 +357,7 @@ def run_health_scorer(
         'grade': grade_info,
         'ratios': ratios,
         'unavailable_ratios': unavailable_ratios,
+        'unavailable_reasons': unavailable_reasons,
         'strengths': strengths[:3],
         'weaknesses': weaknesses[:3],
         'recommendations': recommendations,
@@ -327,6 +369,22 @@ def run_health_scorer(
             'monthly_debt_payments_used': monthly_debt_payments if dti is not None else None,
             'monthly_income_used': round(monthly_income, 2) if dti is not None else None,
             'emergency_fund_used': emergency_fund if emergency_months is not None else None,
-            'monthly_expenses_used': round(avg_monthly_expenses, 2) if emergency_months is not None else None
+            'monthly_expenses_used': round(avg_monthly_expenses, 2) if emergency_months is not None else None,
+            # Issue #80: the figures the page shows, with the period they cover (None when no month has a valid date)
+            'monthly_income': round(monthly_income, 2) if n_months > 0 else None,
+            'avg_monthly_net_spending': round(avg_monthly_expenses, 2) if n_months > 0 else None,
+            'period': {
+                'months': n_months,
+                'first_month': str(by_month.index.min()) if n_months > 0 else None,
+                'last_month': str(by_month.index.max()) if n_months > 0 else None,
+            },
+            'ratios_used': len(scores),
+            'ratios_total': len(_WEIGHTS)
+        },
+        'breakdown': {
+            'basis': 'Per category and month: spending minus refunds, floored at 0; transfers excluded.',
+            'spending_by_category': spending_by_category,
+            'other_net_spending': other_net_p / 100,
+            'categories_total': categories_total_p / 100
         }
     }

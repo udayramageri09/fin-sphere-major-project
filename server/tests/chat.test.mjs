@@ -210,8 +210,10 @@ async function run() {
   }
   await sleep(300);
   ok(alive(), 'server still running after malformed plan-chat requests', serverOut.slice(-300));
+  // Issue #80: the advisor narrates the SERVER's snapshot of the caller's last analysis. A context sent by the browser is
+  // ignored, so with no analysis run there is nothing to narrate (the snapshot behaviour itself is covered by plans.test.mjs).
   r = await call(P, 'POST', '/plan-chat', { messages: msg, mlContext: { plan: { plan_summary: 'Two steps.', step_count: 2, steps: [{ priority: 'high', title: 'A', description: 'B' }] } } });
-  ok(r.status === 200 && r.json.reply.startsWith('Two steps.'), 'valid plan-chat still answers', r.text.slice(0, 120));
+  ok(r.status === 200 && r.json.reply === 'Run the analysis first.' && !r.text.includes('Two steps.'), 'plan-chat answers deterministically and ignores a client-supplied context', r.text.slice(0, 120));
   ok(alive(), 'server alive at the end');
 }
 
