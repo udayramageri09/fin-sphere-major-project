@@ -5,6 +5,9 @@
   "type": "module",
   "scripts": {
     "test:password-recovery": "node tests/passwordRecoveryUi.test.mjs",
+    "test:image-statement": "node tests/imageStatementUi.test.mjs",
+    "test:statement-a11y": "node tests/statementImportA11y.test.mjs",
+    "test:duplicate-review": "node tests/duplicateReviewUi.test.mjs",
     "dev": "vite",
     "server": "node server/server.js",
     "build": "vite build",

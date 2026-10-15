@@ -224,6 +224,56 @@ export async function createTransactionsBatch(rows) {
   if (rows.length > 0) await insertTransactions(pool, rows);
 }
 
+// ── Duplicate-aware import (opt-in; see importDuplicates.js) ──────────────────────────────────────────────────────────
+// The OWNER's saved transactions that share a date AND a signed amount (so also the direction) with at least one candidate row.
+// Bounded: only rows on the candidates' own dates and amounts are read, never the whole history, and never another user's.
+// Oldest first, so which saved row a candidate is matched to is deterministic. `db` is the pool or a transaction's client.
+const MAX_MATCH_ROWS = 5000;
+// Thrown when more rows than the bound match. The answer would then be INCOMPLETE, and an incomplete answer must never be read as
+// "no duplicates", so the import fails closed (nothing is saved) instead of guessing.
+export class ImportMatchLimitError extends Error {}
+async function selectImportMatches(db, userId, rows) {
+  if (rows.length === 0) return [];
+  const { rows: found } = await db.query(
+    `SELECT t.id, t.title, t.amount::float8 AS amount, to_char(t.date, 'YYYY-MM-DD') AS date, t.type
+       FROM transactions t
+       JOIN (SELECT DISTINCT c.d, c.a FROM unnest($2::date[], $3::numeric[]) AS c(d, a)) AS pairs
+         ON t.date = pairs.d AND t.amount = pairs.a
+      WHERE t.user_id = $1
+      ORDER BY t.seq ASC
+      LIMIT ${MAX_MATCH_ROWS + 1}`,
+    [userId, rows.map((r) => r.date), rows.map((r) => r.amount.toFixed(2))]);
+  if (found.length > MAX_MATCH_ROWS) throw new ImportMatchLimitError(`more than ${MAX_MATCH_ROWS} saved transactions share the dates and amounts of this import`);
+  return found;
+}
+export const findImportMatches = (userId, rows) => selectImportMatches(pool, userId, rows);
+
+// Atomic, per-user serialised import. In ONE transaction: take this user's import lock, read the user's matching rows, let `decide`
+// (a pure, synchronous function) choose what to save, insert exactly that, commit. Two imports for the same user therefore run one
+// after the other, and the second one sees the first one's rows, so a double click or two tabs can never both pass the check.
+// `decide(existing)` returns { insert: rows[], result }; an empty or missing `insert` saves nothing. Returns `result`.
+// The lock is transaction-scoped (released at COMMIT/ROLLBACK) and per user, so other users and other routes are not held up.
+export async function importTransactionsLocked(userId, rows, decide) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Never wait for the user's lock indefinitely (a stuck import must not pile up connections): after 10 s the import fails with
+    // 55P03, saves nothing and the caller is told to retry.
+    await client.query("SET LOCAL lock_timeout = '10s'");
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`finsphere:import:${userId}`]);
+    const existing = await selectImportMatches(client, userId, rows);
+    const decision = decide(existing);
+    if (decision.insert && decision.insert.length > 0) await insertTransactions(client, decision.insert);
+    await client.query('COMMIT');
+    return decision.result;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 // Removes exactly one row: the owner's first match in list order. The owner is part of the
 // lookup, so another user's row with the same id can never be touched. Returns true if a row was removed.
 export async function deleteTransactionByUserAndId(userId, id) {

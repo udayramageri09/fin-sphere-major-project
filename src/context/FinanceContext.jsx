@@ -3,6 +3,8 @@ import { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { useAuth } from './AuthContext';
 import { summarizeTransactions } from '../utils/finance';
 import { localDateString } from '../utils/localDate';
+import { requestImageText } from '../utils/imageOcr';
+import { requestImportConfirm, normalizePreview } from '../utils/duplicateReview';
 
 const FinanceContext = createContext(null);
 
@@ -418,13 +420,13 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
       if (input instanceof File) {
         const formData = new FormData();
         formData.append('statementFile', input);
-        res = await fetch(`${API_URL}/transactions/parse-statement`, {
+        res = await fetch(`${API_URL}/transactions/parse-statement?duplicates=report`, {
           method: 'POST',
           credentials: 'include',
           body: formData
         });
       } else {
-        res = await fetch(`${API_URL}/transactions/parse-statement`, {
+        res = await fetch(`${API_URL}/transactions/parse-statement?duplicates=report`, {
           method: 'POST',
           credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
@@ -435,6 +437,13 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
       if (res.status === 401) {
         invalidateSession();
         throw new Error('Session expired');
+      }
+      if (res.status === 409) {
+        // Duplicate review, not an error: the server held the import back and saved NOTHING. The page shows the review.
+        const held = await res.json().catch(() => null);
+        const preview = held?.code === 'DUPLICATES_FOUND' ? normalizePreview(held) : null;
+        if (preview) return { review: true, preview };
+        throw new Error(held?.error || 'Failed to parse statement');
       }
       if (!res.ok) {
         const errData = await res.json();
@@ -450,6 +459,39 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
       throw err;
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Duplicate review, step 2: send the user's decision about a held-back import. `request` is built from the preview the server
+  // issued ({ rows, policy, reviewDigest, skipIndexes }); nothing is parsed again. Resolves { stale: false, result } after the import
+  // (and a refresh of the transaction list) or { stale: true, preview } when the server refused a review that went out of date.
+  const confirmImport = async (request) => {
+    try {
+      const outcome = await requestImportConfirm({ apiUrl: API_URL, body: request });
+      if (outcome.stale) return outcome;
+      await fetchTransactions();
+      return outcome;
+    } catch (err) {
+      if (err?.status === 401) {
+        invalidateSession();
+        throw new Error('Session expired', { cause: err });
+      }
+      throw err;
+    }
+  };
+
+  // Image statement upload, step 1: read the text out of a JPG/PNG. Resolves { text, confidence, warnings } and changes nothing
+  // else: no transaction is saved, parseStatement is not called, and the shared loading/error state is left alone (the page
+  // shows its own progress). The user reviews the text in the paste editor and imports it themselves.
+  const extractTextFromImage = async (file) => {
+    try {
+      return await requestImageText({ apiUrl: API_URL, file });
+    } catch (err) {
+      if (err?.status === 401) {
+        invalidateSession();
+        throw new Error('Session expired', { cause: err });
+      }
+      throw err;
     }
   };
 
@@ -567,6 +609,8 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
       addTransaction,
       deleteTransaction,
       parseStatement,
+      confirmImport,
+      extractTextFromImage,
       sendMessageToBot,
       sendAssistantMessage,
       confirmAssistantAction,

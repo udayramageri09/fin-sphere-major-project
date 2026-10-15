@@ -113,3 +113,32 @@
 .animate-fade-in {
   animation: fadeIn 0.4s ease-out forwards;
 }
+
+/* ─── Statement import (Transactions page) ─── */
+/* The real file input is invisible (opacity 0) and stretched over the drop zone, so the ring is drawn on the drop zone when the
+   input has KEYBOARD focus (focus-visible: not shown for a mouse click). Same blue as the other focus rings in the app. */
+.upload-dropzone:has(input[type="file"]:focus-visible) {
+  outline: 3px solid #2563eb;
+  outline-offset: 3px;
+  border-color: #2563eb;
+}
+/* On a phone the floating assistant orb sits in the bottom-right corner. When an import button is focused or scrolled into view it
+   is kept clear of that corner (scroll-margin only affects where the browser scrolls to; it adds no space to the layout). */
+@media (max-width: 640px) {
+  .statement-action {
+    scroll-margin-bottom: 9.5rem;
+  }
+}
+
+/* ─── Duplicate review (Transactions page) ─── */
+.dup-review-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.dup-review-actions > button { flex: 1 1 11rem; }
+.dup-review-list { max-height: 26rem; overflow-y: auto; }
+.dup-review-list:focus-visible { outline: 3px solid #2563eb; outline-offset: 2px; }
+.dup-review-list input[type="checkbox"]:focus-visible { outline: 3px solid #2563eb; outline-offset: 2px; }
+@media (max-width: 640px) {
+  .dup-review-list { max-height: 55vh; }
+  /* The three actions stack on a phone: focusing an earlier one must also leave the ones below it clear of the assistant orb. */
+  .dup-review-actions > button:nth-child(1) { scroll-margin-bottom: 16.5rem; }
+  .dup-review-actions > button:nth-child(2) { scroll-margin-bottom: 13rem; }
+}

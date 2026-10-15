@@ -137,7 +137,9 @@ async function newUser() {
 const today = new Date().toISOString().slice(0, 10);
 const ask = (cookie, text) => call(cookie, 'POST', '/chat', { messages: [{ role: 'user', content: text }], localDate: today });
 const planChat = (cookie) => call(cookie, 'POST', '/plan-chat', { messages: [{ role: 'user', content: 'Why is this my top action?' }] });
-const parse = (cookie, text) => call(cookie, 'POST', '/transactions/parse-statement', { text });
+// These tests are about the model request, and they deliberately import the same statement again and again, so they ask for the
+// explicit legacy behaviour (no duplicate check). The duplicate protection itself is tested in importDuplicatesServer.test.mjs.
+const parse = (cookie, text) => call(cookie, 'POST', '/transactions/parse-statement?duplicates=allow', { text });
 const lastBody = () => groq.requests.at(-1)?.body;
 const reset = () => { groq.requests.length = 0; groq.mode = 'ok'; };
 const STATEMENT = `01/09/2026 Salary credit 60000.00 CR\n03/09/2026 Rent payment 18000.00 DR\n05/09/2026 ${SECRET_STATEMENT} 450.00 DR`;
