@@ -1,8 +1,9 @@
+import { memo } from 'react';
 // TopFindings - at most 3 risks and 2 opportunities (Issue #80). The server decided what is a risk and in what order;
 // this only shows the first few.
 import { AlertTriangle, TrendingUp } from 'lucide-react';
 
-export default function TopFindings({ findings }) {
+function TopFindings({ findings }) {
   const { risks, opportunities, planFailed } = findings;
   return (
     <section className="ml-card findings-card" aria-labelledby="findings-heading" data-avatar-target="findings-section">
@@ -46,3 +47,5 @@ export default function TopFindings({ findings }) {
     </section>
   );
 }
+
+export default memo(TopFindings);

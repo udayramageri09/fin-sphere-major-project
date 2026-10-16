@@ -61,3 +61,37 @@ The assistant (`create_liability`) and `POST /api/liabilities` share one validat
 * **No refund linking.** A refund reduces spending in the period it is dated (and, for budgets, in its category); it is not tied to the original purchase.
 * **Unknown history.** A past transfer or refund stored as `unknown` is counted by direction.
 * **Time zones.** Dates are plain calendar dates. The assistant reports the current budget month in UTC, not in the user's time zone.
+
+## 8. Spending analytics (Transactions page)
+
+The Transactions page breaks the signed-in user's own transactions down in the browser (`src/utils/spendingAnalytics.js`, built on the same
+helpers as the dashboard in `src/utils/finance.js`), so the two cannot disagree.
+
+* **Same definitions as the dashboard.** Income is analytical income; spending is analytical spending minus refunds, per local calendar month,
+  never below zero; transfers are neither. A transaction with no classification counts by the direction of its amount (as everywhere else) and
+  the page says how many and how much, with a list to review. Nothing is merged: two identical-looking transactions are two records.
+* **Periods** are the current calendar month plus the previous 0, 2, 5 or 11 (Past 1, 3, 6 and 12 months). The month charts add up to the totals.
+* **Categories.** A category is the user's own stored label if there is one ("General" means "not categorised yet"); otherwise a keyword match
+  from `src/utils/merchantCategories.js` (whole words, longest match, the app's existing categories only); otherwise **Others**. A merchant that
+  appears often is *not* turned into a category. Small or unrecognised groups, and anything beyond the six largest, are grouped as Others and can
+  still be opened. A category's amount is its spending minus its own refunds, per month, never below zero; if a refund is larger than its category's
+  spending the page says the categories add up to slightly more than the total.
+* **Recurring payments** are described only: the same merchant about monthly, in at least 3 different months of the last 12, for similar amounts.
+* **Correcting a category** uses `PATCH /api/transactions/:id` with `{ "category": "..." }` (1 to 60 characters). It changes the category label of that
+  one transaction and nothing else (never the amount, date, type or classification), only for the signed-in user's own row. No schema change was needed.
+  Budgets read the same label, so a correction also moves that spending between budgets.
+
+
+## Investment holdings and valuation
+
+The additive investment_holdings table stores only owner-scoped manual INR positions. Existing accounts start empty;
+transactions, imports and cash flow never create investments. Invested and current values are stored as integer paise, including explicit zero.
+Portfolio sums the entered costs and current valuations, and displays unrealised gain/loss as current minus invested amount.
+It is a position-level difference, not a time-weighted return; realised proceeds, dividends, fees and taxes are excluded.
+Allocation uses each asset class's positive current value divided by total current value. At zero total, no percentage is inferred.
+Each holding displays its valuation date. Values can be stale or taken on different dates and are explicitly labelled manual, not live prices.
+Edits replace the position; no historical valuations are manufactured. Historical returns and growth charts remain unavailable.
+The dashboard's former fixed 60/40 allocation has been removed. Investment records are not connected to assistant chat.
+
+Transactions now defaults to Activity, with collapsed entry/import actions and newest-dated activity first. Insights is a separate
+view with the existing 1/3/6/12 calendar-month periods, category corrections, chart keyboard navigation and tabular alternatives.

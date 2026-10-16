@@ -30,6 +30,8 @@ const normalise = (text) => String(text ?? '')
   .trim();
 
 // -> 'yes' | 'no' | null
+/** Return intent only. A recognized voice phrase cannot authorize a new payload;
+ * execution must use the still-pending server proposal and its current owner. */
 export function parseConfirmation(text) {
   const n = normalise(text);
   if (YES.has(n)) return 'yes';

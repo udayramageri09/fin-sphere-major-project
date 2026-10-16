@@ -1,24 +1,83 @@
-import { useState, useEffect } from 'react'
+import { lazy, useState, useEffect } from 'react'
 import { FinanceProvider } from './context/FinanceContext'
 import { useAuth } from './context/AuthContext'
 import TopNav from './components/TopNav'
-import Dashboard from './pages/Dashboard'
-import Transactions from './pages/Transactions'
-import Liabilities from './pages/Liabilities'
-import Portfolio from './pages/Portfolio'
-import Goals from './pages/Goals'
-import Subscriptions from './pages/Subscriptions'
-import Plans from './pages/Plans'
+const Dashboard = lazy(() => import('./pages/Dashboard'))
+import PageBoundary from './components/PageBoundary'
+
+// Load page code only when selected, including the Dashboard after sign-in.
+const Transactions = lazy(() => import('./pages/Transactions'))
+const Liabilities = lazy(() => import('./pages/Liabilities'))
+const Portfolio = lazy(() => import('./pages/Portfolio'))
+const Goals = lazy(() => import('./pages/Goals'))
+const Subscriptions = lazy(() => import('./pages/Subscriptions'))
+const Plans = lazy(() => import('./pages/Plans'))
+const Settings = lazy(() => import('./pages/Settings'))
 import AIAvatar from './components/AIAvatar'
 import AuthPage from './pages/AuthPage'
+import Onboarding from './components/Onboarding'
+
+// Shown instead of the app while another tab may have changed the account and the server has not yet said whose session this is.
+function SessionCheck({ error, onRetry }) {
+  return (
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-zinc-50 p-6" data-testid="identity-check">
+      <div role={error ? 'alert' : 'status'} className="max-w-md text-center">
+        {error ? (
+          <>
+            <h1 className="text-xl font-bold tracking-tight text-zinc-900">Could not check your session</h1>
+            <p className="mt-2 text-zinc-600">{error}</p>
+            <button type="button" onClick={onRetry} className="mt-4 min-h-11 rounded-xl bg-zinc-900 px-5 py-2 text-sm font-semibold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-600 focus-visible:ring-offset-2">Retry</button>
+          </>
+        ) : (
+          <p className="text-zinc-600">Checking your session…</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Everything that belongs to one signed-in account. App keys it by user id, so a different account always gets a brand-new tree: chat,
+// pending previews, captions, voice activity, page data and timers of the previous account are gone, and anything still in flight for
+// it has no component left to land in.
+function AuthenticatedApp({ hidden }) {
+  const [currentView, setCurrentView] = useState('dashboard');
+  const { user } = useAuth();
+  return (
+    <div hidden={hidden} style={hidden ? { display: 'none' } : undefined}>
+      <FinanceProvider currentView={currentView} setCurrentView={setCurrentView}>
+        <div className="flex flex-col min-h-screen w-full bg-zinc-50 relative" inert={user?.onboardingState === 'pending' ? true : undefined}>
+          <TopNav currentView={currentView} setCurrentView={setCurrentView} />
+
+          {/* Main Content Area */}
+          <main className="flex-1 w-full pt-24 pb-40 px-4 md:px-8">
+            <div className="max-w-7xl mx-auto w-full h-full flex flex-col gap-6">
+              <PageBoundary key={currentView}>
+                {currentView === 'dashboard' && <Dashboard />}
+                {currentView === 'transactions' && <Transactions />}
+                {currentView === 'liabilities' && <Liabilities />}
+                {currentView === 'portfolio' && <Portfolio />}
+                {currentView === 'goals' && <Goals />}
+                {currentView === 'subscriptions' && <Subscriptions />}
+                {currentView === 'plans' && <Plans />}
+                {currentView === 'settings' && <Settings />}
+              </PageBoundary>
+            </div>
+          </main>
+
+          <AIAvatar />
+        </div>
+        {user?.onboardingState === 'pending' && <Onboarding onNavigate={setCurrentView} />}
+      </FinanceProvider>
+    </div>
+  )
+}
 
 function App() {
   const [resetToken] = useState(() => new URLSearchParams(window.location.hash.slice(1)).get('reset'));
   useEffect(() => {
     if (resetToken !== null) window.history.replaceState(null, '', window.location.pathname + window.location.search);
   }, [resetToken]);
-  const [currentView, setCurrentView] = useState('dashboard');
-  const { status } = useAuth();
+  const { status, user, identityMasked, identityError, retryIdentityCheck } = useAuth();
 
   if (status === 'checking') {
     return (
@@ -33,26 +92,10 @@ function App() {
   }
 
   return (
-    <FinanceProvider currentView={currentView} setCurrentView={setCurrentView}>
-      <div className="flex flex-col min-h-screen w-full bg-zinc-50 relative">
-        <TopNav currentView={currentView} setCurrentView={setCurrentView} />
-
-        {/* Main Content Area */}
-        <main className="flex-1 w-full pt-24 pb-40 px-4 md:px-8">
-          <div className="max-w-7xl mx-auto w-full h-full flex flex-col gap-6">
-            {currentView === 'dashboard' && <Dashboard />}
-            {currentView === 'transactions' && <Transactions />}
-            {currentView === 'liabilities' && <Liabilities />}
-            {currentView === 'portfolio' && <Portfolio />}
-            {currentView === 'goals' && <Goals />}
-            {currentView === 'subscriptions' && <Subscriptions />}
-            {currentView === 'plans' && <Plans />}
-          </div>
-        </main>
-
-        <AIAvatar />
-      </div>
-    </FinanceProvider>
+    <>
+      {identityMasked && <SessionCheck error={identityError} onRetry={retryIdentityCheck} />}
+      <AuthenticatedApp key={user.id} hidden={identityMasked} />
+    </>
   )
 }
 

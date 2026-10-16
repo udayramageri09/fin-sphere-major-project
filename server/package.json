@@ -4,6 +4,17 @@
   "type": "module",
   "main": "server.js",
   "scripts": {
+    "test:import-duplicates": "node --test tests/importDuplicates.test.mjs",
+    "test:import-duplicates-server": "node tests/importDuplicatesServer.test.mjs",
+    "test:account-guard": "node tests/accountGuard.test.mjs",
+    "test:onboarding": "node tests/onboardingServer.test.mjs",
+    "test:category": "node tests/transactionCategory.test.mjs",
+    "test:transaction-edit": "node tests/transactionEdit.test.mjs",
+    "test:transaction-edit-contract": "node --test tests/transactionEditContract.test.mjs",
+    "test:profile-image": "node --test tests/profileImage.test.mjs",
+    "test:profile": "node tests/profileServer.test.mjs",
+    "test:image-ocr": "node --test tests/imageOcr.test.mjs",
+    "test:image-ocr-server": "node tests/imageOcrServer.test.mjs",
     "test:password-reset": "node --test tests/passwordReset.test.mjs",
     "test:password-reset-db": "node --test tests/passwordResetDb.test.mjs",
     "test:password-reset-local": "node tests/passwordResetLocal.test.mjs",
@@ -17,9 +28,11 @@
     "test:natural": "node --test tests/naturalActions.test.mjs",
     "test:liability": "node --test tests/liabilityActions.test.mjs",
     "test:plans": "node tests/plans.test.mjs",
-    "test:groq": "node tests/groq.test.mjs"
+    "test:groq": "node tests/groq.test.mjs",
+    "test:holdings": "node tests/holdingsServer.test.mjs"
   },
   "dependencies": {
+    "@tesseract.js-data/eng": "1.0.0",
     "bcrypt": "^6.0.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
@@ -28,8 +41,9 @@
     "express-rate-limit": "^8.7.0",
     "helmet": "^8.3.0",
     "jsonwebtoken": "^9.0.3",
-    "multer": "^1.4.5-lts.1",
+    "multer": "2.4.0",
     "pg": "^8.23.1",
+    "tesseract.js": "7.0.0",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   }
 }

@@ -1,0 +1,10 @@
+# Cloudflare Pages response headers for the static frontend (copied to dist/_headers by `vite build`).
+# Conservative on purpose: nothing here can change how the app works. A full Content-Security-Policy needs the final API origin
+# (connect-src) and is documented in docs/RELEASE_RUNBOOK.md rather than guessed here.
+# The microphone stays allowed for this site because the voice assistant uses the browser's speech recognition.
+/*
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(), geolocation=(), payment=(), microphone=(self)
+  Content-Security-Policy: frame-ancestors 'none'

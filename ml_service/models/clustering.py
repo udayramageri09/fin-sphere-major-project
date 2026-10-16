@@ -15,11 +15,7 @@ _CLUSTER_LABELS = {
     2: 'High-Value Events'
 }
 
-_CLUSTER_DESCRIPTIONS = {
-    0: 'Small, frequent day-to-day expenses (food, coffee, transit)',
-    1: 'Moderate purchases — shopping, subscriptions, utility bills',
-    2: 'Large outflows — EMI payments, rent, big purchases, investments'
-}
+# (Cluster descriptions are built from the recorded min/max amounts in run_clustering: amount groups say nothing about merchants or purpose.)
 
 
 def run_clustering(transactions: list[dict], n_clusters: int = 3) -> dict:
@@ -109,7 +105,7 @@ def run_clustering(transactions: list[dict], n_clusters: int = 3) -> dict:
         clusters_out.append({
             'id': cid,
             'label': _CLUSTER_LABELS.get(cid, f'Cluster {cid}'),
-            'description': _CLUSTER_DESCRIPTIONS.get(cid, ''),
+            'description': f"Recorded spending amounts from ₹{cdf['abs_amount'].min():,.2f} to ₹{cdf['abs_amount'].max():,.2f}. Grouped by size, not merchant category.",
             'centroid_amount': round(float(cdf['abs_amount'].mean()), 2),
             'transaction_count': int(len(cdf)),
             'total_amount': round(float(cdf['abs_amount'].sum()), 2),

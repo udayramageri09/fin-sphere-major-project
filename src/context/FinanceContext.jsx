@@ -1,8 +1,12 @@
 /* eslint-disable react-refresh/only-export-components, react-hooks/exhaustive-deps, react-hooks/set-state-in-effect */
 import { createContext, useContext, useState, useEffect, useRef } from 'react';
+import { accountHeaders, refuseIfAccountChanged } from '../utils/accountGuard';
+import { useGuardedFetch } from '../hooks/useGuardedFetch';
 import { useAuth } from './AuthContext';
 import { summarizeTransactions } from '../utils/finance';
 import { localDateString } from '../utils/localDate';
+import { requestImageText } from '../utils/imageOcr';
+import { requestImportConfirm, normalizePreview } from '../utils/duplicateReview';
 
 const FinanceContext = createContext(null);
 
@@ -43,7 +47,9 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
   // Every budget request gets a number; only the newest one may change the list, so neither a switch to another
   // month nor two refreshes of the same month can finish out of order and show older numbers.
   const budgetRequestSeq = useRef(0);
-  const { invalidateSession } = useAuth();
+  const { invalidateSession, user, retryIdentityCheck } = useAuth();
+  // Every request names the account this tab is showing; the server refuses it if the session now belongs to someone else (utils/accountGuard.js).
+  const apiFetch = useGuardedFetch();
 
   const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:5000/api';
 
@@ -51,7 +57,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API_URL}/transactions`, { credentials: 'include' });
+      const res = await apiFetch(`${API_URL}/transactions`, { credentials: 'include' });
       if (res.status === 401) return invalidateSession();
       if (!res.ok) throw new Error('Failed to fetch transactions');
       const data = await res.json();
@@ -68,7 +74,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     setGoalsLoading(true);
     setGoalsError(null);
     try {
-      const res = await fetch(`${API_URL}/goals`, { credentials: 'include' });
+      const res = await apiFetch(`${API_URL}/goals`, { credentials: 'include' });
       if (res.status === 401) return invalidateSession();
       if (!res.ok) throw new Error('Failed to load goals');
       setGoals(await res.json());
@@ -91,7 +97,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     setLiabilitiesLoading(true);
     setLiabilitiesError(null);
     try {
-      const res = await fetch(`${API_URL}/liabilities`, { credentials: 'include' });
+      const res = await apiFetch(`${API_URL}/liabilities`, { credentials: 'include' });
       if (res.status === 401) return dropLiabilitiesAndEndSession();
       if (!res.ok) throw new Error('Failed to load liabilities');
       setLiabilities(await res.json());
@@ -107,7 +113,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     setEmergencyFundLoading(true);
     setEmergencyFundError(null);
     try {
-      const res = await fetch(`${API_URL}/emergency-fund`, { credentials: 'include' });
+      const res = await apiFetch(`${API_URL}/emergency-fund`, { credentials: 'include' });
       if (res.status === 401) {
         setEmergencyFund(null);
         return invalidateSession();
@@ -144,7 +150,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     }
     setBudgetsError(null);
     try {
-      const res = await fetch(`${API_URL}/budgets?month=${encodeURIComponent(month)}`, { credentials: 'include' });
+      const res = await apiFetch(`${API_URL}/budgets?month=${encodeURIComponent(month)}`, { credentials: 'include' });
       if (res.status === 401) return dropBudgetsAndEndSession();
       if (!res.ok) throw new Error('Failed to load budgets');
       const data = await res.json();
@@ -173,7 +179,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
   // Creates or updates the budget for (month, category). Throws on failure so the form can show the server's
   // validation message; a 401 ends the session. The list is only touched if that month is still the one shown.
   const saveBudget = async (payload) => {
-    const res = await fetch(`${API_URL}/budgets`, {
+    const res = await apiFetch(`${API_URL}/budgets`, {
       method: 'PUT',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
@@ -190,7 +196,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
   };
 
   const deleteBudget = async (id) => {
-    const res = await fetch(`${API_URL}/budgets/${encodeURIComponent(id)}`, {
+    const res = await apiFetch(`${API_URL}/budgets/${encodeURIComponent(id)}`, {
       method: 'DELETE',
       credentials: 'include'
     });
@@ -211,7 +217,6 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     fetchGoals();
     fetchLiabilities();
     fetchEmergencyFund();
-    // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect
   }, []);
 
   // The ONE place that applies a stored write to shared state. The manual forms and a confirmed assistant action both
@@ -226,7 +231,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
   const addTransaction = async (txn) => {
     setError(null);
     try {
-      const res = await fetch(`${API_URL}/transactions`, {
+      const res = await apiFetch(`${API_URL}/transactions`, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
@@ -254,7 +259,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
   const deleteTransaction = async (id) => {
     setError(null);
     try {
-      const res = await fetch(`${API_URL}/transactions/${id}`, {
+      const res = await apiFetch(`${API_URL}/transactions/${id}`, {
         method: 'DELETE',
         credentials: 'include'
       });
@@ -280,10 +285,53 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     }
   };
 
+  // The user's correction of ONE transaction's category (the server changes nothing else). The corrected transaction replaces the local
+  // one, so every figure built from `transactions` (the dashboard, the spending analytics) is recalculated at once. Throws the server's
+  // message on failure; a 401 ends the session. Nothing about the transaction is logged.
+  const updateTransaction = async (id, fields) => {
+    let res;
+    try {
+      res = await apiFetch(`${API_URL}/transactions/${encodeURIComponent(id)}`, { method: 'PUT', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fields) });
+    } catch { throw new Error('Could not reach the server. Your transaction has not been changed.'); }
+    if (res.status === 401) { invalidateSession(); throw new Error('Session expired'); }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Could not save the transaction.');
+    setTransactions(prev => { const i = prev.findIndex(t => String(t.id) === String(id)); if (i < 0) return prev; const next = [...prev]; next[i] = data; return next; });
+    return data;
+  };
+
+  const updateTransactionCategory = async (id, category) => {
+    let res;
+    try {
+      res = await apiFetch(`${API_URL}/transactions/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ category })
+      });
+    } catch {
+      throw new Error('Could not reach the server. Check your connection and try again.');
+    }
+    if (res.status === 401) {
+      invalidateSession();
+      throw new Error('Session expired');
+    }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Could not change the category. Please try again.');
+    setTransactions(prev => {
+      const index = prev.findIndex(t => String(t.id) === String(id));   // the same first-match rule the server uses
+      if (index === -1) return prev;
+      const next = [...prev];
+      next[index] = data;
+      return next;
+    });
+    return data;
+  };
+
   // Goal create/delete throw on failure so the caller can show the message inline
   // (the server's validation text is passed through); a 401 ends the session.
   const addGoal = async (goal) => {
-    const res = await fetch(`${API_URL}/goals`, {
+    const res = await apiFetch(`${API_URL}/goals`, {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
@@ -300,7 +348,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
   };
 
   const deleteGoal = async (id) => {
-    const res = await fetch(`${API_URL}/goals/${id}`, {
+    const res = await apiFetch(`${API_URL}/goals/${id}`, {
       method: 'DELETE',
       credentials: 'include'
     });
@@ -319,7 +367,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
   // entry, so the Dashboard and the Goals page (one shared state) stay in sync without a refetch. Throws on
   // failure so the form can show the server's validation message; a 401 ends the session.
   const addGoalContribution = async (goalId, amount) => {
-    const res = await fetch(`${API_URL}/goals/${encodeURIComponent(goalId)}/contributions`, {
+    const res = await apiFetch(`${API_URL}/goals/${encodeURIComponent(goalId)}/contributions`, {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
@@ -338,7 +386,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
   // Liability create/delete throw on failure so the caller can show the message inline
   // (the server's validation text is passed through); a 401 ends the session.
   const addLiability = async (liability) => {
-    const res = await fetch(`${API_URL}/liabilities`, {
+    const res = await apiFetch(`${API_URL}/liabilities`, {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
@@ -357,7 +405,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
   // Records a repayment toward one liability. The server returns the updated liability, which replaces the matching
   // entry (no refetch). Throws on failure so the form can show the server's message; a 401 ends the session.
   const addLiabilityRepayment = async (liabilityId, amount) => {
-    const res = await fetch(`${API_URL}/liabilities/${encodeURIComponent(liabilityId)}/repayments`, {
+    const res = await apiFetch(`${API_URL}/liabilities/${encodeURIComponent(liabilityId)}/repayments`, {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
@@ -374,7 +422,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
   };
 
   const deleteLiability = async (id) => {
-    const res = await fetch(`${API_URL}/liabilities/${id}`, {
+    const res = await apiFetch(`${API_URL}/liabilities/${id}`, {
       method: 'DELETE',
       credentials: 'include'
     });
@@ -392,7 +440,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
   // Saves (creates or replaces) the emergency fund. Throws on failure so the form can show the server's
   // validation message inline; a 401 ends the session.
   const saveEmergencyFund = async (values) => {
-    const res = await fetch(`${API_URL}/emergency-fund`, {
+    const res = await apiFetch(`${API_URL}/emergency-fund`, {
       method: 'PUT',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
@@ -418,13 +466,13 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
       if (input instanceof File) {
         const formData = new FormData();
         formData.append('statementFile', input);
-        res = await fetch(`${API_URL}/transactions/parse-statement`, {
+        res = await apiFetch(`${API_URL}/transactions/parse-statement?duplicates=report`, {
           method: 'POST',
           credentials: 'include',
           body: formData
         });
       } else {
-        res = await fetch(`${API_URL}/transactions/parse-statement`, {
+        res = await apiFetch(`${API_URL}/transactions/parse-statement?duplicates=report`, {
           method: 'POST',
           credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
@@ -435,6 +483,13 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
       if (res.status === 401) {
         invalidateSession();
         throw new Error('Session expired');
+      }
+      if (res.status === 409) {
+        // Duplicate review, not an error: the server held the import back and saved NOTHING. The page shows the review.
+        const held = await res.json().catch(() => null);
+        const preview = held?.code === 'DUPLICATES_FOUND' ? normalizePreview(held) : null;
+        if (preview) return { review: true, preview };
+        throw new Error(held?.error || 'Failed to parse statement');
       }
       if (!res.ok) {
         const errData = await res.json();
@@ -453,6 +508,39 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     }
   };
 
+  // Duplicate review, step 2: send the user's decision about a held-back import. `request` is built from the preview the server
+  // issued ({ rows, policy, reviewDigest, skipIndexes }); nothing is parsed again. Resolves { stale: false, result } after the import
+  // (and a refresh of the transaction list) or { stale: true, preview } when the server refused a review that went out of date.
+  const confirmImport = async (request) => {
+    try {
+      const outcome = await requestImportConfirm({ apiUrl: API_URL, body: request, fetchImpl: apiFetch });
+      if (outcome.stale) return outcome;
+      await fetchTransactions();
+      return outcome;
+    } catch (err) {
+      if (err?.status === 401) {
+        invalidateSession();
+        throw new Error('Session expired', { cause: err });
+      }
+      throw err;
+    }
+  };
+
+  // Image statement upload, step 1: read the text out of a JPG/PNG. Resolves { text, confidence, warnings } and changes nothing
+  // else: no transaction is saved, parseStatement is not called, and the shared loading/error state is left alone (the page
+  // shows its own progress). The user reviews the text in the paste editor and imports it themselves.
+  const extractTextFromImage = async (file) => {
+    try {
+      return await requestImageText({ apiUrl: API_URL, file, fetchImpl: apiFetch });
+    } catch (err) {
+      if (err?.status === 401) {
+        invalidateSession();
+        throw new Error('Session expired', { cause: err });
+      }
+      throw err;
+    }
+  };
+
   // Sends the bounded chat history (src/utils/chatHistory.js) with the user's LOCAL date (only used to resolve "today" /
   // "yesterday") and resolves to { reply, action }. `action` is the server's proposal / clarification / cancellation
   // for a confirmed financial action (Issue #73), or null. Failures reject with a message that can be shown to the user
@@ -463,12 +551,13 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
       res = await fetch(`${API_URL}/chat`, {
         method: 'POST',
         credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...accountHeaders(user) },
         body: JSON.stringify({ messages, localDate })
       });
     } catch {
       throw new Error("I couldn't reach the FinSphere server. Please check your connection and try again.");
     }
+    await refuseIfAccountChanged(res, retryIdentityCheck);
     if (res.status === 401) {
       invalidateSession();
       throw new Error('Your session has expired. Please sign in again.');
@@ -477,7 +566,7 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     if (res.status === 400) throw new Error("I couldn't process that message. Please rephrase it and try again.");
     const data = res.ok ? await res.json().catch(() => null) : null;
     if (!data || typeof data.reply !== 'string') throw new Error('Something went wrong on our side. Please try again.');
-    return { reply: data.reply, action: data.action ?? null };
+    return { reply: data.reply, action: data.action ?? null, visualization: data.visualization ?? null };
   };
 
   const sendMessageToBot = async (messages) => (await sendAssistantMessage(messages)).reply;
@@ -489,8 +578,10 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
   const confirmAssistantAction = async (proposalId) => {
     const res = await fetch(`${API_URL}/assistant/actions/${encodeURIComponent(proposalId)}/confirm`, {
       method: 'POST',
-      credentials: 'include'
+      credentials: 'include',
+      headers: accountHeaders(user)
     });
+    await refuseIfAccountChanged(res, retryIdentityCheck);
     if (res.status === 401) {
       invalidateSession();
       throw new Error('Your session has expired. Please sign in again.');
@@ -511,8 +602,10 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
   const cancelAssistantAction = async (proposalId) => {
     const res = await fetch(`${API_URL}/assistant/actions/${encodeURIComponent(proposalId)}/cancel`, {
       method: 'POST',
-      credentials: 'include'
+      credentials: 'include',
+      headers: accountHeaders(user)
     });
+    await refuseIfAccountChanged(res, retryIdentityCheck);
     if (res.status === 401) {
       invalidateSession();
       throw new Error('Your session has expired. Please sign in again.');
@@ -566,7 +659,11 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
       fetchTransactions,
       addTransaction,
       deleteTransaction,
+      updateTransactionCategory,
+      updateTransaction,
       parseStatement,
+      confirmImport,
+      extractTextFromImage,
       sendMessageToBot,
       sendAssistantMessage,
       confirmAssistantAction,

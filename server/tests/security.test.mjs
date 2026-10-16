@@ -36,7 +36,7 @@ await admin.query(`CREATE DATABASE ${DB}`);
 const children = [];
 
 function start(port, extraEnv = {}) {
-  const env = { ...process.env, DATABASE_URL: urlFor(DB), PORT: String(port), JWT_SECRET: SECRET, GROQ_API_KEY: '', ...extraEnv };
+  const env = { ...process.env, DATABASE_URL: urlFor(DB), PORT: String(port), JWT_SECRET: SECRET, GROQ_API_KEY: '', PASSWORD_RESET_DELIVERY: '', RESEND_API_KEY: '', PASSWORD_RESET_FROM: '', PASSWORD_RESET_URL: '', ...extraEnv };
   for (const k of ['NODE_ENV', 'CORS_ORIGINS', 'TRUST_PROXY', 'DATABASE_SSL', 'FINSPHERE_TEST_UPLOAD_LIMIT']) if (!(k in extraEnv)) delete env[k];
   const child = spawn(process.execPath, ['server.js'], { cwd: SERVER_DIR, env, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
@@ -62,6 +62,11 @@ async function run() {
   const P = 5071;
   const dev = start(P, { CORS_ORIGINS: 'https://app.example.com/' });
   ok(await ready(P), 'dev server starts', dev.out());
+  const health = await fetch(base(P) + '/api/health');
+  ok(health.status === 200 && (await health.json()).status === 'ok', 'health probes database without exposing details');
+  ok(health.headers.get('cache-control') === 'no-store', 'API responses disable caching');
+  const malformed = await fetch(base(P) + '/api/chat', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{' });
+  ok(malformed.status === 400 && malformed.headers.get('cache-control') === 'no-store', 'parser failures also disable caching');
 
   let r = await fetch(base(P) + '/api/auth/verify', { headers: { Origin: 'https://app.example.com' } });
   ok(r.headers.get('x-powered-by') === null, 'no X-Powered-By');
@@ -77,6 +82,14 @@ async function run() {
   ok(r.headers.get('access-control-allow-origin') === null, 'localhost not allowed once CORS_ORIGINS is configured');
   r = await fetch(base(P) + '/api/auth/verify', { method: 'OPTIONS', headers: { Origin: 'https://app.example.com', 'Access-Control-Request-Method': 'POST' } });
   ok(r.status === 204 && r.headers.get('access-control-allow-origin') === 'https://app.example.com', 'preflight ok');
+
+  // CORS alone must not permit a disallowed browser origin to mutate an account.
+  for (const headers of [{ Origin: 'https://evil.example' }, { Origin: 'null' }, { 'Sec-Fetch-Site': 'cross-site' }]) {
+    r = await fetch(base(P) + '/api/auth/logout', { method: 'POST', headers });
+    ok(r.status === 403, 'untrusted browser write is refused before route execution');
+  }
+  r = await fetch(base(P) + '/api/auth/logout', { method: 'POST', headers: { Origin: 'https://app.example.com' } });
+  ok(r.ok, 'configured browser origin can write');
 
   // body handling
   r = await fetch(base(P) + '/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{bad json' });
@@ -175,6 +188,14 @@ async function run() {
     if (status === 429) n429++;
   }
   ok(n429 === 0, 'override raises the limit below its new ceiling');
+  // A malformed spreadsheet must not put the parser's error object (stack frames, file paths) or any statement text into the log.
+  const hostile = Buffer.concat([Buffer.from('PK\x03\x04SENTINEL-STATEMENT-TEXT 12/01/2026 Salary +50000.00 '), Buffer.alloc(200, 7)]);
+  const fdBad = new FormData(); fdBad.append('statementFile', new Blob([hostile]), 'broken.xlsx');
+  const bad = await fetch(base(P3) + '/api/transactions/parse-statement', { method: 'POST', headers: { cookie: tok3 }, body: fdBad });
+  const badBody = await bad.text();
+  await new Promise((res) => setTimeout(res, 300));
+  ok(bad.status >= 400 && !/SENTINEL|\.mjs|\bat .*\(/.test(badBody), 'malformed spreadsheet is refused without parser internals in the response', `${bad.status} ${badBody.slice(0, 80)}`);
+  ok(!/SENTINEL/.test(raised.out()) && !/\n\s+at .*\(|xlsx\.mjs/.test(raised.out()), 'malformed spreadsheet does not put statement text, stack frames or file paths in the log', raised.out().slice(-300));
   raised.child.kill();
 
   // ── Production-mode server: secure cookie, no CORS when unset, override ignored ─

@@ -1,5 +1,7 @@
 /* eslint-disable no-undef, no-unused-vars, no-useless-assignment */
 import express from 'express';
+import { parseTrustProxy } from './runtimeConfig.js';
+import { holdingsRouter } from './holdings.js';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import multer from 'multer';
@@ -13,9 +15,9 @@ import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
 import { randomUUID } from 'node:crypto';
 import {
-  initDatabase, closeDatabase, createUser, findUserByEmail, normalizeEmail, DuplicateEmailError,
+  initDatabase, closeDatabase, databaseHealthy, readProfile, updateProfile, saveAvatar, readAvatar, deleteAvatar, createUser, findUserByEmail, normalizeEmail, DuplicateEmailError,
   issuePasswordReset, consumePasswordReset, isCurrentSession,
-  listTransactionsByUser, createTransaction, createTransactionsBatch, deleteTransactionByUserAndId,
+  listTransactionsByUser, createTransaction, createTransactionsBatch, importTransactionsLocked, ImportMatchLimitError, deleteTransactionByUserAndId, updateTransactionCategory, updateTransactionByUserAndId,
   listGoalsByUser, createGoal, deleteGoalByUserAndId, addGoalContribution, listGoalContributions,
   listLiabilitiesByUser, insertLiabilityIdempotent, deleteLiabilityByUserAndId, sumMonthlyPaymentsByUser, repayLiability, listLiabilityRepayments,
   getEmergencyFundByUser, upsertEmergencyFund, getTransactionTotalsByUser,
@@ -26,6 +28,9 @@ import {
 import { createAssistantActions, shiftDate, monthLabel } from './assistantActions.js';
 import { createStructuredExtractor } from './structuredActionExtractor.js';
 import { getChatModel, getParseModel, groqChatUrl, modelRequestFields } from './groqModels.js';
+import { createOcrService, createTesseractEngine, createOcrStatementImageHandlers } from './imageOcr.js';
+import { sanitizeProfileImage, ProfileImageError, AVATAR_LIMITS } from './profileImage.js';
+import { MAX_IMPORT_ROWS, findDuplicates, buildPreview, reviewDigest, digestsEqual, parseConfirmRequest, planImport } from './importDuplicates.js';
 import { createSnapshotStore, sanitizeAnalysis } from './planSnapshot.js';
 import { createResetDelivery, createDevMailHandlers, createPasswordResetHandlers } from './passwordReset.js';
 
@@ -55,6 +60,8 @@ const JWT_VERIFY_OPTIONS = { algorithms: [JWT_ALGORITHM] };
 // ── Authentication Middleware ──────────────────────────────────────────────────
 // Reads the JWT from the httpOnly cookie set at login, verifies it, and attaches
 // the decoded identity to req.user.  Returns 401 for missing / invalid / expired tokens.
+// Identity contract: every financial query uses req.user.id only after token verification
+// and session-version validation. The stale-tab header below is never an identity source.
 async function authenticate(req, res, next) {
   const token = req.cookies.token;
   if (!token) return res.status(401).json({ error: 'Authentication required' });
@@ -62,10 +69,17 @@ async function authenticate(req, res, next) {
     const decoded = jwt.verify(token, JWT_SECRET, JWT_VERIFY_OPTIONS);
     if (!await isCurrentSession(decoded.id, decoded.sessionVersion ?? 0)) return res.status(401).json({ error: 'Invalid or expired token' });
     req.user = { id: decoded.id, email: decoded.email };
-    next();
   } catch {
     return res.status(401).json({ error: 'Invalid or expired token' });
   }
+  // Tabs of one browser share the session cookie. The signed-in app sends X-FinSphere-User (the account id it is showing); if the session
+  // now belongs to a different account (changed in another tab) the request is refused BEFORE anything is read, answered, proposed or
+  // written. The header is optional and is only ever compared with the verified session id; it is never used to choose an owner.
+  const claimed = req.get('x-finsphere-user');
+  if (claimed !== undefined && claimed !== String(req.user.id)) {
+    return res.status(409).json({ code: 'account_changed', error: 'Your account changed in another tab. Nothing was done.' });
+  }
+  next();
 }
 // ───────────────────────────────────────────────────────────────────────────────
 
@@ -87,21 +101,37 @@ if (isProd && allowedOrigins.length === 0) {
 // TRUST_PROXY: how many reverse-proxy hops sit in front of this server (e.g. 1 on Render / behind one load
 // balancer). Without it req.ip is the proxy's address, so every client shares one rate-limit bucket. A bare
 // "true" is refused because it would let any client choose its own IP through X-Forwarded-For.
-if (process.env.TRUST_PROXY !== undefined && process.env.TRUST_PROXY !== '') {
-  const hops = process.env.TRUST_PROXY.trim();
-  if (hops.toLowerCase() === 'true') {
-    console.error('FATAL: TRUST_PROXY must be a hop count (e.g. 1) or a subnet list, not "true".');
-    process.exit(1);
-  }
-  app.set('trust proxy', /^\d+$/.test(hops) ? Number(hops) : hops);
+try {
+  app.set('trust proxy', parseTrustProxy(process.env.TRUST_PROXY));
+} catch (err) {
+  console.error('FATAL:', err.message);
+  process.exit(1);
 }
 
 app.use(helmet());   // security headers; also removes X-Powered-By
+// Financial responses and session failures must not survive in browser/proxy caches.
+app.use('/api', (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 app.use(cors({ origin: allowedOrigins, credentials: true }));
+// CORS controls response visibility, not writes. Refuse browser writes from other origins,
+// including same-site sibling subdomains that SameSite cookies alone would permit.
+app.use('/api', (req, res, next) => {
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+    const origin = req.get('origin');
+    if ((origin && !allowedOrigins.includes(origin)) || req.get('sec-fetch-site') === 'cross-site') {
+      return res.status(403).json({ error: 'Request origin is not allowed' });
+    }
+  }
+  next();
+});
 // Largest JSON body accepted (pasted statement text, chat and plan-chat). Stated explicitly rather than relying on
 // the library default; larger requests are answered 413.
-app.use(express.json({ limit: '100kb' }));
+const globalJson = express.json({ limit: '100kb' });
+app.use((req, res, next) => (req.path === '/api/transactions/import-confirm' ? next() : globalJson(req, res, next)));   // that one route has its own, authenticated, 256 KB parser
 app.use(cookieParser());
+app.get('/api/health', rateLimit({ windowMs: 60_000, limit: 60, standardHeaders: true, legacyHeaders: false }), async (req, res) => {
+  try { await databaseHealthy(); res.json({ status: 'ok' }); }
+  catch { res.status(503).json({ status: 'unavailable' }); }
+});
 
 // Set up multer for file uploads using memory storage for zero-footprint.
 // Limit: 5 MB — generous upper bound for any real-world bank statement
@@ -611,6 +641,8 @@ if (process.env.FINSPHERE_TEST_UPLOAD_LIMIT) {
 }
 const parseLimiter = perUserLimiter(uploadLimit, 'statement upload');
 const mlLimiter = perUserLimiter(10, 'analysis');
+// Image OCR is CPU-heavy (a WASM engine): 5 per minute per user, on top of the service's own concurrency cap.
+const ocrLimiter = perUserLimiter(5, 'image text recognition');
 const actionLimiter = perUserLimiter(30, 'assistant action');
 // ───────────────────────────────────────────────────────────────────────────────
 
@@ -681,7 +713,7 @@ app.post('/api/auth/login', authLimiter, async (req, res) => {
     }
     const token = jwt.sign({ id: user.id, email: user.email, sessionVersion: user.sessionVersion }, JWT_SECRET, { algorithm: JWT_ALGORITHM, expiresIn: '1h' });
     res.cookie('token', token, { httpOnly: true, secure: isProd, sameSite: isProd ? 'strict' : 'lax', maxAge: 60 * 60 * 1000 });
-    res.json({ message: 'Logged in successfully', user: { id: user.id, email: user.email } });
+    res.json({ message: 'Logged in successfully', user: await readProfile(user.id) });
   } catch (err) {
     console.error('Login failed:', err.message);
     res.status(500).json({ error: 'Login failed' });
@@ -699,7 +731,9 @@ app.get('/api/auth/verify', async (req, res) => {
   try {
     const decoded = jwt.verify(token, JWT_SECRET, JWT_VERIFY_OPTIONS);
     if (!await isCurrentSession(decoded.id, decoded.sessionVersion ?? 0)) return res.status(401).json({ error: 'Invalid token' });
-    res.json({ user: decoded });
+    const user = await readProfile(decoded.id);
+    if (!user) return res.status(401).json({ error: 'Invalid token' });
+    res.json({ user });
   } catch (err) {
     res.status(401).json({ error: 'Invalid token' });
   }
@@ -711,6 +745,80 @@ function respondDbError(res, err, message) {
   console.error(`${message}:`, err.code ?? err.message);
   return res.status(500).json({ error: message });
 }
+
+app.use('/api/holdings', holdingsRouter(authenticate, perUserLimiter(120, 'investment holdings')));
+
+// Optional profile: no legal name, PAN, phone, or financial details collected. Only these two fields can be changed here; the
+// sign-in email is deliberately NOT editable through this endpoint (there is no verified email-change flow).
+const PROFILE_FIELDS = ['displayName', 'reduceMotion', 'onboardingState'];
+const ONBOARDING_STATES = ['pending', 'skipped', 'completed'];
+app.patch('/api/auth/profile', authenticate, async (req, res) => {
+  const body = req.body;
+  const keys = body && typeof body === 'object' && !Array.isArray(body) ? Object.keys(body) : [];
+  const valid = keys.length > 0 && keys.every((key) => PROFILE_FIELDS.includes(key)) &&
+    (!('displayName' in body) || (typeof body.displayName === 'string' && body.displayName.length <= 80 && !/[\p{Cc}\p{Cf}]/u.test(body.displayName))) &&
+    (!('reduceMotion' in body) || typeof body.reduceMotion === 'boolean') &&
+    (!('onboardingState' in body) || ONBOARDING_STATES.includes(body.onboardingState));
+  if (!valid) {
+    return res.status(400).json({ error: 'Send a display name of at most 80 characters without control characters, the reduce-motion preference, and/or a setup-guide state (pending, skipped or completed).' });
+  }
+  try {
+    const user = await updateProfile(req.user.id, {
+      displayName: 'displayName' in body ? body.displayName.trim() : undefined,
+      reduceMotion: 'reduceMotion' in body ? body.reduceMotion : undefined,
+      onboardingState: 'onboardingState' in body ? body.onboardingState : undefined
+    });
+    if (!user) return res.status(401).json({ error: 'Not authenticated' });
+    res.json({ user });
+  } catch (err) { respondDbError(res, err, 'Could not save profile'); }
+});
+
+// Profile photo. The owner is always the session user (there is no id in any of these URLs), so one account can never read, replace
+// or delete another account's photo. The image is validated by its real bytes and re-written without metadata (profileImage.js);
+// its bytes and the user's profile are never logged. Rate limited like other expensive per-user work.
+const avatarLimiter = perUserLimiter(10, 'profile photo');
+const avatarUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: AVATAR_LIMITS.maxUploadBytes, files: 1, fields: 0, parts: 2 } });
+app.put('/api/auth/avatar', authenticate, avatarLimiter, (req, res, next) => {
+  avatarUpload.single('avatar')(req, res, (err) => {
+    if (!err) return next();
+    if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: `Photo is too large (maximum ${AVATAR_LIMITS.maxUploadBytes / 1024} KB).` });
+    return res.status(400).json({ error: 'Choose one photo.' });
+  });
+}, async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'Choose a photo.' });
+  let image;
+  try {
+    image = sanitizeProfileImage(req.file.buffer);
+  } catch (err) {
+    if (err instanceof ProfileImageError) return res.status(err.status).json({ error: err.message });
+    console.error('Profile photo check failed unexpectedly');
+    return res.status(500).json({ error: 'Could not check this photo.' });
+  } finally {
+    req.file.buffer = null;
+  }
+  try {
+    await saveAvatar(req.user.id, image);
+    const user = await readProfile(req.user.id);
+    if (!user) return res.status(401).json({ error: 'Not authenticated' });
+    res.json({ user });
+  } catch (err) { respondDbError(res, err, 'Could not save photo'); }
+});
+app.get('/api/auth/avatar', authenticate, async (req, res) => {
+  try {
+    const avatar = await readAvatar(req.user.id);
+    if (!avatar) return res.status(404).json({ error: 'No photo' });
+    res.set({ 'Content-Type': avatar.contentType, 'Content-Length': String(avatar.data.length), 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': 'inline' });
+    res.end(avatar.data);
+  } catch (err) { respondDbError(res, err, 'Could not load photo'); }
+});
+app.delete('/api/auth/avatar', authenticate, async (req, res) => {
+  try {
+    await deleteAvatar(req.user.id);
+    const user = await readProfile(req.user.id);
+    if (!user) return res.status(401).json({ error: 'Not authenticated' });
+    res.json({ user });
+  } catch (err) { respondDbError(res, err, 'Could not remove photo'); }
+});
 
 // 1. GET /api/transactions
 app.get('/api/transactions', authenticate, async (req, res) => {
@@ -851,6 +959,44 @@ app.delete('/api/transactions/:id', authenticate, async (req, res) => {
     return res.status(404).json({ error: 'Transaction not found' });
   }
   res.json({ message: 'Transaction deleted successfully' });
+});
+
+// 3b. PATCH /api/transactions/:id - the user's correction of ONE transaction's category (nothing else can be changed here).
+// Only { category } is accepted: a title, amount, date, type, classification, id or owner in the body is refused (400), so a correction can
+// never rewrite money or the analytical classification. The target is the signed-in user's own row (same targeting as DELETE); another
+// user's id answers 404 exactly like a missing one.
+const MAX_CATEGORY_LENGTH = 60;
+const categoryEditLimiter = perUserLimiter(120, 'transaction edit');
+app.patch('/api/transactions/:id', authenticate, categoryEditLimiter, async (req, res) => {
+  const body = req.body;
+  const keys = body && typeof body === 'object' && !Array.isArray(body) ? Object.keys(body) : [];
+  const category = keys.length === 1 && keys[0] === 'category' && typeof body.category === 'string' ? body.category.trim() : '';
+  if (category.length === 0 || category.length > MAX_CATEGORY_LENGTH || /[\p{Cc}\p{Cf}]/u.test(category)) {
+    return res.status(400).json({ error: `Send only a category of 1 to ${MAX_CATEGORY_LENGTH} characters without control characters.` });
+  }
+  let updated;
+  try {
+    updated = await updateTransactionCategory(req.user.id, req.params.id, category);
+  } catch (err) {
+    return respondDbError(res, err, 'Could not change the category');
+  }
+  if (!updated) return res.status(404).json({ error: 'Transaction not found' });
+  res.json(updated);
+});
+
+// Activity editor: complete validated fields; ownership and identity never come from the body.
+app.put('/api/transactions/:id', authenticate, categoryEditLimiter, async (req, res) => {
+  const fields = ['title', 'amount', 'date', 'type', 'category', 'classification'];
+  const body = req.body;
+  if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length !== fields.length || !fields.every(k => Object.hasOwn(body, k))) return res.status(400).json({ error: 'Send title, amount, date, type, category and classification only.' });
+  const checked = normalizeTransactionInput(body);
+  if (!checked.ok) return res.status(400).json({ error: checked.error });
+  if (checked.value.category.length > MAX_CATEGORY_LENGTH || /[\p{Cc}\p{Cf}]/u.test(checked.value.category)) return res.status(400).json({ error: 'Category must be at most 60 characters without control characters.' });
+  try {
+    const updated = await updateTransactionByUserAndId(req.user.id, req.params.id, checked.value);
+    if (!updated) return res.status(404).json({ error: 'Transaction not found' });
+    res.json(updated);
+  } catch (err) { return respondDbError(res, err, 'Could not save the transaction'); }
 });
 
 // ── Goals ──────────────────────────────────────────────────────────────────────
@@ -1109,6 +1255,54 @@ app.get('/api/liabilities/:id/repayments', authenticate, async (req, res) => {
   }
 });
 
+// ── Duplicate-aware statement import (the default) ──────────────────────────────────────────────────────────────────────────
+// Every statement import (text, CSV, TXT, XLS, XLSX, OCR-derived text) is protected unless the caller says ?duplicates=allow. The rows
+// are checked, inside one locked transaction, against the SAME user's saved transactions: with no match they are saved as usual; with
+// any likely or possible match NOTHING is saved and a preview comes back (409), to be confirmed through
+// /api/transactions/import-confirm. ?duplicates=allow is the explicit, intentional legacy behaviour (no check, no row cap). If the
+// bounded lookup cannot be complete the import fails closed (422) instead of being treated as duplicate-free.
+const IMPORT_CONFIRM_PATH = '/api/transactions/import-confirm';
+// A duplicate check that could not be completed is not "no duplicates": nothing is saved and the caller is told why.
+function respondImportError(res, err, message) {
+  if (err instanceof ImportMatchLimitError) {
+    return res.status(422).json({ success: false, code: 'MATCH_LIMIT_EXCEEDED', error: 'Too many of your saved transactions share the dates and amounts in this import for the duplicate check to be complete. Nothing was imported. Import fewer rows at a time.' });
+  }
+  if (err?.code === '55P03') {   // lock_timeout: another import for this user held the lock for too long
+    res.set('Retry-After', '5');
+    return res.status(503).json({ success: false, code: 'IMPORT_BUSY', error: 'Another import for your account is still running. Nothing was imported. Please try again in a moment.' });
+  }
+  return respondDbError(res, err, message);
+}
+async function respondWithImport(req, res, rows, { skipped, notice } = {}) {
+  const extra = notice ? { notice } : {};
+  if (req.query.duplicates === 'allow') {   // explicit legacy behaviour: no duplicate check
+    try {
+      await createTransactionsBatch(rows); // one statement: all accepted rows or none
+    } catch (dbErr) {
+      return respondDbError(res, dbErr, 'Could not save transactions');
+    }
+    return res.json({ success: true, count: rows.length, skipped, transactions: rows, ...extra });
+  }
+  if (rows.length > MAX_IMPORT_ROWS) {
+    return res.status(413).json({ error: `This statement has ${rows.length} rows; at most ${MAX_IMPORT_ROWS} can be imported at once. Split it into smaller parts.` });
+  }
+  let outcome;
+  try {
+    outcome = await importTransactionsLocked(req.user.id, rows, (existing) => {
+      const results = findDuplicates(rows, existing);
+      if (results.every((r) => !r.tier)) return { insert: rows, result: { conflict: false } };
+      const digest = reviewDigest(JWT_SECRET, req.user.id, rows, results, existing);
+      return { insert: [], result: { conflict: true, preview: buildPreview(rows, results, { skipped, digest }) } };
+    });
+  } catch (dbErr) {
+    return respondImportError(res, dbErr, 'Could not save transactions');
+  }
+  if (outcome.conflict) {
+    return res.status(409).json({ success: false, code: 'DUPLICATES_FOUND', error: 'Some rows look like transactions you already have. Nothing was imported; review them first.', ...outcome.preview });
+  }
+  return res.json({ success: true, count: rows.length, skipped, transactions: rows, ...extra });
+}
+
 // 4. POST /api/transactions/parse-statement
 // Supports both pasted text (req.body.text) and file upload (req.file)
 // upload.single() is called programmatically (not as inline middleware) so that
@@ -1131,6 +1325,9 @@ app.post('/api/transactions/parse-statement', authenticate, parseLimiter, (req, 
     next();
   });
 }, async (req, res) => {
+  if (req.query.duplicates !== undefined && !['allow', 'report'].includes(req.query.duplicates)) {
+    return res.status(400).json({ error: 'duplicates must be "report" (default) or "allow"' });
+  }
   let statementText = '';
   let isExcel = false;
 
@@ -1222,12 +1419,7 @@ app.post('/api/transactions/parse-statement', authenticate, parseLimiter, (req, 
           const { rows: savedRows, skipped: invalidRows } = normalizeImportedRows(parsedTxns);
           const skipped = parserSkipped + invalidRows;
           if (savedRows.length > 0) {
-            try {
-              await createTransactionsBatch(savedRows); // one statement: all accepted rows or none
-            } catch (dbErr) {
-              return respondDbError(res, dbErr, 'Could not save transactions');
-            }
-            return res.json({ success: true, count: savedRows.length, skipped, transactions: savedRows });
+            return respondWithImport(req, res, savedRows, { skipped });
           }
           return res.status(400).json({
             error: `No valid transactions found: ${skipped} row(s) failed validation.`,
@@ -1238,7 +1430,7 @@ app.post('/api/transactions/parse-statement', authenticate, parseLimiter, (req, 
 
       return res.status(400).json({ error: 'Could not parse transactions from Excel. Make sure it is a valid bank statement.' });
     } catch (excelErr) {
-      console.error('Error parsing Excel:', excelErr);
+      console.error('Error parsing Excel:', excelErr?.name ?? 'error');   // name only: never the error object (stack with paths, parser text)
       return res.status(500).json({ error: 'Failed to parse Excel statement.' });
     }
   }
@@ -1248,7 +1440,7 @@ app.post('/api/transactions/parse-statement', authenticate, parseLimiter, (req, 
     try {
       statementText = req.file.buffer.toString('utf8');
     } catch (err) {
-      console.error('Error reading text file from buffer:', err);
+      console.error('Error reading text file from buffer:', err?.name ?? 'error');
       return res.status(500).json({ error: 'Failed to read statement file.' });
     }
   } else if (req.body.text) {
@@ -1268,6 +1460,8 @@ app.post('/api/transactions/parse-statement', authenticate, parseLimiter, (req, 
     try {
       // Model: GROQ_PARSE_MODEL (default openai/gpt-oss-20b). No response_format (the prompt asks for a top-level JSON array,
       // which JSON mode cannot return) and no max_tokens (the output grows with the statement).
+      // Provider output is untrusted extraction, not a ledger. The downstream normalizer
+      // must reject malformed rows before duplicate review or persistence.
       const parseModel = getParseModel(process.env);
       const response = await fetch(groqChatUrl(process.env), {
         method: 'POST',
@@ -1327,12 +1521,7 @@ Return only the valid JSON array, like: [{"title": "Salary", "amount": 50000, "d
           const { rows, skipped } = normalizeImportedRows(candidates);
 
           if (rows.length > 0) {
-            try {
-              await createTransactionsBatch(rows); // one statement: all accepted rows or none
-            } catch (dbErr) {
-              return respondDbError(res, dbErr, 'Could not save transactions');
-            }
-            return res.json({ success: true, count: rows.length, skipped, transactions: rows });
+            return respondWithImport(req, res, rows, { skipped });
           }
           // No valid rows from the AI: fall through to the rule-based parser below.
         }
@@ -1388,18 +1577,7 @@ Return only the valid JSON array, like: [{"title": "Salary", "amount": 50000, "d
       const { rows: savedRows, skipped: invalidRows } = normalizeImportedRows(parsedTxns);
       const skipped = parserSkipped + invalidRows;
       if (savedRows.length > 0) {
-        try {
-          await createTransactionsBatch(savedRows); // one statement: all accepted rows or none
-        } catch (dbErr) {
-          return respondDbError(res, dbErr, 'Could not save transactions');
-        }
-        return res.json({
-          success: true,
-          count: savedRows.length,
-          skipped,
-          transactions: savedRows,
-          notice: 'Parsed using local backup engine'
-        });
+        return respondWithImport(req, res, savedRows, { skipped, notice: 'Parsed using local backup engine' });
       }
       return res.status(400).json({
         error: `No valid transactions found: ${skipped} row(s) failed validation.`,
@@ -1409,10 +1587,59 @@ Return only the valid JSON array, like: [{"title": "Salary", "amount": 50000, "d
 
     res.status(400).json({ error: 'Could not parse any transactions from the provided statement. Check the format.' });
   } catch (err) {
-    console.error('Error parsing file locally:', err);
+    console.error('Error parsing file locally:', err?.name ?? 'error');
     res.status(500).json({ error: 'Failed parsing bank statement' });
   }
 });
+
+// 4b. POST /api/transactions/import-confirm (duplicate-aware import, step 2)
+// The rows of a duplicate preview come back with the user's decision. Nothing the client says about identity or duplicates is trusted:
+// every row is validated again, ids are generated here, the owner is the session user, and the matches are recomputed inside the
+// per-user import lock. The reviewDigest must equal the fingerprint of what is about to be saved (a stale or edited review gets 409).
+// No statement is parsed again and no language model is called.
+const importConfirmLimiter = perUserLimiter(20, 'import confirmation');
+const importConfirmJson = express.json({ limit: '256kb' });
+app.post(IMPORT_CONFIRM_PATH, authenticate, importConfirmLimiter, importConfirmJson, async (req, res) => {
+  const parsed = parseConfirmRequest(req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const rows = [];
+  for (let i = 0; i < parsed.value.rows.length; i++) {
+    const raw = parsed.value.rows[i];
+    // Only these five fields are read. An id, userId, classification or duplicate flag in the request is ignored.
+    const normalized = normalizeTransactionInput({ title: raw?.title, amount: raw?.amount, date: raw?.date, type: raw?.type, category: raw?.category });
+    if (!normalized.ok) return res.status(400).json({ error: `Row ${i + 1}: ${normalized.error}` });
+    rows.push({ id: randomUUID(), userId: req.user.id, ...normalized.value });
+  }
+  let outcome;
+  try {
+    outcome = await importTransactionsLocked(req.user.id, rows, (existing) => {
+      const results = findDuplicates(rows, existing);
+      const digest = reviewDigest(JWT_SECRET, req.user.id, rows, results, existing);
+      if (!digestsEqual(digest, parsed.value.reviewDigest)) {
+        return { insert: [], result: { stale: true, preview: buildPreview(rows, results, { skipped: 0, digest }) } };
+      }
+      const plan = planImport(rows, results, parsed.value);
+      return { insert: plan.insert, result: { stale: false, plan } };
+    });
+  } catch (dbErr) {
+    return respondImportError(res, dbErr, 'Could not save transactions');
+  }
+  if (outcome.stale) {
+    return res.status(409).json({ success: false, code: 'STALE_PREVIEW', error: 'Your transactions changed since this import was reviewed. Nothing was imported; review it again.', ...outcome.preview });
+  }
+  const { insert, skippedLikely, skippedByUser, likelyImportedAnyway, possibleImported } = outcome.plan;
+  return res.json({
+    success: true, count: insert.length, skipped: skippedLikely + skippedByUser, transactions: insert,
+    duplicates: { skippedLikely, skippedByUser, likelyImportedAnyway, possibleImported }
+  });
+});
+
+// 5. POST /api/transactions/ocr-statement-image (Stage 1 of image statement upload)
+// Local Tesseract.js OCR of one JPG/JPEG/PNG. Returns the extracted TEXT and warnings only: it never inserts a transaction, never
+// calls Groq or any other external service, and neither the image nor the text is logged or stored. Its upload handling is separate
+// from the statement import above, whose allow-list is unchanged. See imageOcr.js.
+const imageOcr = createOcrService({ engine: createTesseractEngine() });
+app.post('/api/transactions/ocr-statement-image', authenticate, ocrLimiter, ...createOcrStatementImageHandlers({ ocr: imageOcr }));
 
 // ₹ with Indian grouping, at most 2 decimals, and a leading minus for negatives.
 const formatRupees = (n) => {
@@ -1563,7 +1790,7 @@ function fallbackReply(history, ctx) {
       reply = "I don't have a credit score for you. FinSphere isn't connected to any credit bureau, and I won't estimate one from your transactions.";
       break;
     case 'portfolio':
-      reply = "I don't have any portfolio or investment holdings data for you, so I can't describe an allocation or returns.";
+      reply = "Open Portfolio to view or record your investment holdings and valuations. Investment records are not connected to this chat, so I cannot report their allocation or returns here.";
       break;
     case 'networth':
       reply = `I can't work out your net worth because FinSphere doesn't have your assets. From your recorded transactions, your net cash flow (total income minus total spending, refunds and transfers handled as described) is ${formatRupees(all.netCashFlow)}.`;
@@ -1806,7 +2033,9 @@ app.post('/api/chat', authenticate, chatLimiter, async (req, res) => {
     return res.json({ reply: actionTurn.reply, ...(actionTurn.action ? { action: actionTurn.action } : {}) });
   }
   // A cancelled proposal is reported to the client, and the user is told, before the normal answer.
+  let visualization = null;
   const answer = (reply) => res.json({
+    ...(visualization ? { visualization } : {}),
     reply: actionTurn.cancelNotice ? `${actionTurn.cancelNotice} ${reply}` : reply,
     ...(actionTurn.action ? { action: actionTurn.action } : {})
   });
@@ -1834,6 +2063,20 @@ app.post('/api/chat', authenticate, chatLimiter, async (req, res) => {
     }
 
     const ctx = { month, allTotals, monthTotals, goals: userGoals, liabilities: userLiabilities, emergencyFund, budgets: userBudgets };
+    // Visuals come only from the same authenticated database totals as the prose.
+    // Keep action previews on their existing, separate confirmation path.
+    const topic = fallbackTopic(history.at(-1).content);
+    if (['income', 'spending', 'cashflow'].includes(topic)) {
+      visualization = {
+        title: `Recorded cash flow · ${month} (UTC)`,
+        provisional: monthTotals.unknownCount > 0,
+        rows: [
+          { label: 'Income', amount: monthTotals.totalIncome },
+          { label: 'Net spending', amount: monthTotals.totalSpending },
+          { label: 'Net cash flow', amount: monthTotals.netCashFlow },
+        ],
+      };
+    }
     const recentTransactions = userTransactions.slice(0, 10);
 
     const systemMessage = {
@@ -1860,7 +2103,7 @@ All recorded transactions:
 - Monthly budgets for ${month} (limits the user set, with their real spending that month):${describeBudgetsForAssistant(userBudgets)}
 - The 10 most recent transactions, latest first (examples only; never add them up to get a total - use the totals above). "classification" is an optional analytical label; "unknown" means not labelled yet - such a transaction is counted by its direction in the totals above; a refund reduces spending and is not income; a transfer is in neither total: ${JSON.stringify(recentTransactions)}
 
-NOT available for this user (no such data exists in FinSphere): credit score, portfolio holdings or returns, net worth (FinSphere has no asset data), months of emergency-fund coverage and the financial health score (those come from the analysis on the Plans page and are not in this data).
+NOT available to this chat: credit score, portfolio holdings or returns, net worth (FinSphere has no asset data), months of emergency-fund coverage and the financial health score (those come from the analysis on the Plans page and are not in this data).
 
 Rules:
 1. State figures only from the AUTHORITATIVE FINANCIAL DATA above. For "this month" questions use the "This month" figures.
@@ -1951,6 +2194,9 @@ app.get('/api/ml/analyze', authenticate, mlLimiter, async (req, res) => {
     } catch (dbErr) {
       return respondDbError(res, dbErr, 'Could not load emergency fund');   // not an ML-service problem
     }
+    // Ward clustering is quadratic in row count. Refuse oversized histories explicitly;
+    // never silently truncate the user's analysis or compete without a memory bound.
+    if (userTransactions.length > 3000) return res.status(422).json({ error: 'Analysis supports up to 3000 transactions per account.' });
     const payload = {
       transactions: userTransactions,
       monthly_debt_payments: monthlyDebtPayments,
@@ -1958,6 +2204,8 @@ app.get('/api/ml/analyze', authenticate, mlLimiter, async (req, res) => {
       n_forecast_months: 3
     };
 
+    // Only server-loaded, owner-scoped data crosses this boundary. The private Python
+    // service is stateless and unauthenticated; its output cannot authorize database writes.
     const mlRes = await fetch(`${ML_SERVICE_URL}/ml/full-analysis`, {
       method: 'POST',
       signal: AbortSignal.timeout(60_000),
@@ -2156,11 +2404,7 @@ try {
   console.error('Set DATABASE_URL to a reachable PostgreSQL database (see server/.env.example).');
   process.exit(1);
 }
-for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.once(signal, () => { closeDatabase().finally(() => process.exit(0)); });
-}
-
-app.listen(PORT, () => {
+const httpServer = app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
   if (isGroqConfigured()) {
     console.log('Groq API Key is loaded successfully.');
@@ -2168,3 +2412,16 @@ app.listen(PORT, () => {
     console.log('Groq API Key is NOT configured or is default. Running in Demo mode with smart local fallbacks.');
   }
 });
+
+// Stop accepting requests before draining the pool; in-flight writes finish first.
+// The deadline bounds shutdown if an upstream service or client never completes.
+let stopping = false;
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.once(signal, () => {
+    if (stopping) return;
+    stopping = true;
+    setTimeout(() => process.exit(1), 10_000).unref();
+    httpServer.close(() => closeDatabase().then(() => process.exit(0), () => process.exit(1)));
+    httpServer.closeIdleConnections();
+  });
+}

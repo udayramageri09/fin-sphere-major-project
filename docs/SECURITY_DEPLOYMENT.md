@@ -32,6 +32,7 @@ Secrets live only in untracked `.env` files (`.gitignore` excludes `.env` and `.
 * Every data route derives the owner from the verified token (`req.user.id`), never from the request body or URL.
 * Passwords: bcrypt (cost 10), minimum 8 characters. Register and login are limited to 15 attempts per 15 minutes per IP.
 * **Cross-site deployment caveat.** The cookie is `SameSite=Strict` in production. That works when the frontend and API are the same site (for example `app.example.com` and `api.example.com`). If they are on different registrable domains (for example two unrelated `*.onrender.com`-style hosts) the browser will not send the cookie and login will appear to fail. This is deliberately not loosened here, because `SameSite=None` weakens CSRF protection; choose a same-site layout, or treat it as a separate, reviewed change.
+* **Several tabs, one session.** Tabs of one browser share the cookie, so one tab can sign out or switch accounts under another. Every sign-in, sign-out and session loss writes a fresh random marker to `localStorage` (`finsphere:session-epoch`); other tabs hear it through the `storage` event, hide the signed-in screen at once, and ask `GET /api/auth/verify` whose session this is. The same account keeps its screen; a different account gets a completely new one (chat, pending previews, captions, voice activity and page data of the previous account are discarded and anything still in flight for it has nowhere to land); a signed-out session returns to the sign-in page; if the server cannot be reached the screen stays hidden with a Retry button. A tab that comes back to the foreground re-checks if the marker moved (or the browser blocks `localStorage`), and quietly after 30 seconds otherwise. Profile changes (display name, setup-guide state) use a second marker, `finsphere:profile-epoch`, and refresh other tabs without hiding anything. Neither marker contains an identity, credential or financial value. Every authenticated request the signed-in app makes (finance data, assistant, holdings, Plans analysis and plan chat, profile and photo) names the account the tab is showing in an optional X-FinSphere-User header; the server compares it with the verified session before doing any work and answers 409 account_changed on a mismatch, and the tab responds by re-checking its session. /api/auth/verify is exempt so a stale tab can always find out the truth. The check lives in `authenticate()`, so it covers every route that uses it (transactions and edits, statement parsing, import confirmation, image OCR, goals, liabilities, budgets, emergency fund, holdings, analysis, chats, assistant actions, profile and photo); the server test sweeps all of them. The routes that do not use `authenticate` are intentional: register, login, sign-out (it only ends the browser session and touches no financial data), password recovery and the development-only mail viewer. The header is optional so that clients which do not send it keep working; it is never used to choose whose data is read (the owner always comes from the verified session), so omitting or forging it cannot expose another account. It is a protection for the browser's own stale tabs, not an authorization mechanism. A confirmation for a financial preview still names the proposal and is checked against the session owner on the server, so a stale preview is refused under another account.
 * There is no CSRF token. Protection rests on `SameSite=Strict` plus the exact-origin CORS list; JSON bodies are required for state changes.
 
 ## 3. Transport and headers
@@ -75,6 +76,8 @@ Statement parsing uses SheetJS (`xlsx`). The npm registry copy (0.18.5) has know
 
 ## 9. Dependency audit status
 
+October 16, 2026 update: API Multer is pinned to 2.4.0. Full root audit reports Vite/esbuild development-tool findings; production-only root and full API audits are recorded in `FINALIZATION_REPORT.md`. The installed Python application dependency closure was also scanned: 16 advisory entries (9 unique IDs) in AnyIO, idna, python-dotenv and Starlette; see the finalization report. The historical result below is not a current full dependency clearance. Legacy JSON imports are disabled by default in production; set `IMPORT_LEGACY_JSON=false` for test/demo startup. API `/api/health` probes PostgreSQL, API responses use no-store, and shutdown drains HTTP before closing the pool with a 10-second deadline. Proxy values are validated; use `false` locally.
+
 `npm audit --omit=dev`: 0 vulnerabilities in the API (`server/`) and in the frontend (root). Re-run before each release. `ml_service/requirements.txt` uses minimum versions (`>=`) rather than pins and has no automated vulnerability scan; pin and scan it in CI for a real deployment.
 
 ## 10. Confirmed assistant actions (Issues #73, #75, #77 and #79)
@@ -107,3 +110,25 @@ When the assistant adds a transaction, adds to a goal, records a liability repay
 ## 11. Known remaining risks
 
 See the final section of the Issue #67 report; in short: ML service isolation is a deployment responsibility, in-memory rate limits, no CSRF token beyond SameSite, no parser sandbox, CDN-hosted `xlsx` tarball, no Python vulnerability scanning, and Python `main.py` still labels clustering "KMeans" (wording only).
+
+
+## Current release candidate verification (16 October 2026)
+
+The preceding dated audit paragraphs describe historical states. The release candidate uses
+Vite 6.4.4 and a pinned clean Python 3.12 application closure. Both npm audits and the
+25-package Python closure scan report zero known vulnerabilities; this does not cover the
+unchanged global demo interpreter or certify the target host. See RELEASE_VERIFICATION.md.
+Unsafe API methods reject untrusted Origin headers and cross-site browser writes before
+route execution; CORS and Strict cookies remain additional layers. Configure the exact
+same-site frontend origin explicitly, including for same-origin hosting. Non-browser clients
+without Origin still need valid auth. The health query is rate limited to 60/minute/IP.
+ML inputs reject non-finite transaction amounts and negative/non-finite financial context;
+forecast horizons are 1–12 months and analysis is capped at 3,000 rows without truncation.
+The API enforces the row cap before sending private data to Python.
+
+Container templates exclude secrets and runtime JSON. Python is on an internal compose
+network without a published port; API is bound to host loopback pending a host HTTPS proxy.
+Containers and ARM64 execution remain unverified because Docker is unavailable here.
+Spreadsheet parsing is still in-process and residual decompression/resource risk remains.
+The new synthetic backup/restore rehearsal does not prove production recovery or replace
+encrypted off-host backups. Host rollout approval and staging verification are still required.

@@ -5,6 +5,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
+import { legacyImportEnabled } from '../runtimeConfig.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCHEMA_FILE = path.join(__dirname, 'schema.sql');
@@ -32,16 +33,23 @@ function sslConfig(env) {
   return undefined;
 }
 
+// A probe only: never returns connection settings, account data or schema details.
+export async function databaseHealthy() {
+  await pool.query('SELECT 1');
+}
+
 function toUser(row) {
   const id = Number(row.id);
   if (!Number.isSafeInteger(id)) throw new Error('users.id is outside the safe integer range');
-  return { id, email: row.email, passwordHash: row.password_hash, sessionVersion: row.session_version ?? 0 };
+  return { id, email: row.email, passwordHash: row.password_hash, displayName: row.display_name ?? '', sessionVersion: row.session_version ?? 0 };
 }
 
-// Creates the pool, applies the schema and runs the one-time legacy users import.
+// Creates the pool, applies the schema and optionally imports legacy domains once.
+// Production defaults to schema only; it must never silently ingest private JSON files.
 // Throws (never swallows) so the caller can refuse to start.
 export async function initDatabase({ env = process.env, legacyUsersFile, legacyTransactionsFile, legacyGoalsFile, legacyLiabilitiesFile } = {}) {
   if (!env.DATABASE_URL) throw new Error('DATABASE_URL is not set');
+  const importLegacy = legacyImportEnabled(env);
   pool = new pg.Pool({ connectionString: env.DATABASE_URL, ssl: sslConfig(env), max: 10, connectionTimeoutMillis: 10_000 });
   // An error on an idle client must not crash the process; the next query reports a real failure.
   pool.on('error', (err) => console.error('PostgreSQL idle client error:', err.message));
@@ -51,11 +59,11 @@ export async function initDatabase({ env = process.env, legacyUsersFile, legacyT
     await client.query('SELECT pg_advisory_lock($1)', [INIT_LOCK_ID]);
     try {
       await client.query(fs.readFileSync(SCHEMA_FILE, 'utf8'));
-      if (legacyUsersFile) await importLegacyUsers(client, legacyUsersFile);
+      if (importLegacy && legacyUsersFile) await importLegacyUsers(client, legacyUsersFile);
       // After users: transactions reference them.
-      if (legacyTransactionsFile) await importLegacyTransactions(client, legacyTransactionsFile);
-      if (legacyGoalsFile) await importLegacyGoals(client, legacyGoalsFile);
-      if (legacyLiabilitiesFile) await importLegacyLiabilities(client, legacyLiabilitiesFile);
+      if (importLegacy && legacyTransactionsFile) await importLegacyTransactions(client, legacyTransactionsFile);
+      if (importLegacy && legacyGoalsFile) await importLegacyGoals(client, legacyGoalsFile);
+      if (importLegacy && legacyLiabilitiesFile) await importLegacyLiabilities(client, legacyLiabilitiesFile);
     } finally {
       await client.query('SELECT pg_advisory_unlock($1)', [INIT_LOCK_ID]);
     }
@@ -121,7 +129,7 @@ export class DuplicateEmailError extends Error {}
 export async function createUser(email, passwordHash) {
   try {
     const { rows } = await pool.query(
-      'INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id, email, password_hash',
+      "INSERT INTO users (email, password_hash, onboarding_state) VALUES ($1, $2, 'pending') RETURNING id, email, password_hash",
       [email, passwordHash]);
     return toUser(rows[0]);
   } catch (err) {
@@ -131,7 +139,7 @@ export async function createUser(email, passwordHash) {
 }
 
 export async function findUserByEmail(email) {
-  const { rows } = await pool.query('SELECT id, email, password_hash, session_version FROM users WHERE email = $1', [email]);
+  const { rows } = await pool.query('SELECT id, email, password_hash, session_version, display_name FROM users WHERE email = $1', [email]);
   return rows.length ? toUser(rows[0]) : null;
 }
 
@@ -182,7 +190,7 @@ function toTransaction(row) {
     id: row.id,
     userId: Number(row.user_id),
     title: row.title,
-    amount: Number(row.amount),   // NUMERIC(14,2): at most 14 digits, so the double is exact to the paisa
+    amount: Number(row.amount),   // API representation only; SQL totals remain exact NUMERIC arithmetic
     date: row.date,
     type: row.type,
     category: row.category,
@@ -224,6 +232,56 @@ export async function createTransactionsBatch(rows) {
   if (rows.length > 0) await insertTransactions(pool, rows);
 }
 
+// ── Duplicate-aware import (opt-in; see importDuplicates.js) ──────────────────────────────────────────────────────────
+// The OWNER's saved transactions that share a date AND a signed amount (so also the direction) with at least one candidate row.
+// Bounded: only rows on the candidates' own dates and amounts are read, never the whole history, and never another user's.
+// Oldest first, so which saved row a candidate is matched to is deterministic. `db` is the pool or a transaction's client.
+const MAX_MATCH_ROWS = 5000;
+// Thrown when more rows than the bound match. The answer would then be INCOMPLETE, and an incomplete answer must never be read as
+// "no duplicates", so the import fails closed (nothing is saved) instead of guessing.
+export class ImportMatchLimitError extends Error {}
+async function selectImportMatches(db, userId, rows) {
+  if (rows.length === 0) return [];
+  const { rows: found } = await db.query(
+    `SELECT t.id, t.title, t.amount::float8 AS amount, to_char(t.date, 'YYYY-MM-DD') AS date, t.type
+       FROM transactions t
+       JOIN (SELECT DISTINCT c.d, c.a FROM unnest($2::date[], $3::numeric[]) AS c(d, a)) AS pairs
+         ON t.date = pairs.d AND t.amount = pairs.a
+      WHERE t.user_id = $1
+      ORDER BY t.seq ASC
+      LIMIT ${MAX_MATCH_ROWS + 1}`,
+    [userId, rows.map((r) => r.date), rows.map((r) => r.amount.toFixed(2))]);
+  if (found.length > MAX_MATCH_ROWS) throw new ImportMatchLimitError(`more than ${MAX_MATCH_ROWS} saved transactions share the dates and amounts of this import`);
+  return found;
+}
+export const findImportMatches = (userId, rows) => selectImportMatches(pool, userId, rows);
+
+// Atomic, per-user serialised import. In ONE transaction: take this user's import lock, read the user's matching rows, let `decide`
+// (a pure, synchronous function) choose what to save, insert exactly that, commit. Two imports for the same user therefore run one
+// after the other, and the second one sees the first one's rows, so a double click or two tabs can never both pass the check.
+// `decide(existing)` returns { insert: rows[], result }; an empty or missing `insert` saves nothing. Returns `result`.
+// The lock is transaction-scoped (released at COMMIT/ROLLBACK) and per user, so other users and other routes are not held up.
+export async function importTransactionsLocked(userId, rows, decide) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Never wait for the user's lock indefinitely (a stuck import must not pile up connections): after 10 s the import fails with
+    // 55P03, saves nothing and the caller is told to retry.
+    await client.query("SET LOCAL lock_timeout = '10s'");
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`finsphere:import:${userId}`]);
+    const existing = await selectImportMatches(client, userId, rows);
+    const decision = decide(existing);
+    if (decision.insert && decision.insert.length > 0) await insertTransactions(client, decision.insert);
+    await client.query('COMMIT');
+    return decision.result;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 // Removes exactly one row: the owner's first match in list order. The owner is part of the
 // lookup, so another user's row with the same id can never be touched. Returns true if a row was removed.
 export async function deleteTransactionByUserAndId(userId, id) {
@@ -233,6 +291,19 @@ export async function deleteTransactionByUserAndId(userId, id) {
        AND user_id = $1`,
     [userId, String(id)]);
   return rowCount > 0;
+}
+
+// Changes ONLY the category label of one transaction: the owner's first match in list order (the same targeting as the delete above, so
+// another user's row with the same id can never be touched and a repeated legacy id changes exactly one row). Title, amount, date,
+// type and the analytical classification are not written. Returns the updated transaction, or null when the owner has no such row.
+export async function updateTransactionCategory(userId, id, category) {
+  const { rows } = await pool.query(
+    `UPDATE transactions SET category = $3
+     WHERE seq = (SELECT seq FROM transactions WHERE user_id = $1 AND id = $2 ORDER BY seq DESC LIMIT 1)
+       AND user_id = $1
+     RETURNING ${TX_COLUMNS}`,
+    [userId, String(id), category]);
+  return rows.length ? toTransaction(rows[0]) : null;
 }
 
 // Decides whether one server_db.json record can become a database row WITHOUT being changed.
@@ -1014,4 +1085,78 @@ export async function previewGoalContribution(userId, goalId, amount) {
 export async function closeDatabase() {
   if (pool) await pool.end();
   pool = null;
+}
+
+// Session ownership is supplied by authentication, never by profile input.
+// The public profile: only what the signed-in user's own screens need. avatarVersion changes whenever the photo does (null = none).
+export async function readProfile(userId) {
+  const { rows } = await pool.query(
+    `SELECT u.id, u.email, u.display_name, u.reduce_motion, u.onboarding_state,
+            (SELECT (extract(epoch FROM a.updated_at) * 1000)::bigint FROM user_avatars a WHERE a.user_id = u.id) AS avatar_version
+       FROM users u WHERE u.id = $1`, [userId]);
+  if (!rows.length) return null;
+  const r = rows[0];
+  return {
+    id: Number(r.id), email: r.email, displayName: r.display_name, reduceMotion: r.reduce_motion, onboardingState: r.onboarding_state,
+    avatarVersion: r.avatar_version === null ? null : Number(r.avatar_version)
+  };
+}
+// Only the fields given are changed (a missing field keeps its stored value).
+export async function updateProfile(userId, { displayName, reduceMotion, onboardingState } = {}) {
+  await pool.query(
+    'UPDATE users SET display_name = COALESCE($2, display_name), reduce_motion = COALESCE($3, reduce_motion), onboarding_state = COALESCE($4, onboarding_state) WHERE id = $1',
+    [userId, displayName ?? null, reduceMotion ?? null, onboardingState ?? null]);
+  return readProfile(userId);
+}
+
+// Profile photo: one row per user, always addressed by the session user's id.
+export async function saveAvatar(userId, { contentType, data, width, height }) {
+  await pool.query(
+    `INSERT INTO user_avatars (user_id, content_type, data, width, height, updated_at) VALUES ($1, $2, $3, $4, $5, now())
+     ON CONFLICT (user_id) DO UPDATE SET content_type = EXCLUDED.content_type, data = EXCLUDED.data,
+       width = EXCLUDED.width, height = EXCLUDED.height, updated_at = now()`,
+    [userId, contentType, data, width, height]);
+}
+export async function readAvatar(userId) {
+  const { rows } = await pool.query('SELECT content_type, data FROM user_avatars WHERE user_id = $1', [userId]);
+  return rows.length ? { contentType: rows[0].content_type, data: rows[0].data } : null;
+}
+export async function deleteAvatar(userId) {
+  await pool.query('DELETE FROM user_avatars WHERE user_id = $1', [userId]);
+}
+
+// Only authenticated owner IDs supplied by the router reach these parameterized queries.
+const HOLDING_COLUMNS = "id, name, asset_class AS \"assetClass\", invested_paise AS \"investedPaise\", current_paise AS \"currentPaise\", to_char(valued_on, 'YYYY-MM-DD') AS \"valuedOn\"";
+const holdingRow = r => ({ ...r, investedPaise: Number(r.investedPaise), currentPaise: Number(r.currentPaise) });
+export async function listHoldings(userId) {
+  const {rows} = await pool.query('SELECT ' + HOLDING_COLUMNS + ' FROM investment_holdings WHERE user_id=$1 ORDER BY name, id', [userId]);
+  return rows.map(holdingRow);
+}
+export async function saveHolding(userId, id, h, create = false) {
+  const args = [userId, id, h.name, h.assetClass, h.investedPaise, h.currentPaise, h.valuedOn];
+  const sql = create
+    ? 'INSERT INTO investment_holdings(user_id,id,name,asset_class,invested_paise,current_paise,valued_on) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING '
+    : 'UPDATE investment_holdings SET name=$3,asset_class=$4,invested_paise=$5,current_paise=$6,valued_on=$7,updated_at=now() WHERE user_id=$1 AND id=$2 RETURNING ';
+  const {rows} = await pool.query(sql + HOLDING_COLUMNS, args);
+  return rows.length ? holdingRow(rows[0]) : null;
+}
+export async function deleteHolding(userId, id) {
+  const {rowCount} = await pool.query('DELETE FROM investment_holdings WHERE user_id=$1 AND id=$2', [userId,id]);
+  return rowCount > 0;
+}
+
+// Serialize full edits with statement confirmation so a changed date/amount cannot race duplicate review.
+export async function updateTransactionByUserAndId(userId, id, fields) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query("SET LOCAL lock_timeout = '10s'");
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`finsphere:import:${userId}`]);
+    const { rows } = await client.query(`UPDATE transactions SET title=$3, amount=$4, date=$5, type=$6, category=$7, classification=$8
+      WHERE seq = (SELECT seq FROM transactions WHERE user_id=$1 AND id=$2 ORDER BY seq DESC LIMIT 1) AND user_id=$1
+      RETURNING ${TX_COLUMNS}`, [userId, String(id), fields.title, fields.amount, fields.date, fields.type, fields.category, fields.classification]);
+    await client.query('COMMIT');
+    return rows.length ? toTransaction(rows[0]) : null;
+  } catch (err) { await client.query('ROLLBACK').catch(() => {}); throw err; }
+  finally { client.release(); }
 }

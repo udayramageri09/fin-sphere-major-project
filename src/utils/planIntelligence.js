@@ -105,7 +105,8 @@ export function buildCurrentState(data) {
     );
   }
   rows.push(forecast
-    ? row('forecast', 'Projected savings, next 3 months', formatInr(forecast.insights?.projected_savings_3m ?? 0), caveats.length ? caveats.join(' ') : null)
+    && Number.isFinite(forecast.insights?.projected_savings_3m)
+    ? row('forecast', 'Projected savings, next 3 months', formatInr(forecast.insights.projected_savings_3m), caveats.length ? caveats.join(' ') : null)
     : row('forecast', 'Projected savings, next 3 months', 'Unavailable', null, true));
 
   return {

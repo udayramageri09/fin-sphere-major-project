@@ -1,8 +1,11 @@
-/* eslint-disable react-hooks/exhaustive-deps, react-hooks/set-state-in-effect */
-import { useState, useEffect, useRef, useCallback } from 'react';
+/* eslint-disable react-hooks/exhaustive-deps */
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import './Plans.css';
+import AssistantReply from '../components/AssistantReply';
 import { useFinance } from '../context/FinanceContext';
 import { useAvatarActions } from '../hooks/useAvatarActions';
+import { useGuardedFetch } from '../hooks/useGuardedFetch';
+import { ACCOUNT_CHANGED_MESSAGE } from '../utils/accountGuard';
 import { buildChatHistory } from '../utils/chatHistory';
 import { buildCurrentState, groupFindings, sectionFailed } from '../utils/planIntelligence';
 import CurrentState from '../components/plans/CurrentState';
@@ -21,6 +24,7 @@ const GREETING = 'I explain the results on this page. The health score and plan 
 export default function Plans() {
   const { transactions } = useFinance();
   const { performNavigation } = useAvatarActions();
+  const guardedFetch = useGuardedFetch();   // names the account this tab shows; a refusal re-checks the session
 
   const [data, setData] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -51,7 +55,7 @@ export default function Plans() {
         messages.map((m) => ({ role: m.sender === 'bot' ? 'assistant' : 'user', content: m.text })),
         text
       );
-      const res = await fetch(`${API}/plan-chat`, {
+      const res = await guardedFetch(`${API}/plan-chat`, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
@@ -61,8 +65,8 @@ export default function Plans() {
       const reply = res.ok && typeof body.reply === 'string' ? body.reply : "I couldn't answer that just now.";
       setMessages((prev) => [...prev, { id: Date.now() + 1, sender: 'bot', text: reply }]);
       window.dispatchEvent(new CustomEvent('bot-speak', { detail: { message: reply.slice(0, 80) + (reply.length > 80 ? '…' : '') } }));
-    } catch {
-      setMessages((prev) => [...prev, { id: Date.now() + 1, sender: 'bot', text: "I couldn't reach the assistant just now." }]);
+    } catch (err) {
+      setMessages((prev) => [...prev, { id: Date.now() + 1, sender: 'bot', text: err?.message === ACCOUNT_CHANGED_MESSAGE ? err.message : "I couldn't reach the assistant just now." }]);
     } finally {
       setIsThinking(false);
     }
@@ -80,13 +84,13 @@ export default function Plans() {
     setIsLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API}/ml/analyze`, { credentials: 'include' });
-      if (!res.ok) throw new Error(res.status === 401 ? 'Your session has expired. Please sign in again.' : ANALYSIS_ERROR);
+      const res = await guardedFetch(`${API}/ml/analyze`, { credentials: 'include' });
+      if (!res.ok) throw new Error(res.status === 401 ? 'Your session has expired. Please sign in again.' : res.status === 422 ? 'Analysis supports up to 3000 transactions per account. Your saved transactions have not changed.' : ANALYSIS_ERROR);
       const body = await res.json();
       setData(body);
       announce(body.plan?.step_count);
     } catch (err) {
-      setError(err.message === 'Your session has expired. Please sign in again.' ? err.message : ANALYSIS_ERROR);
+      setError(err.message === 'Your session has expired. Please sign in again.' || err.message.startsWith('Analysis supports up to 3000 transactions') || err.message === ACCOUNT_CHANGED_MESSAGE ? err.message : ANALYSIS_ERROR);
       setData(null);
     } finally {
       setIsLoading(false);
@@ -111,8 +115,8 @@ export default function Plans() {
   }, [data, messages]);
   const stopListening = () => { recognitionRef.current?.stop(); setIsListening(false); };
 
-  const state = data ? buildCurrentState(data) : null;
-  const findings = data ? groupFindings(data) : null;
+  const state = useMemo(() => data ? buildCurrentState(data) : null, [data]);
+  const findings = useMemo(() => data ? groupFindings(data) : null, [data]);
   const health = data && !sectionFailed(data, 'health') ? data.health : null;
   const noTransactions = transactions.length === 0 && !data;
 
@@ -144,10 +148,10 @@ export default function Plans() {
       )}
 
       <div className="plans-split">
-        <div className="plans-left">
+        <div className="plans-left" aria-busy={isLoading}>
           {isLoading && (
-            <div className="ml-loading">
-              <div className="ml-loading-spinner" />
+            <div className="ml-loading" role="status" aria-live="polite">
+              <div className="ml-loading-spinner" aria-hidden="true" />
               <div className="ml-loading-text">
                 <p>Analysing your transactions…</p>
                 <small>Forecast · anomalies · spending clusters · health score · action plan</small>
@@ -193,7 +197,7 @@ export default function Plans() {
           <div className="plan-chat-body" ref={chatBodyRef}>
             {messages.map((msg) => (
               <div key={msg.id} className={`plan-chat-msg ${msg.sender}`}>
-                <div className="plan-msg-content">{msg.text}</div>
+                <div className="plan-msg-content">{msg.sender === 'bot' ? <AssistantReply text={msg.text} /> : msg.text}</div>
               </div>
             ))}
             {isThinking && (
@@ -214,6 +218,7 @@ export default function Plans() {
           <form className="plan-chat-input" onSubmit={(e) => { e.preventDefault(); sendToBot(chatInput); }}>
             <input
               type="text"
+              aria-label="Ask the advisor about this analysis"
               placeholder={data ? 'Ask about this analysis…' : 'Run the analysis first…'}
               value={chatInput}
               onChange={(e) => setChatInput(e.target.value)}

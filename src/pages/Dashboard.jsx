@@ -1,14 +1,15 @@
-import PanProfile from '../components/PanProfile';
+import DashboardGreeting from '../components/DashboardGreeting';
 import FinancialSummary from '../components/FinancialSummary';
-import CreditScoreWidget from '../components/CreditScoreWidget';
 import GoalTracker from '../components/GoalTracker';
 import CashFlowChart from '../components/CashFlowChart';
 import { ShoppingBag, Coffee, ArrowDownCircle, ArrowUpCircle } from 'lucide-react';
 import { useFinance } from '../context/FinanceContext';
-import { motion } from 'framer-motion';
+import { MotionConfig, motion } from 'framer-motion';
+import { useReduceMotion } from '../hooks/useMotionPreference';
 
 function Dashboard() {
   const { transactions } = useFinance();
+  const reduceMotion = useReduceMotion();
   const recentTransactions = transactions.slice(0, 3);
 
   const getCategoryIcon = (cat, txnType) => {
@@ -33,19 +34,15 @@ function Dashboard() {
   };
 
   return (
-    <motion.div 
+    <MotionConfig reducedMotion={reduceMotion ? 'always' : 'user'}>
+    <motion.div
       className="flex flex-col gap-8"
       variants={containerVariants}
       initial="hidden"
       animate="show"
     >
       <motion.header variants={itemVariants} className="flex flex-col md:flex-row md:flex-wrap justify-between items-start md:items-center gap-6">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight-display text-zinc-900 mb-1">Welcome back</h1>
-          <p className="text-zinc-500">Here's your financial overview for today.</p>
-        </div>
-
-        <PanProfile />
+        <DashboardGreeting />
       </motion.header>
 
       <motion.section variants={itemVariants} className="w-full" data-avatar-target="financial-summary">
@@ -58,9 +55,6 @@ function Dashboard() {
 
       <motion.section variants={itemVariants} className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="flex flex-col gap-6">
-          <div data-avatar-target="credit-score">
-            <CreditScoreWidget />
-          </div>
           
           <div className="glass-panel p-6" data-avatar-target="recent-transactions">
             <h3 className="text-xl font-bold text-zinc-900 mb-6 tracking-tight">Recent Transactions</h3>
@@ -101,35 +95,13 @@ function Dashboard() {
           </div>
           
           <div className="glass-panel p-6">
-            <div className="flex justify-between items-center mb-6">
-              <h3 className="text-xl font-bold text-zinc-900 tracking-tight">Portfolio Distribution</h3>
-            </div>
-            <div className="flex flex-col gap-4">
-               <div className="flex justify-between items-center">
-                 <div className="flex items-center gap-2 text-sm text-zinc-600">
-                   <div className="w-2.5 h-2.5 rounded-full bg-zinc-900"></div>
-                   <span>Mutual Funds</span>
-                 </div>
-                 <span className="font-semibold text-zinc-900 tabular-nums">60%</span>
-               </div>
-               
-               <div className="flex justify-between items-center">
-                 <div className="flex items-center gap-2 text-sm text-zinc-600">
-                   <div className="w-2.5 h-2.5 rounded-full bg-zinc-400"></div>
-                   <span>Direct Stocks</span>
-                 </div>
-                 <span className="font-semibold text-zinc-900 tabular-nums">40%</span>
-               </div>
-               
-               <div className="flex h-3 rounded-full overflow-hidden mt-2 bg-zinc-100">
-                 <div className="h-full bg-zinc-900" style={{ width: '60%' }}></div>
-                 <div className="h-full bg-zinc-400" style={{ width: '40%' }}></div>
-               </div>
-            </div>
+            <h3 className="text-xl font-bold text-zinc-900 tracking-tight mb-3">Your investments</h3>
+            <p className="text-sm text-zinc-600">Open Portfolio to record your holdings and view allocation based on your own valuations.</p>
           </div>
         </div>
       </motion.section>
     </motion.div>
+    </MotionConfig>
   );
 }
 

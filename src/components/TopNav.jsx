@@ -1,6 +1,7 @@
 import { LayoutDashboard, Wallet, CreditCard, PieChart, Target, CalendarRange, Brain, Menu, X, Settings, LogOut } from 'lucide-react';
 import { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
+import Avatar from './Avatar';
 
 const navItems = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -14,7 +15,8 @@ const navItems = [
 
 function TopNav({ currentView, setCurrentView }) {
   const [isOpen, setIsOpen] = useState(false);
-  const { user, logout } = useAuth();
+  const { user, avatarUrl, logout } = useAuth();
+  const onSettings = currentView === 'settings';
 
   const handleNav = (id) => {
     setCurrentView(id);
@@ -53,15 +55,30 @@ function TopNav({ currentView, setCurrentView }) {
 
         {/* Right side (Desktop Settings / Mobile Hamburger) */}
         <div className="flex items-center gap-2">
-          {user?.email && (
-            <span className="hidden xl:block text-sm text-zinc-500 max-w-45 truncate">{user.email}</span>
-          )}
-          <button className="hidden xl:flex p-2 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 rounded-full transition-colors">
+          <button
+            onClick={() => handleNav('settings')}
+            aria-label="Profile and settings"
+            aria-current={onSettings ? 'page' : undefined}
+            title="Profile and settings"
+            data-testid="nav-avatar"
+            className="hidden xl:flex rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 focus-visible:ring-offset-2"
+          >
+            <Avatar size={32} name={user?.displayName} src={avatarUrl} />
+          </button>
+          <button
+            onClick={() => handleNav('settings')}
+            aria-label="Settings"
+            aria-current={onSettings ? 'page' : undefined}
+            title="Settings"
+            data-testid="nav-settings"
+            className={`hidden xl:flex p-2 rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 ${onSettings ? 'bg-zinc-900 text-white' : 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900'}`}
+          >
             <Settings size={20} />
           </button>
           <button
             onClick={logout}
             title="Log out"
+            aria-label="Log out"
             className="hidden xl:flex p-2 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 rounded-full transition-colors"
           >
             <LogOut size={20} />
@@ -69,6 +86,8 @@ function TopNav({ currentView, setCurrentView }) {
 
           <button
             onClick={() => setIsOpen(!isOpen)} 
+            aria-label={isOpen ? 'Close menu' : 'Open menu'}
+            aria-expanded={isOpen}
             className="xl:hidden p-2 -mr-2 text-zinc-900 hover:bg-zinc-100 rounded-full transition-colors"
           >
             {isOpen ? <X size={24} /> : <Menu size={24} />}
@@ -105,11 +124,14 @@ function TopNav({ currentView, setCurrentView }) {
                 );
               })}
               <div className="h-px bg-zinc-200 my-2" />
-              {user?.email && (
-                <div className="px-4 py-1 text-xs text-zinc-400 truncate">{user.email}</div>
-              )}
-              <button className="flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium w-full text-left text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 transition-all duration-200">
-                <Settings size={20} className="text-zinc-400" />
+              <button
+                onClick={() => handleNav('settings')}
+                aria-current={onSettings ? 'page' : undefined}
+                data-testid="drawer-settings"
+                style={onSettings ? { backgroundColor: '#09090b', color: '#ffffff' } : {}}
+                className={`flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium w-full text-left transition-all duration-200 ${onSettings ? 'shadow-md' : 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900'}`}
+              >
+                <Settings size={20} style={onSettings ? { color: '#ffffff' } : {}} className={onSettings ? '' : 'text-zinc-400'} />
                 <span>Settings</span>
               </button>
               <button

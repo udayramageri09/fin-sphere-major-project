@@ -255,13 +255,17 @@
 .legend-dot.expense { background: #71717a; }
 .legend-dot.forecast { background: rgba(161,161,170,0.6); border: 1px dashed #a1a1aa; }
 
+.forecast-chart-scroll { max-width: 100%; overflow-x: auto; padding-bottom: 2px; }
+
 .bars-container {
   display: flex;
-  align-items: flex-end;
-  gap: 0.4rem;
-  height: 90px;
+  align-items: stretch;
+  gap: 0.25rem;
+  min-width: min-content;
   padding: 0 0.25rem;
 }
+
+.forecast-slot { display: flex; flex: 1 1 0; min-width: 44px; align-items: stretch; gap: 0.25rem; }
 
 .bar-group {
   display: flex;
@@ -269,7 +273,19 @@
   align-items: center;
   gap: 4px;
   flex: 1;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 6px 4px 4px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
 }
+.bar-group:hover { background: rgba(71, 85, 105, 0.07); }
+.bar-group.is-selected { background: rgba(71, 85, 105, 0.1); border-color: rgba(71, 85, 105, 0.35); }
+.bar-group:focus-visible { outline: 2px solid #475569; outline-offset: 1px; }
 
 .bar-pair {
   display: flex;
@@ -292,20 +308,47 @@
 
 .forecast-divider {
   width: 1px;
-  height: 80px;
-  background: rgba(161,161,170,0.4);
+  align-self: stretch;
   border-left: 1px dashed #a1a1aa;
   flex-shrink: 0;
-  margin-top: 0;
 }
 
-.forecast-group { opacity: 0.85; }
+.forecast-group { opacity: 0.9; border-style: dashed; border-color: rgba(161, 161, 170, 0.45); }
+.forecast-group.is-selected { border-color: rgba(71, 85, 105, 0.5); }
 
 .bar-label {
-  font-size: 0.65rem;
+  font-size: 0.7rem;
   color: var(--text-secondary);
   white-space: nowrap;
 }
+.bar-kind { font-size: 0.6rem; color: var(--text-secondary); white-space: nowrap; }
+
+.forecast-detail {
+  margin-top: 0.75rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: rgba(247, 249, 250, 0.7);
+  min-width: 0;
+}
+.forecast-detail-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; font-size: 0.85rem; }
+.forecast-badge { font-size: 0.68rem; font-weight: 600; padding: 0.1rem 0.5rem; border-radius: 99px; border: 1px solid var(--border-color); color: var(--text-secondary); }
+.forecast-badge.forecast { border-style: dashed; }
+.forecast-detail-figures { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 8.5rem), 1fr)); gap: 0.6rem; margin: 0.6rem 0 0; }
+.forecast-detail-figures dt { font-size: 0.72rem; color: var(--text-secondary); }
+.forecast-detail-figures dd { margin: 2px 0 0; font-size: 0.95rem; font-weight: 700; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.forecast-detail-note { margin: 0.6rem 0 0; font-size: 0.72rem; color: var(--text-secondary); }
+
+.forecast-table-details { margin-top: 0.6rem; font-size: 0.78rem; }
+.forecast-table-details summary { cursor: pointer; font-weight: 600; padding: 0.4rem 0; border-radius: 4px; }
+.forecast-table-details summary:focus-visible { outline: 2px solid #475569; outline-offset: 2px; }
+.forecast-table-scroll { max-width: 100%; overflow-x: auto; border: 1px solid var(--border-color); border-radius: 8px; }
+.forecast-table-scroll:focus-visible { outline: 2px solid #475569; outline-offset: 2px; }
+.forecast-table-details table { width: 100%; border-collapse: collapse; font-size: 0.76rem; }
+.forecast-table-details th, .forecast-table-details td { padding: 0.45rem 0.6rem; text-align: left; border-bottom: 1px solid var(--border-color); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.forecast-table-details tbody tr:last-child th, .forecast-table-details tbody tr:last-child td { border-bottom: 0; }
+
+@media (prefers-reduced-motion: reduce) { .bar { transition: none; } }
 
 /* ── Anomalies ────────────────────────────────────────────────────────────── */
 
@@ -720,4 +763,15 @@
   .findings-grid { grid-template-columns: minmax(0, 1fr); }
   .plans-header { flex-wrap: wrap; gap: 0.75rem; }
   .model-tag { margin-left: 0; }
+}
+
+/* Evidence remains readable without motion or colour perception. */
+.cluster-examples { margin-top: .75rem; font-size: .78rem; }
+.cluster-examples summary { cursor: pointer; min-height: 28px; }
+.cluster-examples ul { padding-left: 1rem; }
+.cluster-examples li { margin: .5rem 0; overflow-wrap: anywhere; }
+.cluster-examples span { display: block; color: var(--text-secondary); line-height: 1.5; }
+.plans-container :is(button, input, summary):focus-visible { outline: 2px solid #2563eb; outline-offset: 3px; }
+@media (prefers-reduced-motion: reduce) {
+  .plans-container *, .plans-container *::before, .plans-container *::after { animation: none !important; transition: none !important; }
 }

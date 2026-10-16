@@ -14,8 +14,10 @@ import os
 os.environ['OMP_NUM_THREADS'] = '1'   # Prevent MKL threadpool crash on Anaconda/Windows
 
 from fastapi import FastAPI, HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from typing import Optional, Union
 import time
 import traceback
@@ -44,6 +46,18 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(RequestValidationError)
+async def refuse_invalid_request(request, exc: RequestValidationError):
+    """Say WHERE and WHY a request was refused, never WHAT was submitted.
+
+    The default handler echoes every rejected value back: an oversized history returned all of its rows, and a non-finite
+    amount made the default response itself un-serialisable, so the refusal surfaced as HTTP 500. Financial rows must not
+    be reflected in responses or logs, and a refusal must be a clean 422.
+    """
+    problems = [{'loc': list(error.get('loc', ())), 'msg': str(error.get('msg', '')), 'type': str(error.get('type', ''))} for error in exc.errors()[:20]]
+    return JSONResponse(status_code=422, content={'detail': problems})
+
+
 # ── Pydantic Models ────────────────────────────────────────────────────────────
 
 class Transaction(BaseModel):
@@ -51,9 +65,9 @@ class Transaction(BaseModel):
     # models never use the id, so either form must be accepted (it was int-only, which
     # made every request containing a UUID id fail with a 422).
     id: Optional[Union[int, str]] = None
-    title: str
-    amount: float
-    date: str
+    title: str = Field(max_length=120)
+    amount: float = Field(allow_inf_nan=False)
+    date: str = Field(max_length=32)
     type: Optional[str] = 'expense'
     category: Optional[str] = 'General'
     # Analytical label from FinSphere (income | expense | refund | transfer | unknown). The health scorer uses it
@@ -62,15 +76,15 @@ class Transaction(BaseModel):
 
 
 class AnalysisRequest(BaseModel):
-    transactions: list[Transaction]
+    transactions: list[Transaction] = Field(max_length=3000)
     # Optional user-supplied amounts, None = "not available": the ratio that needs it is then omitted,
     # never defaulted. monthly_debt_payments is the sum of the user's monthly debt payments per month
     # (0 = a real "no payments"); it drives DTI. emergency_fund is the user's saved emergency fund in rupees
     # (0 = a real "nothing saved yet"); it drives emergency coverage (months).
     # (A client still sending the old "liabilities" field is accepted and the field is ignored.)
-    monthly_debt_payments: Optional[float] = None
-    emergency_fund: Optional[float] = None
-    n_forecast_months: Optional[int] = 3
+    monthly_debt_payments: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    emergency_fund: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    n_forecast_months: int = Field(default=3, ge=1, le=12)
 
 
 class PlanRequest(BaseModel):
