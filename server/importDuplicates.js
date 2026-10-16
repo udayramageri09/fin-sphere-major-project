@@ -82,6 +82,9 @@ export function buildPreview(rows, results, { skipped = 0, digest }) {
 // It changes if the rows were edited, or if the user's saved transactions changed in any way that could alter a match, including a
 // further identical row appearing (which is exactly what a second, double-clicked confirm would have just created). Confirm
 // recomputes it inside the import lock; a different value means "stale" and nothing is saved.
+/** Bind a preview to its owner and matching snapshot, not just the proposed rows.
+ * This is integrity protection, not authorization: confirmation must still authenticate
+ * and recompute under the database import lock before committing any writes. */
 export function reviewDigest(secret, userId, rows, results, existing) {
   const canonical = JSON.stringify([
     'finsphere:import-review:v2', Number(userId),

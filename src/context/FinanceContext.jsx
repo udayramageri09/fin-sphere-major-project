@@ -217,7 +217,6 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     fetchGoals();
     fetchLiabilities();
     fetchEmergencyFund();
-    // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect
   }, []);
 
   // The ONE place that applies a stored write to shared state. The manual forms and a confirmed assistant action both

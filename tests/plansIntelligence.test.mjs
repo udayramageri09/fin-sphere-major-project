@@ -156,6 +156,15 @@ const vite = await createServer({
   esbuild: { jsx: 'automatic' },
   plugins: [{
     name: 'plans-test-stubs',
+    transform(code, id) {
+      for (const name of ['CurrentState', 'TopFindings', 'AnalysisDetails']) {
+        if (!id.endsWith('/' + name + '.jsx')) continue;
+        let source = code.replace(new RegExp('function ' + name + String.raw`\(([^)]*)\) \{`),
+          (match) => match + ` globalThis.__analysisRenders = (globalThis.__analysisRenders ?? 0) + 1;`);
+        if (process.env.FINSPHERE_BENCH_NO_MEMO === 'true') source = source.replace('export default memo(' + name + ');', 'export default ' + name + ';');
+        return source;
+      }
+    },
     enforce: 'pre',
     resolveId(id) {
       if (id === 'virtual:plans-harness') return '\0plans-harness';
@@ -294,12 +303,19 @@ try {
   // the advisor: only the conversation is sent
   const chip = [...document.querySelectorAll('.quick-prompt-chip')].find((c) => c.textContent === 'Why is this my top action?');
   ok(chip && !chip.disabled, 'advisor: quick prompt "Why is this my top action?"');
+  const rendersBeforeChat = globalThis.__analysisRenders;
   await click(chip);
   await waitFor(() => planChatBodies.length === 1);
   ok(planChatBodies.length === 1 && !('mlContext' in planChatBodies[0]) && planChatBodies[0].messages.at(-1).content === 'Why is this my top action?', 'advisor: the request carries the conversation only (no client-side analysis context)', JSON.stringify(Object.keys(planChatBodies[0] ?? {})));
   ok(document.querySelector('.plan-chat-body').textContent.includes('REPLY(ok)'), 'advisor: the reply is shown');
   ok(document.querySelector('.plan-chat-msg.bot .plan-msg-content').textContent === 'I explain the results on this page. The health score and plan are rule-based; the forecast, anomalies and clusters come from ML models. I never invent figures.', 'advisor: truthful greeting');
   ok(!/Every insight here comes directly/.test(page()), 'advisor: the false claim is gone');
+
+  const chatRenders = globalThis.__analysisRenders - rendersBeforeChat;
+  console.log(`Analysis component renders during one advisor round-trip: ${chatRenders} (memo disabled: ${process.env.FINSPHERE_BENCH_NO_MEMO === 'true'})`);
+  ok(process.env.FINSPHERE_BENCH_NO_MEMO === 'true' ? chatRenders > 0 : chatRenders === 0, 'unchanged analysis avoids advisor-only renders');
+  const categoryTable = document.querySelector('#intelligence-categories').parentElement.parentElement;
+  ok(categoryTable.textContent.includes('Rent') && categoryTable.textContent.includes('₹1,00,000'), 'recorded category totals match the server snapshot');
 
   // ═══ 2. emergency coverage reasons ═══════════════════════════════════════════════════════════════════════════════
   for (const [reason, expected] of [['no_fund', 'Not set up: add your emergency fund to see this'], ['no_spending', 'Unavailable: no spending recorded to measure it against']]) {
@@ -365,6 +381,13 @@ try {
   analysisBody = analysis();
   await click(buttonIn(err, 'Try again'));
   ok(await waitFor(() => document.querySelector('.state-card')) && !document.querySelector('[data-testid="analysis-error"]'), 'failure: "Try again" recovers');
+  // A missing forecast total must never become a real zero.
+  analysisBody = analysis();
+  delete analysisBody.forecast.insights.projected_savings_3m;
+  await mount();
+  await waitFor(() => document.querySelector('.state-card'));
+  const forecastRow = [...document.querySelectorAll('.state-row')].find(row => row.textContent.includes('Projected savings'));
+  ok(forecastRow?.textContent.includes('Unavailable') && !forecastRow.textContent.includes('₹0'), 'missing projection is unavailable, not zero');
 } finally {
   await vite.close();
 }

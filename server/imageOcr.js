@@ -159,6 +159,9 @@ export function cleanOcrText(raw, maxChars = OCR_LIMITS.maxTextChars) {
 // ── Service: bounded concurrency, queue, timeout ─────────────────────────────────────────────────────────────────
 // engine: { recognize(buffer, { signal }) -> Promise<{ text, confidence? }> }. It must stop its work (and release what it
 // holds) when `signal` aborts; the service additionally stops waiting for it, so a stuck engine cannot hold a request.
+/** The engine must honor AbortSignal and free its worker on cancellation.
+ * The queue bounds waiting work; it does not make extracted text financially valid.
+ * Dates and amounts still require review and the transaction validators downstream. */
 export function createOcrService({ engine, limits = OCR_LIMITS } = {}) {
   if (!engine || typeof engine.recognize !== 'function') throw new Error('createOcrService needs an engine');
   let running = 0;

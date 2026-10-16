@@ -5,6 +5,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
+import { legacyImportEnabled } from '../runtimeConfig.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCHEMA_FILE = path.join(__dirname, 'schema.sql');
@@ -32,16 +33,23 @@ function sslConfig(env) {
   return undefined;
 }
 
+// A probe only: never returns connection settings, account data or schema details.
+export async function databaseHealthy() {
+  await pool.query('SELECT 1');
+}
+
 function toUser(row) {
   const id = Number(row.id);
   if (!Number.isSafeInteger(id)) throw new Error('users.id is outside the safe integer range');
   return { id, email: row.email, passwordHash: row.password_hash, displayName: row.display_name ?? '', sessionVersion: row.session_version ?? 0 };
 }
 
-// Creates the pool, applies the schema and runs the one-time legacy users import.
+// Creates the pool, applies the schema and optionally imports legacy domains once.
+// Production defaults to schema only; it must never silently ingest private JSON files.
 // Throws (never swallows) so the caller can refuse to start.
 export async function initDatabase({ env = process.env, legacyUsersFile, legacyTransactionsFile, legacyGoalsFile, legacyLiabilitiesFile } = {}) {
   if (!env.DATABASE_URL) throw new Error('DATABASE_URL is not set');
+  const importLegacy = legacyImportEnabled(env);
   pool = new pg.Pool({ connectionString: env.DATABASE_URL, ssl: sslConfig(env), max: 10, connectionTimeoutMillis: 10_000 });
   // An error on an idle client must not crash the process; the next query reports a real failure.
   pool.on('error', (err) => console.error('PostgreSQL idle client error:', err.message));
@@ -51,11 +59,11 @@ export async function initDatabase({ env = process.env, legacyUsersFile, legacyT
     await client.query('SELECT pg_advisory_lock($1)', [INIT_LOCK_ID]);
     try {
       await client.query(fs.readFileSync(SCHEMA_FILE, 'utf8'));
-      if (legacyUsersFile) await importLegacyUsers(client, legacyUsersFile);
+      if (importLegacy && legacyUsersFile) await importLegacyUsers(client, legacyUsersFile);
       // After users: transactions reference them.
-      if (legacyTransactionsFile) await importLegacyTransactions(client, legacyTransactionsFile);
-      if (legacyGoalsFile) await importLegacyGoals(client, legacyGoalsFile);
-      if (legacyLiabilitiesFile) await importLegacyLiabilities(client, legacyLiabilitiesFile);
+      if (importLegacy && legacyTransactionsFile) await importLegacyTransactions(client, legacyTransactionsFile);
+      if (importLegacy && legacyGoalsFile) await importLegacyGoals(client, legacyGoalsFile);
+      if (importLegacy && legacyLiabilitiesFile) await importLegacyLiabilities(client, legacyLiabilitiesFile);
     } finally {
       await client.query('SELECT pg_advisory_unlock($1)', [INIT_LOCK_ID]);
     }
@@ -182,7 +190,7 @@ function toTransaction(row) {
     id: row.id,
     userId: Number(row.user_id),
     title: row.title,
-    amount: Number(row.amount),   // NUMERIC(14,2): at most 14 digits, so the double is exact to the paisa
+    amount: Number(row.amount),   // API representation only; SQL totals remain exact NUMERIC arithmetic
     date: row.date,
     type: row.type,
     category: row.category,

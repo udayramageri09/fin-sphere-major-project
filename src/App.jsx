@@ -2,10 +2,10 @@ import { lazy, useState, useEffect } from 'react'
 import { FinanceProvider } from './context/FinanceContext'
 import { useAuth } from './context/AuthContext'
 import TopNav from './components/TopNav'
-import Dashboard from './pages/Dashboard'
+const Dashboard = lazy(() => import('./pages/Dashboard'))
 import PageBoundary from './components/PageBoundary'
 
-// The Dashboard is the first screen and stays in the main bundle; every other page loads the first time it is opened.
+// Load page code only when selected, including the Dashboard after sign-in.
 const Transactions = lazy(() => import('./pages/Transactions'))
 const Liabilities = lazy(() => import('./pages/Liabilities'))
 const Portfolio = lazy(() => import('./pages/Portfolio'))

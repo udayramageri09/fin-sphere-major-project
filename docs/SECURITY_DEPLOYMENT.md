@@ -76,6 +76,8 @@ Statement parsing uses SheetJS (`xlsx`). The npm registry copy (0.18.5) has know
 
 ## 9. Dependency audit status
 
+October 16, 2026 update: API Multer is pinned to 2.4.0. Full root audit reports Vite/esbuild development-tool findings; production-only root and full API audits are recorded in `FINALIZATION_REPORT.md`. The installed Python application dependency closure was also scanned: 16 advisory entries (9 unique IDs) in AnyIO, idna, python-dotenv and Starlette; see the finalization report. The historical result below is not a current full dependency clearance. Legacy JSON imports are disabled by default in production; set `IMPORT_LEGACY_JSON=false` for test/demo startup. API `/api/health` probes PostgreSQL, API responses use no-store, and shutdown drains HTTP before closing the pool with a 10-second deadline. Proxy values are validated; use `false` locally.
+
 `npm audit --omit=dev`: 0 vulnerabilities in the API (`server/`) and in the frontend (root). Re-run before each release. `ml_service/requirements.txt` uses minimum versions (`>=`) rather than pins and has no automated vulnerability scan; pin and scan it in CI for a real deployment.
 
 ## 10. Confirmed assistant actions (Issues #73, #75, #77 and #79)
@@ -108,3 +110,25 @@ When the assistant adds a transaction, adds to a goal, records a liability repay
 ## 11. Known remaining risks
 
 See the final section of the Issue #67 report; in short: ML service isolation is a deployment responsibility, in-memory rate limits, no CSRF token beyond SameSite, no parser sandbox, CDN-hosted `xlsx` tarball, no Python vulnerability scanning, and Python `main.py` still labels clustering "KMeans" (wording only).
+
+
+## Current release candidate verification (16 October 2026)
+
+The preceding dated audit paragraphs describe historical states. The release candidate uses
+Vite 6.4.4 and a pinned clean Python 3.12 application closure. Both npm audits and the
+25-package Python closure scan report zero known vulnerabilities; this does not cover the
+unchanged global demo interpreter or certify the target host. See RELEASE_VERIFICATION.md.
+Unsafe API methods reject untrusted Origin headers and cross-site browser writes before
+route execution; CORS and Strict cookies remain additional layers. Configure the exact
+same-site frontend origin explicitly, including for same-origin hosting. Non-browser clients
+without Origin still need valid auth. The health query is rate limited to 60/minute/IP.
+ML inputs reject non-finite transaction amounts and negative/non-finite financial context;
+forecast horizons are 1–12 months and analysis is capped at 3,000 rows without truncation.
+The API enforces the row cap before sending private data to Python.
+
+Container templates exclude secrets and runtime JSON. Python is on an internal compose
+network without a published port; API is bound to host loopback pending a host HTTPS proxy.
+Containers and ARM64 execution remain unverified because Docker is unavailable here.
+Spreadsheet parsing is still in-process and residual decompression/resource risk remains.
+The new synthetic backup/restore rehearsal does not prove production recovery or replace
+encrypted off-host backups. Host rollout approval and staging verification are still required.

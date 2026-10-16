@@ -1,6 +1,6 @@
 import { Component, Suspense } from 'react';
 
-// Holds one page of the app. Pages other than the Dashboard are loaded on demand, so this shows a short loading line while a page's code
+// Holds one page of the app. Pages are loaded on demand, so this shows a short loading line while a page's code
 // arrives, and a plain message with a Reload button if it cannot (for example offline, or after the site was updated while the tab was
 // open). It also keeps one page's rendering error from blanking the whole app. It never touches financial data.
 class Catcher extends Component {

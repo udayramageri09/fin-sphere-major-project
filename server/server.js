@@ -1,5 +1,6 @@
 /* eslint-disable no-undef, no-unused-vars, no-useless-assignment */
 import express from 'express';
+import { parseTrustProxy } from './runtimeConfig.js';
 import { holdingsRouter } from './holdings.js';
 import cors from 'cors';
 import dotenv from 'dotenv';
@@ -14,7 +15,7 @@ import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
 import { randomUUID } from 'node:crypto';
 import {
-  initDatabase, closeDatabase, readProfile, updateProfile, saveAvatar, readAvatar, deleteAvatar, createUser, findUserByEmail, normalizeEmail, DuplicateEmailError,
+  initDatabase, closeDatabase, databaseHealthy, readProfile, updateProfile, saveAvatar, readAvatar, deleteAvatar, createUser, findUserByEmail, normalizeEmail, DuplicateEmailError,
   issuePasswordReset, consumePasswordReset, isCurrentSession,
   listTransactionsByUser, createTransaction, createTransactionsBatch, importTransactionsLocked, ImportMatchLimitError, deleteTransactionByUserAndId, updateTransactionCategory, updateTransactionByUserAndId,
   listGoalsByUser, createGoal, deleteGoalByUserAndId, addGoalContribution, listGoalContributions,
@@ -59,6 +60,8 @@ const JWT_VERIFY_OPTIONS = { algorithms: [JWT_ALGORITHM] };
 // ── Authentication Middleware ──────────────────────────────────────────────────
 // Reads the JWT from the httpOnly cookie set at login, verifies it, and attaches
 // the decoded identity to req.user.  Returns 401 for missing / invalid / expired tokens.
+// Identity contract: every financial query uses req.user.id only after token verification
+// and session-version validation. The stale-tab header below is never an identity source.
 async function authenticate(req, res, next) {
   const token = req.cookies.token;
   if (!token) return res.status(401).json({ error: 'Authentication required' });
@@ -98,22 +101,37 @@ if (isProd && allowedOrigins.length === 0) {
 // TRUST_PROXY: how many reverse-proxy hops sit in front of this server (e.g. 1 on Render / behind one load
 // balancer). Without it req.ip is the proxy's address, so every client shares one rate-limit bucket. A bare
 // "true" is refused because it would let any client choose its own IP through X-Forwarded-For.
-if (process.env.TRUST_PROXY !== undefined && process.env.TRUST_PROXY !== '') {
-  const hops = process.env.TRUST_PROXY.trim();
-  if (hops.toLowerCase() === 'true') {
-    console.error('FATAL: TRUST_PROXY must be a hop count (e.g. 1) or a subnet list, not "true".');
-    process.exit(1);
-  }
-  app.set('trust proxy', /^\d+$/.test(hops) ? Number(hops) : hops);
+try {
+  app.set('trust proxy', parseTrustProxy(process.env.TRUST_PROXY));
+} catch (err) {
+  console.error('FATAL:', err.message);
+  process.exit(1);
 }
 
 app.use(helmet());   // security headers; also removes X-Powered-By
+// Financial responses and session failures must not survive in browser/proxy caches.
+app.use('/api', (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 app.use(cors({ origin: allowedOrigins, credentials: true }));
+// CORS controls response visibility, not writes. Refuse browser writes from other origins,
+// including same-site sibling subdomains that SameSite cookies alone would permit.
+app.use('/api', (req, res, next) => {
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+    const origin = req.get('origin');
+    if ((origin && !allowedOrigins.includes(origin)) || req.get('sec-fetch-site') === 'cross-site') {
+      return res.status(403).json({ error: 'Request origin is not allowed' });
+    }
+  }
+  next();
+});
 // Largest JSON body accepted (pasted statement text, chat and plan-chat). Stated explicitly rather than relying on
 // the library default; larger requests are answered 413.
 const globalJson = express.json({ limit: '100kb' });
 app.use((req, res, next) => (req.path === '/api/transactions/import-confirm' ? next() : globalJson(req, res, next)));   // that one route has its own, authenticated, 256 KB parser
 app.use(cookieParser());
+app.get('/api/health', rateLimit({ windowMs: 60_000, limit: 60, standardHeaders: true, legacyHeaders: false }), async (req, res) => {
+  try { await databaseHealthy(); res.json({ status: 'ok' }); }
+  catch { res.status(503).json({ status: 'unavailable' }); }
+});
 
 // Set up multer for file uploads using memory storage for zero-footprint.
 // Limit: 5 MB — generous upper bound for any real-world bank statement
@@ -1442,6 +1460,8 @@ app.post('/api/transactions/parse-statement', authenticate, parseLimiter, (req, 
     try {
       // Model: GROQ_PARSE_MODEL (default openai/gpt-oss-20b). No response_format (the prompt asks for a top-level JSON array,
       // which JSON mode cannot return) and no max_tokens (the output grows with the statement).
+      // Provider output is untrusted extraction, not a ledger. The downstream normalizer
+      // must reject malformed rows before duplicate review or persistence.
       const parseModel = getParseModel(process.env);
       const response = await fetch(groqChatUrl(process.env), {
         method: 'POST',
@@ -2174,6 +2194,9 @@ app.get('/api/ml/analyze', authenticate, mlLimiter, async (req, res) => {
     } catch (dbErr) {
       return respondDbError(res, dbErr, 'Could not load emergency fund');   // not an ML-service problem
     }
+    // Ward clustering is quadratic in row count. Refuse oversized histories explicitly;
+    // never silently truncate the user's analysis or compete without a memory bound.
+    if (userTransactions.length > 3000) return res.status(422).json({ error: 'Analysis supports up to 3000 transactions per account.' });
     const payload = {
       transactions: userTransactions,
       monthly_debt_payments: monthlyDebtPayments,
@@ -2181,6 +2204,8 @@ app.get('/api/ml/analyze', authenticate, mlLimiter, async (req, res) => {
       n_forecast_months: 3
     };
 
+    // Only server-loaded, owner-scoped data crosses this boundary. The private Python
+    // service is stateless and unauthenticated; its output cannot authorize database writes.
     const mlRes = await fetch(`${ML_SERVICE_URL}/ml/full-analysis`, {
       method: 'POST',
       signal: AbortSignal.timeout(60_000),
@@ -2379,11 +2404,7 @@ try {
   console.error('Set DATABASE_URL to a reachable PostgreSQL database (see server/.env.example).');
   process.exit(1);
 }
-for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.once(signal, () => { closeDatabase().finally(() => process.exit(0)); });
-}
-
-app.listen(PORT, () => {
+const httpServer = app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
   if (isGroqConfigured()) {
     console.log('Groq API Key is loaded successfully.');
@@ -2391,3 +2412,16 @@ app.listen(PORT, () => {
     console.log('Groq API Key is NOT configured or is default. Running in Demo mode with smart local fallbacks.');
   }
 });
+
+// Stop accepting requests before draining the pool; in-flight writes finish first.
+// The deadline bounds shutdown if an upstream service or client never completes.
+let stopping = false;
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.once(signal, () => {
+    if (stopping) return;
+    stopping = true;
+    setTimeout(() => process.exit(1), 10_000).unref();
+    httpServer.close(() => closeDatabase().then(() => process.exit(0), () => process.exit(1)));
+    httpServer.closeIdleConnections();
+  });
+}

@@ -1,5 +1,5 @@
 /* eslint-disable react-hooks/exhaustive-deps */
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import './Plans.css';
 import AssistantReply from '../components/AssistantReply';
 import { useFinance } from '../context/FinanceContext';
@@ -85,12 +85,12 @@ export default function Plans() {
     setError(null);
     try {
       const res = await guardedFetch(`${API}/ml/analyze`, { credentials: 'include' });
-      if (!res.ok) throw new Error(res.status === 401 ? 'Your session has expired. Please sign in again.' : ANALYSIS_ERROR);
+      if (!res.ok) throw new Error(res.status === 401 ? 'Your session has expired. Please sign in again.' : res.status === 422 ? 'Analysis supports up to 3000 transactions per account. Your saved transactions have not changed.' : ANALYSIS_ERROR);
       const body = await res.json();
       setData(body);
       announce(body.plan?.step_count);
     } catch (err) {
-      setError(err.message === 'Your session has expired. Please sign in again.' || err.message === ACCOUNT_CHANGED_MESSAGE ? err.message : ANALYSIS_ERROR);
+      setError(err.message === 'Your session has expired. Please sign in again.' || err.message.startsWith('Analysis supports up to 3000 transactions') || err.message === ACCOUNT_CHANGED_MESSAGE ? err.message : ANALYSIS_ERROR);
       setData(null);
     } finally {
       setIsLoading(false);
@@ -115,8 +115,8 @@ export default function Plans() {
   }, [data, messages]);
   const stopListening = () => { recognitionRef.current?.stop(); setIsListening(false); };
 
-  const state = data ? buildCurrentState(data) : null;
-  const findings = data ? groupFindings(data) : null;
+  const state = useMemo(() => data ? buildCurrentState(data) : null, [data]);
+  const findings = useMemo(() => data ? groupFindings(data) : null, [data]);
   const health = data && !sectionFailed(data, 'health') ? data.health : null;
   const noTransactions = transactions.length === 0 && !data;
 
@@ -148,10 +148,10 @@ export default function Plans() {
       )}
 
       <div className="plans-split">
-        <div className="plans-left">
+        <div className="plans-left" aria-busy={isLoading}>
           {isLoading && (
-            <div className="ml-loading">
-              <div className="ml-loading-spinner" />
+            <div className="ml-loading" role="status" aria-live="polite">
+              <div className="ml-loading-spinner" aria-hidden="true" />
               <div className="ml-loading-text">
                 <p>Analysing your transactions…</p>
                 <small>Forecast · anomalies · spending clusters · health score · action plan</small>
@@ -218,6 +218,7 @@ export default function Plans() {
           <form className="plan-chat-input" onSubmit={(e) => { e.preventDefault(); sendToBot(chatInput); }}>
             <input
               type="text"
+              aria-label="Ask the advisor about this analysis"
               placeholder={data ? 'Ask about this analysis…' : 'Run the analysis first…'}
               value={chatInput}
               onChange={(e) => setChatInput(e.target.value)}

@@ -9,6 +9,7 @@
     "test:statement-a11y": "node tests/statementImportA11y.test.mjs",
     "test:duplicate-review": "node tests/duplicateReviewUi.test.mjs",
     "test:analytics-ui": "node tests/spendingAnalyticsUi.test.mjs",
+    "test:insights-css": "node tests/insightsRevealCss.test.mjs",
     "test:analytics": "node --test tests/spendingAnalytics.test.mjs",
     "test:month-range": "node --test tests/monthRange.test.mjs",
     "test:priorities": "node --test tests/spendingPriorities.test.mjs",
@@ -54,6 +55,6 @@
     "jsdom": "^29.1.1",
     "postcss": "^8.5.26",
     "tailwindcss": "^4.3.3",
-    "vite": "^5.4.11"
+    "vite": "6.4.4"
   }
 }

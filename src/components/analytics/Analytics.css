@@ -34,7 +34,9 @@
 .transaction-view-insights.is-discoverable { animation: insights-attention 1400ms ease-out 2; }
 .transaction-insights-panel:not([hidden]) { animation: insights-reveal 220ms ease-out; }
 @keyframes insights-attention { 0%, 100% { box-shadow: 0 0 0 0 #60788d00; } 45% { box-shadow: 0 0 0 5px #60788d24; } }
-@keyframes insights-reveal { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+/* Slide only, never fade from opacity 0: if the browser stops producing frames (background/occluded tab, stalled compositor) a fade would leave
+   the fully rendered panel invisible ("blank Insights"). Reproduced with a frozen animation clock; see docs/FINALIZATION_REPORT.md. */
+@keyframes insights-reveal { from { transform: translateY(5px); } to { transform: translateY(0); } }
 @media (prefers-reduced-motion: reduce) { .transaction-view-button { transition: none; } .transaction-view-insights.is-discoverable, .transaction-insights-panel:not([hidden]) { animation: none; } }
 
 .month-chart { position: relative; }

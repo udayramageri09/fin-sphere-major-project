@@ -64,3 +64,10 @@ Thumbs.db
 !.vscode/extensions.json
 .idea/
 *.local
+
+# Private backup and deployment material
+backups/
+*.dump
+*.backup
+*.pem
+*.key

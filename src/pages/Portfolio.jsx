@@ -13,6 +13,8 @@ const buttonClass = 'rounded-lg bg-zinc-900 text-white px-4 py-3 font-semibold d
 const panel = 'glass-panel p-5 sm:p-6 min-w-0';
 
 // Decimal text is converted exactly once; zero is an explicit valuation, never a missing value.
+// Contract: return integer paise or null; callers must not use truthiness because zero is valid.
+// Displayed gains compare the two entered valuations; they are not annualized investment returns.
 function amountPaise(value) {
   if (!/^\d+(\.\d{1,2})?$/.test(value)) return null;
   const [whole, fraction = ''] = value.split('.');

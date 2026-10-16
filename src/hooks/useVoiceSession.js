@@ -32,6 +32,8 @@ const getRecognitionClass = () => (typeof window === 'undefined' ? null : window
 const getSynthesis = () => (typeof window !== 'undefined' && window.speechSynthesis && typeof window.SpeechSynthesisUtterance === 'function'
   ? window.speechSynthesis : null);
 
+// Voice owns recognition/speech lifecycle only. runTurn owns proposals and explicit confirmation;
+// a recognition callback must never bypass that path and write financial state directly.
 export function useVoiceSession({ runTurn }) {
   const [active, setActive] = useState(false);
   const [phase, setPhase] = useState('idle');          // idle | listening | thinking | speaking | error

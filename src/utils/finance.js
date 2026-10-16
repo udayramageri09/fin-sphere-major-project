@@ -13,6 +13,8 @@
 // paise, so there is no float drift. The Balance card is NOT analytical: it stays the raw
 // signed total of everything recorded (money in minus money out, transfers and refunds included).
 
+// Keep rule changes aligned with server SQL and Python analytics before changing any one layer.
+// A transfer affects raw cash balance but must never inflate analytical income or spending.
 const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 
 // Parses a YYYY-MM-DD calendar date as LOCAL midnight. new Date('YYYY-MM-DD') is

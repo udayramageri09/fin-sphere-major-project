@@ -1,6 +1,6 @@
 -- FinSphere PostgreSQL schema. Idempotent: safe to run on every startup.
--- Only user/auth persistence lives here for now; transactions, goals and liabilities are
--- still stored in JSON files.
+-- All financial domains use PostgreSQL. Legacy JSON imports require an explicit
+-- migration policy; production never imports them implicitly.
 
 CREATE TABLE IF NOT EXISTS users (
   -- BIGINT (not UUID) on purpose: existing JSON-backed transactions/goals/liabilities are

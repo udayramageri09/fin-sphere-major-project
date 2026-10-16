@@ -4,6 +4,9 @@ import { listHoldings, saveHolding, deleteHolding } from './db/index.js';
 
 export const ASSET_CLASSES = ['Stocks','Mutual funds','Bonds','Deposits','Gold','Other'];
 const fields = ['name','assetClass','investedPaise','currentPaise','valuedOn'];
+/** Holdings are manual, dated valuations in integer paise, not live market quotes.
+ * Zero is valid; rejecting extra fields prevents clients from supplying ownership.
+ * The router always derives the owner from the authenticated session. */
 export function validHolding(body, today = new Date().toISOString().slice(0,10)) {
   if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length !== fields.length || !fields.every(k => Object.hasOwn(body,k))) return false;
   if (typeof body.name !== 'string' || !body.name.trim() || body.name.length > 100 || /[\p{Cc}\p{Cf}]/u.test(body.name) || !ASSET_CLASSES.includes(body.assetClass)) return false;

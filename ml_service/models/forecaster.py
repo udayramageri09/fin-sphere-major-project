@@ -54,6 +54,8 @@ def _build_monthly_series(transactions: list[dict]) -> pd.DataFrame:
 def _fit_and_predict(X: np.ndarray, y: np.ndarray, n_future: int) -> dict:
     """
     Fits a LinearRegression and returns predictions + model stats.
+    R-squared describes the fitted history, not held-out forecasting accuracy.
+    The constant fallback avoids presenting a trend with fewer than two observations.
     """
     if len(X) < 2:
         # Not enough data — return flat line at mean
