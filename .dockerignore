@@ -18,3 +18,10 @@ docs/screenshots
 .claude
 .codex
 skills
+backups
+**/backups
+**/*.backup
+**/*.pem
+**/*.key
+.vscode
+.idea
