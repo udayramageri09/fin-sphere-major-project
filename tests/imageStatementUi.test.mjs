@@ -239,8 +239,8 @@ try {
     for (const name of ['a.csv', 'b.txt', 'c.xls', 'd.xlsx', 'E.CSV']) {
       reset();
       const file = await setFile(name, 'application/octet-stream');
-      assert.ok(button(/Parse File \(AI-Powered\)/), name);
-      await click(/Parse File \(AI-Powered\)/);
+      assert.ok(button(/Parse File/), name);
+      await click(/Parse File/);
       await flush();
       assert.equal(calls.extract.length, 0, `${name}: no OCR`);
       assert.equal(calls.parseStatement.length, 1, `${name}: existing import`);
@@ -260,7 +260,7 @@ try {
     assert.equal(calls.extract.length, 1);
     await openUpload();
     await setFile('image.png.csv', 'image/png');
-    assert.ok(button(/Parse File \(AI-Powered\)/));
+    assert.ok(button(/Parse File/));
   });
 
   await check('no extracted text reaches the console', async () => {
@@ -315,7 +315,7 @@ try {
     assert.equal(init.credentials, 'include', 'sends the session cookie like every other call');
     assert.ok(init.body instanceof FormData);
     assert.equal(init.body.get('statementImage').name, 'statement.png');
-    assert.equal(init.headers, undefined, 'no manual Content-Type: the browser sets the multipart boundary');
+    assert.ok(!Object.keys(init.headers ?? {}).some((k) => k.toLowerCase() === 'content-type'), 'no manual Content-Type: the browser sets the multipart boundary');
     assert.equal(requests.some((r) => r.url.includes('parse-statement')), false, 'never the statement-import endpoint');
     assert.equal(requests.some((r) => /\/transactions$/.test(r.url) && r.init.method === 'POST'), false, 'nothing is saved');
   });

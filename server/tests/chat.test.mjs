@@ -79,6 +79,22 @@ async function run() {
   const V = await user('chat-validate@example.com');   // validation cases (each counts toward the 30/min chat limit)
   const P = await user('chat-plan@example.com');
 
+  // Profile regression: legacy default, authenticated ownership, persistence and clearing.
+  ok((await call(A, 'GET', '/auth/verify')).json.user.displayName === '', 'legacy profile defaults empty');
+  ok((await call(null, 'PATCH', '/auth/profile', { displayName: 'No' })).status === 401, 'profile requires session');
+  ok((await call(A, 'PATCH', '/auth/profile', { displayName: '  Nick 🌿  ' })).json.user.displayName === 'Nick 🌿', 'chosen name trimmed');
+  ok((await call(A, 'GET', '/auth/verify')).json.user.displayName === 'Nick 🌿', 'profile survives session verification');
+  ok((await call(B, 'GET', '/auth/verify')).json.user.displayName === '', 'other user unchanged');
+  for (const body of [null, [], {}, { displayName: 1 }, { displayName: 'x'.repeat(81) }, { displayName: 'a\nb' }, { displayName: 'x', userId: 2 }, { displayName: 'x', email: 'other@example.com' }]) {
+    ok((await call(A, 'PATCH', '/auth/profile', body)).status === 400, 'invalid or extra profile fields rejected');
+  }
+  const relogin = await user('profile-login@example.com');
+  await call(relogin, 'PATCH', '/auth/profile', { displayName: 'Saved name' });
+  const loginResponse = await call(null, 'POST', '/auth/login', { email: 'profile-login@example.com', password: 'chat-test-password-1' });
+  ok(loginResponse.json.user.displayName === 'Saved name', 'login reads persisted name');
+  ok(!('passwordHash' in loginResponse.json.user), 'profile response excludes credentials');
+  ok((await call(A, 'PATCH', '/auth/profile', { displayName: '' })).json.user.displayName === '', 'name can be removed');
+
   // ── Fixtures for A: classification semantics in the current month, plus last month ──────────────────────────
   const tx = (title, amount, type, classification, date = firstOfMonth) =>
     call(A, 'POST', '/transactions', { title, amount, type, classification, date, category: 'Test' });
@@ -148,6 +164,8 @@ async function run() {
   r = await ask(A, 'How much did I spend this month?');
   ok(r.status === 200 && r.json.reply.includes('₹9,500') && r.json.reply.includes('₹11,000') && r.json.reply.includes('₹1,500'), 'this month spending = ₹9,500 (₹11,000 expenses - ₹1,500 refunds)', r.json?.reply);
   ok(r.json.reply.includes(month), 'the answer names the month it used', r.json?.reply);
+  ok(r.json.visualization?.rows?.[0]?.amount === 52000 && r.json.visualization?.rows?.[1]?.amount === 9500, 'visualization uses caller totals, excluding other account');
+  ok(r.json.visualization?.provisional === true, 'visualization marks unclassified totals provisional');
   ok(r.json.reply.includes('₹49,500'), 'all-time spending given separately', r.json?.reply);
   ok(/2 of this month's transactions are not classified/.test(r.json.reply), 'unclassified rows flagged as provisional', r.json?.reply);
   r = await ask(A, 'How much income did I receive this month?');
@@ -184,7 +202,7 @@ async function run() {
   r = await ask(A, 'What is my net worth?');
   ok(/can't work out your net worth/.test(r.json.reply), 'net worth is unavailable', r.json?.reply);
   r = await ask(A, 'Is my portfolio doing well?');
-  ok(/don't have any portfolio/.test(r.json.reply), 'portfolio is unavailable', r.json?.reply);
+  ok(/Open Portfolio/.test(r.json.reply) && /not connected to this chat/.test(r.json.reply), 'portfolio points to recorded holdings and discloses chat limitation', r.json?.reply);
   r = await ask(A, 'What is my remaining budget?');
   ok(/budgets for/.test(r.json.reply), '"remaining budget" is answered as a budget question', r.json?.reply);
   // the fallback never picks a random transaction to sound personal

@@ -248,3 +248,39 @@ CREATE INDEX IF NOT EXISTS assistant_action_proposals_user_status_idx ON assista
 -- At most one open (draft or pending) proposal per user: a new request replaces the old one instead of piling up.
 CREATE UNIQUE INDEX IF NOT EXISTS assistant_action_proposals_one_open_idx
   ON assistant_action_proposals (user_id) WHERE status IN ('draft', 'pending');
+
+-- Optional chosen name only; existing accounts remain unnamed.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name TEXT NOT NULL DEFAULT '' CHECK (length(display_name) <= 80);
+
+-- Display preference (Settings > Display). Existing accounts keep the default, which is off.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS reduce_motion BOOLEAN NOT NULL DEFAULT false;
+
+-- First-login setup guide. Only registration sets 'pending'; the column default is 'completed', so every account that already exists
+-- (and anything created without going through registration, such as a legacy import) is never treated as a new user.
+-- 'skipped' = dismissed for now (can be reopened from Settings). Purely additive and idempotent: no existing row is rewritten.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_state TEXT NOT NULL DEFAULT 'completed' CHECK (onboarding_state IN ('pending', 'skipped', 'completed'));
+
+-- Optional profile photo: at most one per user, stored already sanitised (re-encoded by the browser, metadata stripped and
+-- validated by the server) and only ever served back to its owner. Kept out of `users` so ordinary user reads never carry image
+-- bytes. Replacing or removing a photo is an upsert / delete on the owner's own row, so another user's file cannot be touched.
+CREATE TABLE IF NOT EXISTS user_avatars (
+  user_id      BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  content_type TEXT NOT NULL CHECK (content_type IN ('image/jpeg', 'image/png', 'image/webp')),
+  data         BYTEA NOT NULL CHECK (octet_length(data) BETWEEN 1 AND 262144),
+  width        INTEGER NOT NULL CHECK (width BETWEEN 1 AND 4096),
+  height       INTEGER NOT NULL CHECK (height BETWEEN 1 AND 4096),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Manually entered, INR-only positions. No assumed prices or generated performance history.
+CREATE TABLE IF NOT EXISTS investment_holdings (
+  id UUID PRIMARY KEY,
+  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL CHECK (length(btrim(name)) BETWEEN 1 AND 100),
+  asset_class TEXT NOT NULL CHECK (asset_class IN ('Stocks','Mutual funds','Bonds','Deposits','Gold','Other')),
+  invested_paise BIGINT NOT NULL CHECK (invested_paise BETWEEN 0 AND 1000000000000),
+  current_paise BIGINT NOT NULL CHECK (current_paise BETWEEN 0 AND 1000000000000),
+  valued_on DATE NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS investment_holdings_owner_idx ON investment_holdings(user_id);

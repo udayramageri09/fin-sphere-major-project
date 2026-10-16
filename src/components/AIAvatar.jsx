@@ -3,7 +3,9 @@ import { X, Send, Image as ImageIcon, Mic, MicOff, Keyboard } from 'lucide-react
 import FinancialCompanion from './FinancialCompanion';
 import ActionConfirmationCard from './ActionConfirmationCard';
 import './AIAvatar.css';
+import AssistantReply from './AssistantReply';
 import { useFinance } from '../context/FinanceContext';
+import { useAuth } from '../context/AuthContext';
 import { useAvatarActions } from '../hooks/useAvatarActions';
 import { useVoiceSession } from '../hooks/useVoiceSession';
 import { parseAssistantInput } from '../utils/assistantIntent';
@@ -316,13 +318,20 @@ function AIAvatar() {
       question
     );
     let reply = null;
+    let spokenReply = null;
     let error = null;
     try {
       const answer = await sendAssistantMessage(history);
       reply = answer.reply;
+      if (!answer.action && answer.visualization?.rows?.length === 3) {
+        const figures = answer.visualization.rows;
+        spokenReply = `${answer.visualization.title}. ${figures.map(row => `${row.label}: ${Number(row.amount).toLocaleString('en-IN', { style: 'currency', currency: 'INR' })}`).join('. ')}. ${answer.visualization.provisional ? 'These totals include unclassified transactions and are provisional. ' : ''}The full answer is on your screen.`;
+        // Keep cancellation notices and other safety context verbatim when a proposal was open.
+        if (active) spokenReply = null;
+      }
       const next = actionFromServer(answer.action);
       setActive(next);                       // no action in the response means nothing is open on the server any more
-      setMessages((prev) => [...prev, { id: nextId(), text: reply, sender: 'bot' }]);
+      setMessages((prev) => [...prev, { id: nextId(), text: reply, sender: 'bot', visualization: answer.visualization }]);
       if (next?.status === 'pending') firePulse('attention', msUntil(next.expiresAt));
       else firePulse('insight');
     } catch (err) {
@@ -342,7 +351,7 @@ function AIAvatar() {
       : null;
     if (navigate && (!voice || error)) navigate();
     if (error) return { status: 'failed', error };
-    return { status: 'answered', reply, navigate: voice ? navigate : null };
+    return { status: 'answered', reply, spokenReply, navigate: voice ? navigate : null };
   };
 
   const handleSendText = (rawText) => runTurn(rawText, { source: 'text' });
@@ -414,6 +423,16 @@ function AIAvatar() {
     if (recognitionRef.current) recognitionRef.current.stop();
     setIsListening(false);
   }, []);
+
+  // While another tab may have changed the account, the app is hidden: stop listening and stop any spoken answer at once, so nothing from
+  // the previous account is heard (or captured) before the server has said whose session this is.
+  const { identityMasked } = useAuth();
+  useEffect(() => {
+    if (!identityMasked) return;
+    endVoice();
+    stopListening();
+    setIsOpen(false);
+  }, [identityMasked, endVoice, stopListening]);
 
   const handleSend = async (e) => {
     e.preventDefault();
@@ -490,7 +509,7 @@ function AIAvatar() {
             </p>
           )}
           <div className="voice-caption voice-caption--reply" aria-live="polite">
-            {voicePhase === 'error' ? voiceSession.errorText : voiceSession.replyCaption}
+            {voicePhase === 'error' ? voiceSession.errorText : <AssistantReply text={voiceSession.replyCaption} visualization={messages.findLast(m => m.sender === 'bot' && m.text === voiceSession.replyCaption)?.visualization} />}
           </div>
           <ActionConfirmationCard
             compact
@@ -531,7 +550,7 @@ function AIAvatar() {
         {/* Command hints */}
         <div className="command-hints">
           {HINTS.map((hint) => (
-            <span key={hint} className="hint-chip" onClick={() => handleSendText(hint)}>{hint}</span>
+            <button type="button" key={hint} className="hint-chip" onClick={() => handleSendText(hint)}>{hint}</button>
           ))}
         </div>
 
@@ -540,7 +559,7 @@ function AIAvatar() {
             <div key={msg.id} className={`chat-message ${msg.sender}`}>
               <div className="message-content">
                 {msg.isSnippet && <ImageIcon size={16} style={{display: 'inline', marginRight: '6px', verticalAlign: 'text-bottom', color: '#fff'}} />}
-                {msg.text}
+                {msg.sender === 'bot' ? <AssistantReply text={msg.text} visualization={msg.visualization} /> : msg.text}
               </div>
             </div>
           ))}

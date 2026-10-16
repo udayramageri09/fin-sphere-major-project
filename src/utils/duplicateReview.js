@@ -2,6 +2,8 @@
 // understands its answers, builds the confirmation request from exactly what the server previewed, and words the results.
 // Nothing here logs, stores or re-parses statement contents.
 
+import { ACCOUNT_CHANGED_MESSAGE } from './accountGuard';
+
 export const MAX_IMPORT_ROWS = 500;
 
 const isFiniteNumber = (n) => typeof n === 'number' && Number.isFinite(n);
@@ -78,8 +80,9 @@ export async function requestImportConfirm({ apiUrl, body, fetchImpl = fetch }) 
     res = await fetchImpl(`${apiUrl}/transactions/import-confirm`, {
       method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
     });
-  } catch {
-    throw new Error('Could not reach the server, so the import may not have completed. Check your transactions, then try again.');
+  } catch (err) {
+    if (err?.message === ACCOUNT_CHANGED_MESSAGE) throw err;   // refused before anything was imported
+    throw new Error('Could not reach the server, so the import may not have completed. Check your transactions, then try again.', { cause: err });
   }
   if (res.status === 401) { const e = new Error('Session expired'); e.status = 401; throw e; }
   let data = null;

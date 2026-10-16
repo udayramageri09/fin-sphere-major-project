@@ -385,6 +385,7 @@
 
 .ai-chat-input input {
   flex: 1;
+  min-width: 0;
   padding: 10px 16px;
   border: 1px solid var(--border-color);
   border-radius: 99px;
@@ -394,6 +395,10 @@
 }
 .ai-chat-input input:focus {
   border-color: var(--text-primary);
+}
+.ai-chat-input input:focus-visible {
+  outline: 2px solid #475569;
+  outline-offset: 1px;
 }
 
 .send-btn, .voice-btn {

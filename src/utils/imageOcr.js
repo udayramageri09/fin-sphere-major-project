@@ -1,6 +1,8 @@
 // Client side of image statement upload (Stage 2). Only the OCR request lives here: the server returns TEXT, which the page
 // puts in the paste editor for the user to review. Nothing here saves a transaction or calls the statement-import endpoint.
 
+import { ACCOUNT_CHANGED_MESSAGE } from './accountGuard';
+
 const IMAGE_NAME = /\.(jpe?g|png)$/i;
 export const isOcrImageFile = (file) => Boolean(file && IMAGE_NAME.test(String(file.name ?? '')));
 
@@ -32,7 +34,8 @@ export async function requestImageText({ apiUrl, file, fetchImpl = fetch }) {
   let res;
   try {
     res = await fetchImpl(`${apiUrl}/transactions/ocr-statement-image`, { method: 'POST', credentials: 'include', body: formData });
-  } catch {
+  } catch (err) {
+    if (err?.message === ACCOUNT_CHANGED_MESSAGE) throw err;   // refused before anything was read
     throw new ImageOcrError('Could not reach the server. Check your connection and try again.');
   }
   if (res.status === 401) throw new ImageOcrError('Session expired', 401);

@@ -6,6 +6,13 @@
   "scripts": {
     "test:import-duplicates": "node --test tests/importDuplicates.test.mjs",
     "test:import-duplicates-server": "node tests/importDuplicatesServer.test.mjs",
+    "test:account-guard": "node tests/accountGuard.test.mjs",
+    "test:onboarding": "node tests/onboardingServer.test.mjs",
+    "test:category": "node tests/transactionCategory.test.mjs",
+    "test:transaction-edit": "node tests/transactionEdit.test.mjs",
+    "test:transaction-edit-contract": "node --test tests/transactionEditContract.test.mjs",
+    "test:profile-image": "node --test tests/profileImage.test.mjs",
+    "test:profile": "node tests/profileServer.test.mjs",
     "test:image-ocr": "node --test tests/imageOcr.test.mjs",
     "test:image-ocr-server": "node tests/imageOcrServer.test.mjs",
     "test:password-reset": "node --test tests/passwordReset.test.mjs",
@@ -21,7 +28,8 @@
     "test:natural": "node --test tests/naturalActions.test.mjs",
     "test:liability": "node --test tests/liabilityActions.test.mjs",
     "test:plans": "node tests/plans.test.mjs",
-    "test:groq": "node tests/groq.test.mjs"
+    "test:groq": "node tests/groq.test.mjs",
+    "test:holdings": "node tests/holdingsServer.test.mjs"
   },
   "dependencies": {
     "@tesseract.js-data/eng": "1.0.0",

@@ -113,7 +113,7 @@ export function useVoiceSession({ runTurn }) {
     if (!activeRef.current) return;                        // the session was closed while waiting
     if (result?.status === 'answered') {
       setReplyCaption(result.reply);
-      speak(result.reply, () => {
+      speak(result.spokenReply || result.reply, () => {
         if (!activeRef.current) return;
         if (result.navigate) {
           result.navigate();                               // question + command: navigate only after the answer

@@ -3,49 +3,14 @@
 // reads "Unavailable" while the others still render. Presentation only.
 import { Activity, BarChart2, Minus, Target, TrendingDown, TrendingUp } from 'lucide-react';
 import { sectionFailed } from '../../utils/planIntelligence';
+import ForecastChart from './ForecastChart';
+
+const signedRupees = (v) => `${v < 0 ? '−' : ''}₹${Math.abs(v).toLocaleString('en-IN')}`;
 
 function TrendIcon({ direction }) {
   if (direction === 'rising') return <TrendingUp size={14} className="trend-up" />;
   if (direction === 'falling') return <TrendingDown size={14} className="trend-down" />;
   return <Minus size={14} className="trend-stable" />;
-}
-
-function ForecastBars({ historical, forecast }) {
-  if (!historical?.length) return <div className="no-data">No forecast data</div>;
-  const forecastIncome = forecast?.income?.predictions || [];
-  const forecastExpenses = forecast?.expenses?.predictions || [];
-  const maxVal = Math.max(...historical.map((h) => h.income), ...historical.map((h) => h.expenses), ...forecastIncome, ...forecastExpenses, 1);
-  const forecastMonths = forecast?.months || [];
-  return (
-    <div className="forecast-bars-wrap">
-      <div className="forecast-legend">
-        <span><span className="legend-dot income" />Income</span>
-        <span><span className="legend-dot expense" />Spending</span>
-        <span><span className="legend-dot forecast" />Forecast</span>
-      </div>
-      <div className="bars-container">
-        {historical.slice(-4).map((m, i) => (
-          <div key={`h-${i}`} className="bar-group">
-            <div className="bar-pair">
-              <div className="bar income-bar" style={{ height: `${(m.income / maxVal) * 100}%` }} title={`₹${m.income.toLocaleString('en-IN')}`} />
-              <div className="bar expense-bar" style={{ height: `${(m.expenses / maxVal) * 100}%` }} title={`₹${m.expenses.toLocaleString('en-IN')}`} />
-            </div>
-            <div className="bar-label">{m.month_label?.split(' ')[0]}</div>
-          </div>
-        ))}
-        <div className="forecast-divider" title="Forecast starts here" />
-        {forecastMonths.map((month, i) => (
-          <div key={`f-${i}`} className="bar-group forecast-group">
-            <div className="bar-pair">
-              <div className="bar income-bar forecast-bar" style={{ height: `${((forecastIncome[i] || 0) / maxVal) * 100}%` }} title={`Forecast ₹${(forecastIncome[i] || 0).toLocaleString('en-IN')}`} />
-              <div className="bar expense-bar forecast-bar" style={{ height: `${((forecastExpenses[i] || 0) / maxVal) * 100}%` }} title={`Forecast ₹${(forecastExpenses[i] || 0).toLocaleString('en-IN')}`} />
-            </div>
-            <div className="bar-label">{month.split(' ')[0]}</div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
 }
 
 export default function AnalysisDetails({ data }) {
@@ -68,10 +33,10 @@ export default function AnalysisDetails({ data }) {
             <div className="forecast-trends">
               <div className="trend-pill">Income <TrendIcon direction={forecast.insights?.income_momentum} /><strong>{forecast.insights?.income_momentum}</strong></div>
               <div className="trend-pill">Spending <TrendIcon direction={forecast.insights?.expense_momentum} /><strong>{forecast.insights?.expense_momentum}</strong></div>
-              <div className="trend-pill">Projected savings <strong>₹{(forecast.insights?.projected_savings_3m || 0).toLocaleString('en-IN')}</strong></div>
+              <div className="trend-pill">Projected savings <strong>{signedRupees(forecast.insights?.projected_savings_3m || 0)}</strong></div>
             </div>
             {caveats.map((c) => <p key={c} className="explain-note">{c}</p>)}
-            <ForecastBars historical={forecast.historical} forecast={forecast.forecast} />
+            <ForecastChart historical={forecast.historical} forecast={forecast.forecast} />
           </>
         )}
       </div>

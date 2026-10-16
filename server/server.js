@@ -1,5 +1,6 @@
 /* eslint-disable no-undef, no-unused-vars, no-useless-assignment */
 import express from 'express';
+import { holdingsRouter } from './holdings.js';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import multer from 'multer';
@@ -13,9 +14,9 @@ import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
 import { randomUUID } from 'node:crypto';
 import {
-  initDatabase, closeDatabase, createUser, findUserByEmail, normalizeEmail, DuplicateEmailError,
+  initDatabase, closeDatabase, readProfile, updateProfile, saveAvatar, readAvatar, deleteAvatar, createUser, findUserByEmail, normalizeEmail, DuplicateEmailError,
   issuePasswordReset, consumePasswordReset, isCurrentSession,
-  listTransactionsByUser, createTransaction, createTransactionsBatch, importTransactionsLocked, ImportMatchLimitError, deleteTransactionByUserAndId,
+  listTransactionsByUser, createTransaction, createTransactionsBatch, importTransactionsLocked, ImportMatchLimitError, deleteTransactionByUserAndId, updateTransactionCategory, updateTransactionByUserAndId,
   listGoalsByUser, createGoal, deleteGoalByUserAndId, addGoalContribution, listGoalContributions,
   listLiabilitiesByUser, insertLiabilityIdempotent, deleteLiabilityByUserAndId, sumMonthlyPaymentsByUser, repayLiability, listLiabilityRepayments,
   getEmergencyFundByUser, upsertEmergencyFund, getTransactionTotalsByUser,
@@ -27,6 +28,7 @@ import { createAssistantActions, shiftDate, monthLabel } from './assistantAction
 import { createStructuredExtractor } from './structuredActionExtractor.js';
 import { getChatModel, getParseModel, groqChatUrl, modelRequestFields } from './groqModels.js';
 import { createOcrService, createTesseractEngine, createOcrStatementImageHandlers } from './imageOcr.js';
+import { sanitizeProfileImage, ProfileImageError, AVATAR_LIMITS } from './profileImage.js';
 import { MAX_IMPORT_ROWS, findDuplicates, buildPreview, reviewDigest, digestsEqual, parseConfirmRequest, planImport } from './importDuplicates.js';
 import { createSnapshotStore, sanitizeAnalysis } from './planSnapshot.js';
 import { createResetDelivery, createDevMailHandlers, createPasswordResetHandlers } from './passwordReset.js';
@@ -64,10 +66,17 @@ async function authenticate(req, res, next) {
     const decoded = jwt.verify(token, JWT_SECRET, JWT_VERIFY_OPTIONS);
     if (!await isCurrentSession(decoded.id, decoded.sessionVersion ?? 0)) return res.status(401).json({ error: 'Invalid or expired token' });
     req.user = { id: decoded.id, email: decoded.email };
-    next();
   } catch {
     return res.status(401).json({ error: 'Invalid or expired token' });
   }
+  // Tabs of one browser share the session cookie. The signed-in app sends X-FinSphere-User (the account id it is showing); if the session
+  // now belongs to a different account (changed in another tab) the request is refused BEFORE anything is read, answered, proposed or
+  // written. The header is optional and is only ever compared with the verified session id; it is never used to choose an owner.
+  const claimed = req.get('x-finsphere-user');
+  if (claimed !== undefined && claimed !== String(req.user.id)) {
+    return res.status(409).json({ code: 'account_changed', error: 'Your account changed in another tab. Nothing was done.' });
+  }
+  next();
 }
 // ───────────────────────────────────────────────────────────────────────────────
 
@@ -686,7 +695,7 @@ app.post('/api/auth/login', authLimiter, async (req, res) => {
     }
     const token = jwt.sign({ id: user.id, email: user.email, sessionVersion: user.sessionVersion }, JWT_SECRET, { algorithm: JWT_ALGORITHM, expiresIn: '1h' });
     res.cookie('token', token, { httpOnly: true, secure: isProd, sameSite: isProd ? 'strict' : 'lax', maxAge: 60 * 60 * 1000 });
-    res.json({ message: 'Logged in successfully', user: { id: user.id, email: user.email } });
+    res.json({ message: 'Logged in successfully', user: await readProfile(user.id) });
   } catch (err) {
     console.error('Login failed:', err.message);
     res.status(500).json({ error: 'Login failed' });
@@ -704,7 +713,9 @@ app.get('/api/auth/verify', async (req, res) => {
   try {
     const decoded = jwt.verify(token, JWT_SECRET, JWT_VERIFY_OPTIONS);
     if (!await isCurrentSession(decoded.id, decoded.sessionVersion ?? 0)) return res.status(401).json({ error: 'Invalid token' });
-    res.json({ user: decoded });
+    const user = await readProfile(decoded.id);
+    if (!user) return res.status(401).json({ error: 'Invalid token' });
+    res.json({ user });
   } catch (err) {
     res.status(401).json({ error: 'Invalid token' });
   }
@@ -716,6 +727,80 @@ function respondDbError(res, err, message) {
   console.error(`${message}:`, err.code ?? err.message);
   return res.status(500).json({ error: message });
 }
+
+app.use('/api/holdings', holdingsRouter(authenticate, perUserLimiter(120, 'investment holdings')));
+
+// Optional profile: no legal name, PAN, phone, or financial details collected. Only these two fields can be changed here; the
+// sign-in email is deliberately NOT editable through this endpoint (there is no verified email-change flow).
+const PROFILE_FIELDS = ['displayName', 'reduceMotion', 'onboardingState'];
+const ONBOARDING_STATES = ['pending', 'skipped', 'completed'];
+app.patch('/api/auth/profile', authenticate, async (req, res) => {
+  const body = req.body;
+  const keys = body && typeof body === 'object' && !Array.isArray(body) ? Object.keys(body) : [];
+  const valid = keys.length > 0 && keys.every((key) => PROFILE_FIELDS.includes(key)) &&
+    (!('displayName' in body) || (typeof body.displayName === 'string' && body.displayName.length <= 80 && !/[\p{Cc}\p{Cf}]/u.test(body.displayName))) &&
+    (!('reduceMotion' in body) || typeof body.reduceMotion === 'boolean') &&
+    (!('onboardingState' in body) || ONBOARDING_STATES.includes(body.onboardingState));
+  if (!valid) {
+    return res.status(400).json({ error: 'Send a display name of at most 80 characters without control characters, the reduce-motion preference, and/or a setup-guide state (pending, skipped or completed).' });
+  }
+  try {
+    const user = await updateProfile(req.user.id, {
+      displayName: 'displayName' in body ? body.displayName.trim() : undefined,
+      reduceMotion: 'reduceMotion' in body ? body.reduceMotion : undefined,
+      onboardingState: 'onboardingState' in body ? body.onboardingState : undefined
+    });
+    if (!user) return res.status(401).json({ error: 'Not authenticated' });
+    res.json({ user });
+  } catch (err) { respondDbError(res, err, 'Could not save profile'); }
+});
+
+// Profile photo. The owner is always the session user (there is no id in any of these URLs), so one account can never read, replace
+// or delete another account's photo. The image is validated by its real bytes and re-written without metadata (profileImage.js);
+// its bytes and the user's profile are never logged. Rate limited like other expensive per-user work.
+const avatarLimiter = perUserLimiter(10, 'profile photo');
+const avatarUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: AVATAR_LIMITS.maxUploadBytes, files: 1, fields: 0, parts: 2 } });
+app.put('/api/auth/avatar', authenticate, avatarLimiter, (req, res, next) => {
+  avatarUpload.single('avatar')(req, res, (err) => {
+    if (!err) return next();
+    if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: `Photo is too large (maximum ${AVATAR_LIMITS.maxUploadBytes / 1024} KB).` });
+    return res.status(400).json({ error: 'Choose one photo.' });
+  });
+}, async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'Choose a photo.' });
+  let image;
+  try {
+    image = sanitizeProfileImage(req.file.buffer);
+  } catch (err) {
+    if (err instanceof ProfileImageError) return res.status(err.status).json({ error: err.message });
+    console.error('Profile photo check failed unexpectedly');
+    return res.status(500).json({ error: 'Could not check this photo.' });
+  } finally {
+    req.file.buffer = null;
+  }
+  try {
+    await saveAvatar(req.user.id, image);
+    const user = await readProfile(req.user.id);
+    if (!user) return res.status(401).json({ error: 'Not authenticated' });
+    res.json({ user });
+  } catch (err) { respondDbError(res, err, 'Could not save photo'); }
+});
+app.get('/api/auth/avatar', authenticate, async (req, res) => {
+  try {
+    const avatar = await readAvatar(req.user.id);
+    if (!avatar) return res.status(404).json({ error: 'No photo' });
+    res.set({ 'Content-Type': avatar.contentType, 'Content-Length': String(avatar.data.length), 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': 'inline' });
+    res.end(avatar.data);
+  } catch (err) { respondDbError(res, err, 'Could not load photo'); }
+});
+app.delete('/api/auth/avatar', authenticate, async (req, res) => {
+  try {
+    await deleteAvatar(req.user.id);
+    const user = await readProfile(req.user.id);
+    if (!user) return res.status(401).json({ error: 'Not authenticated' });
+    res.json({ user });
+  } catch (err) { respondDbError(res, err, 'Could not remove photo'); }
+});
 
 // 1. GET /api/transactions
 app.get('/api/transactions', authenticate, async (req, res) => {
@@ -856,6 +941,44 @@ app.delete('/api/transactions/:id', authenticate, async (req, res) => {
     return res.status(404).json({ error: 'Transaction not found' });
   }
   res.json({ message: 'Transaction deleted successfully' });
+});
+
+// 3b. PATCH /api/transactions/:id - the user's correction of ONE transaction's category (nothing else can be changed here).
+// Only { category } is accepted: a title, amount, date, type, classification, id or owner in the body is refused (400), so a correction can
+// never rewrite money or the analytical classification. The target is the signed-in user's own row (same targeting as DELETE); another
+// user's id answers 404 exactly like a missing one.
+const MAX_CATEGORY_LENGTH = 60;
+const categoryEditLimiter = perUserLimiter(120, 'transaction edit');
+app.patch('/api/transactions/:id', authenticate, categoryEditLimiter, async (req, res) => {
+  const body = req.body;
+  const keys = body && typeof body === 'object' && !Array.isArray(body) ? Object.keys(body) : [];
+  const category = keys.length === 1 && keys[0] === 'category' && typeof body.category === 'string' ? body.category.trim() : '';
+  if (category.length === 0 || category.length > MAX_CATEGORY_LENGTH || /[\p{Cc}\p{Cf}]/u.test(category)) {
+    return res.status(400).json({ error: `Send only a category of 1 to ${MAX_CATEGORY_LENGTH} characters without control characters.` });
+  }
+  let updated;
+  try {
+    updated = await updateTransactionCategory(req.user.id, req.params.id, category);
+  } catch (err) {
+    return respondDbError(res, err, 'Could not change the category');
+  }
+  if (!updated) return res.status(404).json({ error: 'Transaction not found' });
+  res.json(updated);
+});
+
+// Activity editor: complete validated fields; ownership and identity never come from the body.
+app.put('/api/transactions/:id', authenticate, categoryEditLimiter, async (req, res) => {
+  const fields = ['title', 'amount', 'date', 'type', 'category', 'classification'];
+  const body = req.body;
+  if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length !== fields.length || !fields.every(k => Object.hasOwn(body, k))) return res.status(400).json({ error: 'Send title, amount, date, type, category and classification only.' });
+  const checked = normalizeTransactionInput(body);
+  if (!checked.ok) return res.status(400).json({ error: checked.error });
+  if (checked.value.category.length > MAX_CATEGORY_LENGTH || /[\p{Cc}\p{Cf}]/u.test(checked.value.category)) return res.status(400).json({ error: 'Category must be at most 60 characters without control characters.' });
+  try {
+    const updated = await updateTransactionByUserAndId(req.user.id, req.params.id, checked.value);
+    if (!updated) return res.status(404).json({ error: 'Transaction not found' });
+    res.json(updated);
+  } catch (err) { return respondDbError(res, err, 'Could not save the transaction'); }
 });
 
 // ── Goals ──────────────────────────────────────────────────────────────────────
@@ -1647,7 +1770,7 @@ function fallbackReply(history, ctx) {
       reply = "I don't have a credit score for you. FinSphere isn't connected to any credit bureau, and I won't estimate one from your transactions.";
       break;
     case 'portfolio':
-      reply = "I don't have any portfolio or investment holdings data for you, so I can't describe an allocation or returns.";
+      reply = "Open Portfolio to view or record your investment holdings and valuations. Investment records are not connected to this chat, so I cannot report their allocation or returns here.";
       break;
     case 'networth':
       reply = `I can't work out your net worth because FinSphere doesn't have your assets. From your recorded transactions, your net cash flow (total income minus total spending, refunds and transfers handled as described) is ${formatRupees(all.netCashFlow)}.`;
@@ -1890,7 +2013,9 @@ app.post('/api/chat', authenticate, chatLimiter, async (req, res) => {
     return res.json({ reply: actionTurn.reply, ...(actionTurn.action ? { action: actionTurn.action } : {}) });
   }
   // A cancelled proposal is reported to the client, and the user is told, before the normal answer.
+  let visualization = null;
   const answer = (reply) => res.json({
+    ...(visualization ? { visualization } : {}),
     reply: actionTurn.cancelNotice ? `${actionTurn.cancelNotice} ${reply}` : reply,
     ...(actionTurn.action ? { action: actionTurn.action } : {})
   });
@@ -1918,6 +2043,20 @@ app.post('/api/chat', authenticate, chatLimiter, async (req, res) => {
     }
 
     const ctx = { month, allTotals, monthTotals, goals: userGoals, liabilities: userLiabilities, emergencyFund, budgets: userBudgets };
+    // Visuals come only from the same authenticated database totals as the prose.
+    // Keep action previews on their existing, separate confirmation path.
+    const topic = fallbackTopic(history.at(-1).content);
+    if (['income', 'spending', 'cashflow'].includes(topic)) {
+      visualization = {
+        title: `Recorded cash flow · ${month} (UTC)`,
+        provisional: monthTotals.unknownCount > 0,
+        rows: [
+          { label: 'Income', amount: monthTotals.totalIncome },
+          { label: 'Net spending', amount: monthTotals.totalSpending },
+          { label: 'Net cash flow', amount: monthTotals.netCashFlow },
+        ],
+      };
+    }
     const recentTransactions = userTransactions.slice(0, 10);
 
     const systemMessage = {
@@ -1944,7 +2083,7 @@ All recorded transactions:
 - Monthly budgets for ${month} (limits the user set, with their real spending that month):${describeBudgetsForAssistant(userBudgets)}
 - The 10 most recent transactions, latest first (examples only; never add them up to get a total - use the totals above). "classification" is an optional analytical label; "unknown" means not labelled yet - such a transaction is counted by its direction in the totals above; a refund reduces spending and is not income; a transfer is in neither total: ${JSON.stringify(recentTransactions)}
 
-NOT available for this user (no such data exists in FinSphere): credit score, portfolio holdings or returns, net worth (FinSphere has no asset data), months of emergency-fund coverage and the financial health score (those come from the analysis on the Plans page and are not in this data).
+NOT available to this chat: credit score, portfolio holdings or returns, net worth (FinSphere has no asset data), months of emergency-fund coverage and the financial health score (those come from the analysis on the Plans page and are not in this data).
 
 Rules:
 1. State figures only from the AUTHORITATIVE FINANCIAL DATA above. For "this month" questions use the "This month" figures.

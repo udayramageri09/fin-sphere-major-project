@@ -1,12 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
 import { useFinance } from '../context/FinanceContext';
 import DuplicateReview from '../components/DuplicateReview';
+import SpendingAnalytics from '../components/analytics/SpendingAnalytics';
+import TransactionDisclosure from '../components/TransactionDisclosure';
+import CategoryPicker from '../components/CategoryPicker';
+import TransactionEditor from '../components/TransactionEditor';
+import { categoryChoices } from '../utils/spendingAnalytics';
 import { isOcrImageFile } from '../utils/imageOcr';
 import { buildConfirmRequest, confirmSuccessMessage, reviewHeadline } from '../utils/duplicateReview';
 import { explainImportError, importSuccessMessage, importButtonStyle } from '../utils/statementImportUi';
 import { 
   ShoppingBag, Coffee, ArrowDownCircle, ArrowUpCircle, 
-  Trash2, Plus, FileText, Upload, Sparkles, AlertCircle, ScanText
+  Trash2, Plus, FileText, Upload, Sparkles, AlertCircle, ScanText, BarChart3
 } from 'lucide-react';
 
 // Which analytical classifications each direction can carry (mirrors the server and the database).
@@ -18,9 +23,11 @@ const CLASSIFICATION_LABEL = { income: 'Income', expense: 'Expense', refund: 'Re
 
 function Transactions() {
   const { 
-    transactions, loading, addTransaction, deleteTransaction, parseStatement, confirmImport, extractTextFromImage
+    transactions, loading, addTransaction, deleteTransaction, parseStatement, confirmImport, extractTextFromImage, updateTransaction
   } = useFinance();
 
+  const [view, setView] = useState('activity');
+  const [insightsVisited, setInsightsVisited] = useState(false);
   // Manual entry state
   const [title, setTitle] = useState('');
   const [amount, setAmount] = useState('');
@@ -238,22 +245,25 @@ function Transactions() {
     <div className="animate-fade-in">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem' }}>
         <div>
-          <h2 style={{ fontSize: '2rem', fontWeight: 700, letterSpacing: '-0.025em' }}>Transactions Center</h2>
-          <p style={{ color: 'var(--text-secondary)' }}>Manage your accounts, add transactions manually, or upload a bank statement to parse.</p>
+          <h2 style={{ fontSize: '2rem', fontWeight: 700, letterSpacing: '-0.025em' }}>Transactions</h2>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">
+      <nav aria-label="Transactions views" className="transaction-view-nav">
+        <button type="button" aria-current={view === 'activity' ? 'page' : undefined} onClick={() => setView('activity')} className={`transaction-view-button ${view === 'activity' ? 'is-active' : ''}`}><FileText size={19} aria-hidden="true" />Activity</button>
+        <button type="button" aria-current={view === 'insights' ? 'page' : undefined} onClick={() => { setView('insights'); setInsightsVisited(true); }} className={`transaction-view-button transaction-view-insights ${view === 'insights' ? 'is-active' : ''} ${!insightsVisited ? 'is-discoverable' : ''}`}><BarChart3 size={19} aria-hidden="true" />Insights</button>
+      </nav>
+      <div hidden={view !== 'insights'} className="mb-8 transaction-insights-panel">
+        <SpendingAnalytics transactions={transactions} />
+      </div>
+      <div hidden={view !== 'activity'}>
+      <div className="flex flex-col gap-6 items-stretch">
 
         {/* Left Column: Input Panel & AI Parser */}
-        <div className="min-w-0" style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start min-w-0">
           
           {/* Manual Entry Form */}
-          <div className="glass-panel" style={{ padding: '1.5rem' }}>
-            <h3 style={{ fontSize: '1.25rem', marginBottom: '1.25rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <Plus size={20} color="var(--accent-primary)" />
-              Manual Transaction Entry
-            </h3>
+          <TransactionDisclosure title="Add a transaction" icon={Plus}>
             
             <form onSubmit={handleManualSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -275,21 +285,7 @@ function Transactions() {
                 </div>
                 
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
-                  <label style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Category</label>
-                  <select 
-                    value={category} 
-                    onChange={(e) => setCategory(e.target.value)}
-                    style={{ padding: '0.6rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', background: 'var(--surface-color)', color: 'var(--text-primary)' }}
-                  >
-                    <option value="Shopping">Shopping</option>
-                    <option value="Food">Food</option>
-                    <option value="Salary">Salary</option>
-                    <option value="Investment">Investment</option>
-                    <option value="Bills">Bills</option>
-                    <option value="Entertainment">Entertainment</option>
-                    <option value="Travel">Travel</option>
-                    <option value="General">General</option>
-                  </select>
+                  <CategoryPicker label="Category" value={category} choices={[...categoryChoices(transactions), 'General']} onChange={setCategory} hint="Saved when you save the transaction." />
                 </div>
               </div>
 
@@ -359,7 +355,7 @@ function Transactions() {
                   justifyContent: 'center', 
                   gap: '0.5rem',
                   marginTop: '0.5rem',
-                  boxShadow: '0 4px 6px -1px rgba(37, 99, 235, 0.2)'
+                  boxShadow: '0 4px 6px -1px rgba(64, 86, 109, 0.12)'
                 }}
               >
                 <Plus size={18} /> Add Transaction
@@ -367,14 +363,10 @@ function Transactions() {
 
               {formSuccess && <div style={{ color: 'var(--success)', fontSize: '0.9rem', textAlign: 'center', fontWeight: 'bold' }}>{formSuccess}</div>}
             </form>
-          </div>
+          </TransactionDisclosure>
 
           {/* AI Parser Section */}
-          <div className="glass-panel" style={{ padding: '1.5rem' }}>
-            <h3 style={{ fontSize: '1.25rem', marginBottom: '1.25rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <Sparkles size={20} color="var(--accent-secondary)" />
-              Smart Bank Statement Parser
-            </h3>
+          <TransactionDisclosure title="Import a statement" icon={Upload}>
             
             {/* Tabs */}
             <div style={{ display: 'flex', borderBottom: '1px solid var(--border-color)', marginBottom: '1.25rem' }}>
@@ -405,7 +397,7 @@ function Transactions() {
                   wordBreak: 'break-word'
                 }}
               >
-                Upload File (.txt/.csv/.xls/.xlsx/.jpg/.png)
+                Upload File
               </button>
             </div>
 
@@ -475,7 +467,7 @@ function Transactions() {
                     ...importButtonStyle({ disabled: isParsing || isExtracting || !pasteText.trim(), busy: isParsing })
                   }}
                 >
-                  <Sparkles size={18} /> {isParsing ? 'Parsing statement...' : 'Parse Logs (AI-Powered)'}
+                  <Sparkles size={18} /> {isParsing ? 'Parsing statement...' : 'Parse Logs'}
                 </button>
               </div>
             ) : (
@@ -535,7 +527,7 @@ function Transactions() {
                 >
                   {uploadFile && isOcrImageFile(uploadFile)
                     ? <><ScanText size={18} /> {isExtracting ? 'Reading image... (up to 30 s)' : 'Extract Text from Image'}</>
-                    : <><FileText size={18} /> {isParsing ? 'Parsing statement...' : 'Parse File (AI-Powered)'}</>}
+                    : <><FileText size={18} /> {isParsing ? 'Parsing statement...' : 'Parse File'}</>}
                 </button>
               </div>
             )}
@@ -558,7 +550,7 @@ function Transactions() {
 
             {parseSuccess && <div style={{ color: 'var(--success)', fontSize: '0.9rem', textAlign: 'center', fontWeight: 'bold', marginTop: '1rem', overflowWrap: 'anywhere' }}>{parseSuccess}</div>}
             {parseError && <div role="alert" style={{ color: 'var(--danger)', fontSize: '0.9rem', textAlign: 'center', fontWeight: 'bold', marginTop: '1rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.3rem', overflowWrap: 'anywhere' }}><AlertCircle size={16} />{parseError}</div>}
-          </div>
+          </TransactionDisclosure>
 
         </div>
 
@@ -577,7 +569,7 @@ function Transactions() {
             </div>
           ) : (
             <div className="lg:max-h-170 lg:overflow-y-auto lg:pr-2" style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-              {transactions.map((t) => {
+              {[...transactions].sort((a, b) => String(b.date).localeCompare(String(a.date))).map((t) => {
                 const Icon = getCategoryIcon(t.category, t.type);
                 const color = getCategoryColor(t.category, t.type);
                 
@@ -619,7 +611,7 @@ function Transactions() {
                           <span style={{ fontSize: '0.75rem', background: 'var(--border-color)', padding: '0.1rem 0.4rem', borderRadius: '4px' }}>
                             {t.category || 'General'}
                           </span>
-                          {t.classification && t.classification !== t.type && (
+                          {t.classification && t.classification !== 'unknown' && t.classification !== t.type && (
                             <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
                               {CLASSIFICATION_LABEL[t.classification] ?? t.classification}
                             </span>
@@ -637,6 +629,7 @@ function Transactions() {
                       </span>
                       <button 
                         onClick={() => deleteTransaction(t.id)}
+                        aria-label={`Delete transaction ${t.title}`}
                         style={{ 
                           color: 'var(--text-secondary)',
                           cursor: 'pointer',
@@ -653,6 +646,7 @@ function Transactions() {
                         <Trash2 size={16} />
                       </button>
                     </div>
+                    <TransactionEditor transaction={t} choices={categoryChoices(transactions)} onSave={updateTransaction} />
                   </div>
                 );
               })}
@@ -660,6 +654,7 @@ function Transactions() {
           )}
         </div>
 
+      </div>
       </div>
     </div>
   );
