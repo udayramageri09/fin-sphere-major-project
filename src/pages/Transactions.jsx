@@ -555,9 +555,7 @@ function Transactions() {
         </div>
 
         {/* Right Column: Transaction History */}
-        <div className="glass-panel min-w-0" style={{ padding: '1.5rem', height: '100%', display: 'flex', flexDirection: 'column' }}>
-          <h3 style={{ fontSize: '1.25rem', marginBottom: '1.25rem' }}>Transaction History ({transactions.length})</h3>
-          
+        <TransactionDisclosure title={`Transaction history (${transactions.length})`} icon={FileText}>
           {loading && transactions.length === 0 ? (
             <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '300px', color: 'var(--text-secondary)' }}>
               Loading transactions...
@@ -652,7 +650,7 @@ function Transactions() {
               })}
             </div>
           )}
-        </div>
+        </TransactionDisclosure>
 
       </div>
       </div>

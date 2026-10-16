@@ -45,11 +45,11 @@ function AuthenticatedApp({ hidden }) {
   return (
     <div hidden={hidden} style={hidden ? { display: 'none' } : undefined}>
       <FinanceProvider currentView={currentView} setCurrentView={setCurrentView}>
-        <div className="flex flex-col min-h-screen w-full bg-zinc-50 relative" inert={user?.onboardingState === 'pending' ? true : undefined}>
+        <div className="flex flex-col min-h-screen w-full bg-zinc-50 relative">
           <TopNav currentView={currentView} setCurrentView={setCurrentView} />
 
           {/* Main Content Area */}
-          <main className="flex-1 w-full pt-24 pb-40 px-4 md:px-8">
+          <main tabIndex={-1} className="flex-1 w-full pt-24 pb-40 px-4 md:px-8">
             <div className="max-w-7xl mx-auto w-full h-full flex flex-col gap-6">
               <PageBoundary key={currentView}>
                 {currentView === 'dashboard' && <Dashboard />}
@@ -64,7 +64,7 @@ function AuthenticatedApp({ hidden }) {
             </div>
           </main>
 
-          <AIAvatar />
+          {user?.onboardingState !== 'pending' && <AIAvatar />}
         </div>
         {user?.onboardingState === 'pending' && <Onboarding onNavigate={setCurrentView} />}
       </FinanceProvider>

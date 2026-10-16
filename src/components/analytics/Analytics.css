@@ -143,3 +143,10 @@
 .month-chart-tooltip li > span:last-child { white-space: normal; }
 .month-tooltip-title { margin-bottom: 12px; }
 .single-month-chart, .month-chart, .month-details-space { min-width: 0; max-width: 100%; }
+
+/* Monochrome view controls; selection also has an inset border. */
+.transaction-view-nav { background: #f4f4f5; border-color: #e4e4e7; }
+.transaction-view-button, .transaction-view-insights { background: #18181b; color: #fff; border-color: #18181b; }
+.transaction-view-button:hover { background: #3f3f46; color: #fff; }
+.transaction-view-button.is-active { background: #09090b; border-color: #09090b; box-shadow: inset 0 0 0 2px #fff, 0 0 0 1px #09090b; }
+.transaction-view-insights.is-discoverable { animation: none; }

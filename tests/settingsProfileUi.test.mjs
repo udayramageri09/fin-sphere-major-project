@@ -63,7 +63,7 @@ globalThis.__auth = () => auth;
 globalThis.__recovery = (...args) => { calls.recovery.push(args); return impl.recovery(...args); };
 
 const vite = await createServer({
-  server: { middlewareMode: true }, appType: 'custom', logLevel: 'error',
+  optimizeDeps: { noDiscovery: true, include: [], entries: [] }, server: { middlewareMode: true, hmr: false, ws: false }, appType: 'custom', logLevel: 'error',
   plugins: [{
     name: 'settings-mocks', enforce: 'pre',
     resolveId(id) { if (id.endsWith('/context/AuthContext')) return '\0auth-mock'; },
@@ -141,25 +141,23 @@ try {
   let view = null;
   const renderNav = async (currentView = 'dashboard') => mount(React.createElement(TopNav, { currentView, setCurrentView: (v) => { view = v; } }));
 
-  await check('header: no "Signed in as", no email anywhere, the name is not printed either, and the avatar is compact', async () => {
+  await check('header: no "Signed in as", no email anywhere, the name is not printed either, and the Settings gear has no avatar', async () => {
     resetAuth();
     await renderNav();
     assert.ok(!/Signed in as/i.test(text()));
     assert.ok(!text().includes('secret.person@example.com') && !text().includes('@'), 'no email in the header');
-    assert.ok(q('[data-testid=nav-avatar]'));
-    assert.equal(q('[data-testid=nav-avatar] [data-avatar]').style.width, '32px');
-    assert.equal(q('[data-testid=nav-avatar] [data-avatar]').dataset.avatar, 'initials');
+    assert.ok(q('[data-testid=nav-settings]'));
+    assert.match(q('[data-testid=nav-settings]').className, /hidden xl:inline-flex/);
+    assert.equal(q('[data-avatar]'), null, 'no avatar in navigation');
   });
 
-  await check('desktop: the Settings icon and the avatar both open Settings, and are labelled for assistive technology', async () => {
+  await check('header: the rightmost gear opens Settings; logout is inside Settings', async () => {
     view = null;
-    const settings = q('[data-testid=nav-settings]');
-    assert.equal(settings.getAttribute('aria-label'), 'Settings');
-    assert.equal(q('[data-testid=nav-avatar]').getAttribute('aria-label'), 'Profile and settings');
-    await click(settings);
-    assert.equal(view, 'settings');
-    view = null;
-    await click(q('[data-testid=nav-avatar]'));
+    const avatar = q('[data-testid=nav-settings]');
+    assert.equal(avatar.getAttribute('aria-label'), 'Profile and settings');
+    assert.equal(qa('header button').at(-1), avatar);
+    assert.equal(q('header button[aria-label="Log out"]'), null);
+    await click(avatar);
     assert.equal(view, 'settings');
     await renderNav('settings');
     assert.equal(q('[data-testid=nav-settings]').getAttribute('aria-current'), 'page');
@@ -172,26 +170,31 @@ try {
     assert.equal(q('button[aria-label="Close menu"]').getAttribute('aria-expanded'), 'true');
     assert.ok(!text().includes('secret.person@example.com'), 'no email in the drawer');
     assert.ok(!/Signed in as/i.test(text()));
+    assert.equal(qa('[data-testid=drawer-settings]')[0].parentElement.querySelector('button:last-of-type'), q('[data-testid=drawer-settings]'));
+    assert.ok(!qa('button').some(b => b.textContent.trim() === 'Log out'));
     view = null;
     await click(q('[data-testid=drawer-settings]'));
     assert.equal(view, 'settings');
     assert.equal(q('[data-testid=drawer-settings]'), null, 'the drawer closes after choosing Settings');
   });
 
-  await check('a signed-in account with no name and no photo gets a neutral icon in the header, never email initials', async () => {
+  await check('navigation shows Settings without account identity even when the account has no name', async () => {
     resetAuth({ id: 1, email: 'zed@example.com', displayName: '', avatarVersion: null, reduceMotion: false });
     await renderNav();
-    assert.equal(q('[data-testid=nav-avatar] [data-avatar]').dataset.avatar, 'icon');
-    assert.ok(!/ZE|Z/.test(q('[data-testid=nav-avatar]').textContent));
+    assert.equal(q('[data-avatar]'), null);
+    assert.ok(!/ZE|Z/.test(q('[data-testid=nav-settings]').textContent));
   });
 
   // ═══ dashboard greeting and the rotating line ═══════════════════════════════════════════════════════════════════
-  await check('greeting: "Welcome back, {name}" with avatar; just "Welcome back" without a name, never the email', async () => {
+  await check('greeting: one decorative account photo beside the name, with neutral fallback and no email', async () => {
     resetAuth(); auth.avatarUrl = 'blob:x/me';
     await mount(React.createElement(DashboardGreeting));
     assert.equal(q('[data-testid=greeting]').textContent, 'Welcome back, Alex');
-    assert.equal(q('[data-avatar]').dataset.avatar, 'photo');
-    assert.equal(q('[data-avatar]').style.width, '56px');
+    assert.equal(qa('[data-avatar]').length, 1);
+    assert.equal(q('[data-avatar] img').getAttribute('src'), 'blob:x/me');
+    assert.equal(q('[data-avatar]').getAttribute('aria-hidden'), 'true');
+    assert.equal(q('[data-avatar] img').getAttribute('alt'), '');
+    assert.equal(q('[data-avatar]').nextElementSibling, q('[data-testid=greeting]').parentElement);
     resetAuth({ id: 2, email: 'only.email@example.com', displayName: '', avatarVersion: null, reduceMotion: false });
     await mount(React.createElement(DashboardGreeting));
     assert.equal(q('[data-testid=greeting]').textContent, 'Welcome back');
@@ -276,28 +279,23 @@ try {
   // Always a fresh page: whatever an earlier check left in the form (a draft, a staged photo) must not leak into the next one.
   const renderSettings = async (props = {}) => { await mount(React.createElement('div')); await mount(React.createElement(Settings, { prepareImage: fakePrepare('a'), ...props })); };
 
-  await check('Setup guide: shows the stored state and reopens the guide once, with errors shown and no double submit', async () => {
-    resetAuth({ id: 424242, email: 'secret.person@example.com', displayName: 'Alex', avatarVersion: null, reduceMotion: false, onboardingState: 'skipped' });
-    await renderSettings();
-    assert.equal(q('[data-testid=setup-status]').textContent, 'You skipped the setup guide.');
-    const button = q('[data-testid=show-setup-guide]');
-    assert.equal(button.textContent, 'Show the setup guide');
-    await act(async () => { button.click(); button.click(); });
-    assert.deepEqual(calls.onboarding, ['pending'], 'one request for pending, however many clicks');
-    resetAuth({ id: 424242, email: 'secret.person@example.com', displayName: 'Alex', avatarVersion: null, reduceMotion: false, onboardingState: 'completed' });
-    impl.onboarding = async () => { throw new Error('Could not save your changes. Please try again.'); };
-    await renderSettings();
-    assert.equal(q('[data-testid=setup-status]').textContent, 'You have used the setup guide.');
-    await act(async () => { q('[data-testid=show-setup-guide]').click(); });
-    assert.match(text(), /Could not save your changes/);
-    assert.ok(!q('[data-testid=show-setup-guide]').disabled, 'the button is available again after a failure');
-    resetAuth();
+  await check('settings: three focused categories, one visible panel, no returning-user tour', async () => {
+    resetAuth(); await renderSettings();
+    assert.equal(q('[data-testid=show-setup-guide]'), null);
+    const menu = q('nav[aria-label="Settings sections"]');
+    assert.equal(menu.querySelectorAll('button').length, 4);
+    assert.equal(menu.querySelector('button:last-child').dataset.testid, 'settings-logout');
+    assert.equal(qa('[data-testid=settings-logout]').length, 1);
+    await click([...menu.querySelectorAll('button')].find(b => b.textContent === 'Account & security'));
+    assert.equal(q('#settings-account').closest('section').parentElement.hidden, false);
+    assert.equal(q('#settings-profile').closest('section').parentElement.hidden, true);
+    await click([...menu.querySelectorAll('button')].find(b => b.textContent === 'Profile'));
   });
 
-  await check('settings has Profile, Account and security, Display sections; the email appears only here; no secrets or ids', async () => {
+  await check('settings has Profile, Account and security, Accessibility sections; the email appears only here; no secrets or ids', async () => {
     resetAuth();
     await renderSettings();
-    assert.deepEqual(qa('h2').map((h) => h.textContent), ['Profile', 'Account and security', 'Display', 'Setup guide']);
+    assert.deepEqual(qa('h2').map((h) => h.textContent), ['Profile', 'Account & security', 'Accessibility']);
     assert.equal(q('[data-testid=account-email]').textContent, 'secret.person@example.com');
     assert.equal(qa('section').filter((s) => s.textContent.includes('secret.person@example.com')).length, 1, 'only the account section shows the email');
     assert.ok(!/Signed in as/i.test(text()));
@@ -305,12 +303,12 @@ try {
     assert.ok(!/password hash|token|jwt/i.test(text()));
     assert.equal(q('input[type=email]'), null);
     assert.ok(![...qa('input')].some((i) => String(i.value).includes('@')), 'no input holds the email: it cannot be edited here');
-    assert.match(text(), /can't be edited here/i);
-    assert.match(text(), /A nickname is fine/);
+    assert.match(text(), /Your sign-in email/i);
+    assert.match(text(), /Optional. How you appear/);
   });
 
   await check('profile form: labelled controls, hint, counter, Save/Cancel start disabled when nothing changed', async () => {
-    assert.equal(q('label[for=settings-name]').textContent, 'Display name (optional)');
+    assert.equal(q('label[for=settings-name]').textContent, 'Display name');
     assert.equal(q('#settings-name').value, 'Alex');
     assert.equal(q('#settings-name').getAttribute('aria-describedby'), 'settings-name-hint settings-name-count');
     assert.equal(q('#settings-name').maxLength, 80);
@@ -537,7 +535,7 @@ try {
   // ═══ Settings: account, display ═══════════════════════════════════════════════════════════════════════════════
   await check('account: the password-change entry point emails a reset link (existing flow), with accurate wording and clear results', async () => {
     resetAuth(); await renderSettings();
-    assert.match(text(), /we'll email a reset link to your sign-in address/i);
+    assert.match(text(), /Get a password reset link by email/i);
     assert.equal(qa('input[type=password]').length, 0, 'no password fields are offered');
     assert.ok(!/current password/i.test(text()));
     const gate = deferred();
@@ -588,7 +586,7 @@ try {
     resetAuth(); await renderSettings();
     assert.equal(q('[data-testid=system-reduces]'), null);
     await setSystemReduces(true);
-    assert.match(q('[data-testid=system-reduces]').textContent, /already set to reduce motion/);
+    assert.match(q('[data-testid=system-reduces]').textContent, /Reduced motion is enabled/);
     await setSystemReduces(false);
   });
 
@@ -600,7 +598,7 @@ try {
       assert.ok(name && name.length > 0, `unnamed control: ${el.outerHTML.slice(0, 80)}`);
       assert.ok(!(el.tabIndex > 0), 'no positive tabindex');
     }
-    assert.ok(qa('section[aria-labelledby]').length === 4);
+    assert.ok(qa('section[aria-labelledby]').length === 3);
   });
 
   await check('no profile or photo content reaches the console during any of this', async () => {
@@ -620,10 +618,11 @@ try {
 
   // ═══ Part 2: the real AuthProvider with a stubbed fetch ═════════════════════════════════════════════════════════════
   delete globalThis.__auth; delete globalThis.__recovery;
-  const vite2 = await createServer({ server: { middlewareMode: true }, appType: 'custom', logLevel: 'error' });
+  const vite2 = await createServer({ optimizeDeps: { noDiscovery: true, include: [], entries: [] }, server: { middlewareMode: true, hmr: false, ws: false }, appType: 'custom', logLevel: 'error' });
   const { AuthProvider, useAuth } = await vite2.ssrLoadModule('/src/context/AuthContext.jsx');
   const { default: RealSettings } = await vite2.ssrLoadModule('/src/pages/Settings.jsx');
   const { default: RealGreeting } = await vite2.ssrLoadModule('/src/components/DashboardGreeting.jsx');
+  const { default: RealNav } = await vite2.ssrLoadModule('/src/components/TopNav.jsx');
 
   const requests = [];
   const accounts = {
@@ -652,7 +651,8 @@ try {
   };
   let ctx;
   const Probe = () => { ctx = useAuth(); return null; };
-  const mountReal = async (...children) => { await act(async () => root.render(React.createElement(AuthProvider, null, React.createElement(Probe), ...children))); await flush(5); };
+  const realNav = () => React.createElement(RealNav, { currentView: 'dashboard', setCurrentView: () => {} });
+  const mountReal = async (...children) => { await act(async () => root.render(React.createElement(AuthProvider, null, React.createElement(Probe), realNav(), ...children))); await flush(5); };
   // The failure is caught INSIDE act() so React still applies the state updates the failing call made (such as ending the session).
   const rejectsInAct = async (fn, pattern) => {
     let caught;
@@ -752,9 +752,10 @@ try {
     await act(async () => { await ctx.login('b@example.com', 'pw'); });
     assert.equal(ctx.user.displayName, 'Blake');
     assert.equal(ctx.avatarUrl, null, 'B has no photo and never sees A\'s');
-    await act(async () => root.render(React.createElement(AuthProvider, null, React.createElement(Probe), React.createElement(RealGreeting))));
+    await act(async () => root.render(React.createElement(AuthProvider, null, React.createElement(Probe), realNav(), React.createElement(RealGreeting))));
     assert.equal(document.querySelector('[data-testid=greeting]').textContent, 'Welcome back, Blake');
     assert.equal(document.querySelector('[data-avatar]').dataset.avatar, 'initials');
+    assert.equal(document.querySelectorAll('[data-avatar]').length, 1, 'only the greeting shows an avatar');
     release(); avatarDelay = null;
     await flush(5);
     // slow photo fetch for the OLD account must not land on the new one
