@@ -219,26 +219,32 @@ try {
   await mount();
   ok(await waitFor(() => document.querySelector('.state-card')), 'the analysis renders', document.body.textContent.slice(0, 400));
   ok(analyzeCalls === 1, 'one analysis request is made when there are transactions', String(analyzeCalls));
-  ok(document.querySelector('h1').textContent === 'Financial Intelligence' && page().includes('Your financial position, the biggest risks, and what to do next'), 'header: title and subtitle');
+  ok(document.querySelector('h1').textContent === 'Financial Intelligence' && page().includes('A clear view of your finances. A practical next step.'), 'header: title and subtitle');
   ok(buttonIn(document, 'Refresh analysis'), 'header: "Refresh analysis" button');
 
   const headings = [...document.querySelectorAll('h2.section-heading')].map((h) => h.textContent.trim());
-  ok(JSON.stringify(headings) === JSON.stringify(['Your financial position', 'Top risks and opportunities', 'Next actions']), 'sections appear in order: state, findings, actions', headings.join(' | '));
+  ok(JSON.stringify(headings) === JSON.stringify(['Your financial position', 'Next actions', 'Top risks and opportunities']), 'sections appear in order: state, findings, actions', headings.join(' | '));
   const details = document.querySelector('[data-testid="analysis-details"]');
   const following = (a, b) => Boolean(a.compareDocumentPosition(b) & window.Node.DOCUMENT_POSITION_FOLLOWING);
   ok(following(document.querySelector('.plan-card'), details), 'Analysis details come after the actions');
   ok(details.tagName === 'DETAILS' && !details.hasAttribute('open'), 'Analysis details are collapsed by default');
+
+  ok(document.querySelectorAll('[data-testid="action-list"] > li').length === 3, 'only three priority actions appear initially');
+  ok(!document.querySelector('.advisor-disclosure').open, 'advisor is collapsed initially');
+  ok(!document.querySelector('.intelligence-disclosure').open, 'secondary insights are collapsed initially');
+  ok(!document.querySelector('.analysis-content > .details-card').closest('details'), 'forecast is visible without expanding details');
+  await click(buttonIn(document, 'View all 6 actions'));
 
   // no false ML labels
   const text = page();
   ok(!/ML Financial Intelligence|Run ML Analysis|Running ML Models|directly from our ML|every insight/i.test(text), 'no "ML Financial Intelligence" / "Run ML Analysis" wording', text.slice(0, 200));
   ok(!/K-?Means/i.test(text), 'no KMeans wording anywhere');
   ok(!text.includes('🤖'), 'no robot badge anywhere');
-  ok(document.querySelector('.state-card .model-tag').textContent === 'Rule-based' && /Rule-based score/.test(document.querySelector('.state-score-note').textContent), 'the health score is labelled rule-based');
-  ok(step$('HS-05').querySelector('.method-tag').textContent === 'Rule' && step$('HS-04').querySelector('.method-tag').textContent === 'Rule', 'health-score steps are tagged "Rule"');
-  ok(['FC-01', 'AN-01', 'CL-01', 'FC-02'].every((id) => step$(id).querySelector('.method-tag').textContent === 'ML signal'), 'forecast / anomaly / cluster steps are tagged "ML signal"');
+  ok(/Rule-based score/.test(document.querySelector('.state-score-note').textContent), 'the health score is labelled rule-based');
+  ok(step$('HS-05').querySelector('.action-meta span').textContent === 'Rule' && step$('HS-04').querySelector('.action-meta span').textContent === 'Rule', 'health-score steps are tagged "Rule"');
+  ok(['FC-01', 'AN-01', 'CL-01', 'FC-02'].every((id) => step$(id).querySelector('.action-meta span').textContent === 'ML signal'), 'forecast / anomaly / cluster steps are tagged "ML signal"');
   ok(!step$('HS-05').textContent.includes('HealthScorer') && !text.includes('source_model'), 'no HealthScorer-as-ML badge');
-  const tags = [...details.querySelectorAll('.model-tag')].map((t) => t.textContent);
+  const tags = [...document.querySelectorAll('.analysis-content .model-tag')].map((t) => t.textContent);
   ok(tags.length === 3 && /LinearRegression/.test(tags[0]) && /IsolationForest/.test(tags[1]) && /Agglomerative \(Ward\)/.test(tags[2]) && tags.every((t) => t.startsWith('ML')), 'details: honest model tags', tags.join(' | '));
   ok(/ML: LinearRegression, IsolationForest, AgglomerativeClustering \(Ward\)/.test(text) && /Rules: HealthScorer \(rules\), PlanGenerator \(rules\)/.test(text), 'metadata line separates ML models from rule engines');
 
@@ -298,7 +304,7 @@ try {
   // analysis details
   await click(details.querySelector('summary'));
   details.setAttribute('open', '');
-  ok(details.querySelector('.forecast-bars-wrap') && details.querySelector('.anomaly-item') && details.querySelectorAll('.cluster-card').length === 2, 'details: forecast, anomaly and cluster sections are inside');
+  ok(document.querySelector('.analysis-content .forecast-bars-wrap') && details.querySelector('.anomaly-item') && details.querySelectorAll('.cluster-card').length === 2, 'details: forecast, anomaly and cluster sections are inside');
 
   // the advisor: only the conversation is sent
   const chip = [...document.querySelectorAll('.quick-prompt-chip')].find((c) => c.textContent === 'Why is this my top action?');
@@ -308,7 +314,7 @@ try {
   await waitFor(() => planChatBodies.length === 1);
   ok(planChatBodies.length === 1 && !('mlContext' in planChatBodies[0]) && planChatBodies[0].messages.at(-1).content === 'Why is this my top action?', 'advisor: the request carries the conversation only (no client-side analysis context)', JSON.stringify(Object.keys(planChatBodies[0] ?? {})));
   ok(document.querySelector('.plan-chat-body').textContent.includes('REPLY(ok)'), 'advisor: the reply is shown');
-  ok(document.querySelector('.plan-chat-msg.bot .plan-msg-content').textContent === 'I explain the results on this page. The health score and plan are rule-based; the forecast, anomalies and clusters come from ML models. I never invent figures.', 'advisor: truthful greeting');
+  ok(document.querySelector('.plan-chat-msg.bot .plan-msg-content').textContent === 'Ask me about your results or what to focus on next.', 'advisor: truthful greeting');
   ok(!/Every insight here comes directly/.test(page()), 'advisor: the false claim is gone');
 
   const chatRenders = globalThis.__analysisRenders - rendersBeforeChat;
@@ -344,7 +350,7 @@ try {
     ok(s.includes('Projected savings, next 3 months') && /Projected savings, next 3 months\s*Unavailable/.test(s), 'partial failure: the forecast row reads Unavailable', s);
     ok(s.includes('62.4') && document.querySelector('[data-testid="action-list"]') && document.querySelector('[data-testid="risk-list"]'), 'partial failure: the unaffected sections still render');
     const d = document.querySelector('[data-testid="analysis-details"]');
-    ok(/3-month forecast[\s\S]*Unavailable/.test(d.textContent) && d.querySelector('.anomaly-item') && d.querySelectorAll('.cluster-card').length === 2, 'partial failure: only the forecast section is Unavailable');
+    ok(/3-month forecast[\s\S]*Unavailable/.test(document.querySelector('.analysis-content').textContent) && d.querySelector('.anomaly-item') && d.querySelectorAll('.cluster-card').length === 2, 'partial failure: only the forecast section is Unavailable');
     ok(!page().includes('ValueError'), 'partial failure: no exception text');
   }
   {

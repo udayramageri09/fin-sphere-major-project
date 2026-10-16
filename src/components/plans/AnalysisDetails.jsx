@@ -23,13 +23,12 @@ function AnalysisDetails({ data }) {
   const caveats = Array.isArray(data?.plan?.forecast_caveats) ? data.plan.forecast_caveats : [];
 
   return (
-    <details className="analysis-details" data-testid="analysis-details">
-      <summary>Analysis details: forecast, anomalies and spending clusters</summary>
+    <div className="analysis-content">
 
       <div className="ml-card details-card" data-avatar-target="forecast-section">
         <div className="ml-card-header">
           <BarChart2 size={16} /><h3 className="section-heading">3-month forecast</h3>
-          <span className="model-tag" title="R² describes the fit to recorded months, not the probability of a correct forecast">ML · LinearRegression{forecast?.forecast?.income?.r2 !== undefined ? ` (R² ${forecast.forecast.income.r2})` : ''}</span>
+          <details className="analysis-method"><summary>Method</summary><span className="model-tag" title="R² describes the fit to recorded months, not the probability of a correct forecast">ML · LinearRegression{forecast?.forecast?.income?.r2 !== undefined ? ` (R² ${forecast.forecast.income.r2})` : ''}</span></details>
         </div>
         {!forecast ? <p className="unavailable-block">Unavailable</p> : (
           <>
@@ -44,6 +43,8 @@ function AnalysisDetails({ data }) {
         )}
       </div>
 
+<details className="analysis-details" data-testid="analysis-details">
+      <summary>Spending patterns and unusual transactions</summary>
       <section className="ml-card details-card" aria-labelledby="intelligence-categories">
         <div className="ml-card-header"><Target size={16} /><h3 id="intelligence-categories" className="section-heading">Where spending goes</h3><span className="method-tag">Recorded categories · net spending</span></div>
         <p className="explain-note">Categories come from your saved transactions. Refunds reduce spending within each category and month; transfers are excluded. These labels are separate from the size groups below.</p>
@@ -58,7 +59,7 @@ function AnalysisDetails({ data }) {
       <div className="ml-card details-card anomaly-card" data-avatar-target="anomaly-section">
         <div className="ml-card-header">
           <Activity size={16} /><h3 className="section-heading">Unusual transactions</h3>
-          <span className="model-tag">ML · IsolationForest</span>
+          <details className="analysis-method"><summary>Method</summary><span className="model-tag">ML · IsolationForest</span></details>
         </div>
         <p className="explain-note">These are statistical signals from your own history. A flag does not establish fraud or an error.</p>
         {!anomalies ? <p className="unavailable-block">Unavailable</p> : anomalies.total_flagged > 0 ? (
@@ -80,7 +81,7 @@ function AnalysisDetails({ data }) {
       <div className="ml-card details-card" data-avatar-target="cluster-section">
         <div className="ml-card-header">
           <Target size={16} /><h3 className="section-heading">Spending by transaction size</h3>
-          <span className="model-tag">ML · Agglomerative (Ward){clusters?.model_metrics?.silhouette_score !== undefined ? ` · silhouette ${clusters.model_metrics.silhouette_score}` : ''}</span>
+          <details className="analysis-method"><summary>Method</summary><span className="model-tag">ML · Agglomerative (Ward){clusters?.model_metrics?.silhouette_score !== undefined ? ` · silhouette ${clusters.model_metrics.silhouette_score}` : ''}</span></details>
         </div>
         <p className="explain-note">Groups describe transaction sizes, not merchant categories. Percentages represent the share of spending value; income, refunds and transfers are excluded.</p>
         {!clusters ? <p className="unavailable-block">Unavailable</p> : (clusters.clusters || []).length === 0 ? (
@@ -105,7 +106,8 @@ function AnalysisDetails({ data }) {
           </div>
         )}
       </div>
-    </details>
+      </details>
+    </div>
   );
 }
 

@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import BrandMark from '../components/BrandMark';
 import { AlertCircle, Loader2 } from 'lucide-react';
 import { useAuth, passwordRecovery } from '../context/AuthContext';
 
@@ -56,7 +57,7 @@ function AuthPage({ resetToken = null }) {
     <div className="flex items-center justify-center min-h-screen w-full bg-zinc-50 px-4">
       <div className="w-full max-w-sm glass-panel widget-card">
         <div className="flex items-center gap-3 mb-6">
-          <div className="w-8 h-8 rounded-lg bg-zinc-900 flex-shrink-0" />
+          <BrandMark />
           <h1 className="text-xl font-bold tracking-tight-display text-zinc-900">FinSphere</h1>
         </div>
 

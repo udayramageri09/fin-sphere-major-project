@@ -1,7 +1,8 @@
-import { LayoutDashboard, Wallet, CreditCard, PieChart, Target, CalendarRange, Brain, Menu, X, Settings, LogOut } from 'lucide-react';
+import { LayoutDashboard, Wallet, CreditCard, PieChart, Target, CalendarRange, Brain, Menu, X, Settings } from 'lucide-react';
 import { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import Avatar from './Avatar';
+import BrandMark from './BrandMark';
 
 const navItems = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -15,7 +16,7 @@ const navItems = [
 
 function TopNav({ currentView, setCurrentView }) {
   const [isOpen, setIsOpen] = useState(false);
-  const { user, avatarUrl, logout } = useAuth();
+  const { user, avatarUrl } = useAuth();
   const onSettings = currentView === 'settings';
 
   const handleNav = (id) => {
@@ -28,7 +29,7 @@ function TopNav({ currentView, setCurrentView }) {
       {/* Top Bar */}
       <header className="fixed top-0 left-0 right-0 h-16 z-40 glass-panel border-b border-t-0 border-l-0 border-r-0 rounded-none border-zinc-200/50 bg-white/70 backdrop-blur-xl flex items-center justify-between px-4 md:px-8 shadow-sm">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-zinc-900 flex-shrink-0" />
+          <BrandMark />
           <h2 className="text-xl font-bold tracking-tight-display text-zinc-900 hidden sm:block">FinSphere</h2>
         </div>
 
@@ -56,41 +57,22 @@ function TopNav({ currentView, setCurrentView }) {
         {/* Right side (Desktop Settings / Mobile Hamburger) */}
         <div className="flex items-center gap-2">
           <button
-            onClick={() => handleNav('settings')}
-            aria-label="Profile and settings"
-            aria-current={onSettings ? 'page' : undefined}
-            title="Profile and settings"
-            data-testid="nav-avatar"
-            className="hidden xl:flex rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 focus-visible:ring-offset-2"
-          >
-            <Avatar size={32} name={user?.displayName} src={avatarUrl} />
-          </button>
-          <button
-            onClick={() => handleNav('settings')}
-            aria-label="Settings"
-            aria-current={onSettings ? 'page' : undefined}
-            title="Settings"
-            data-testid="nav-settings"
-            className={`hidden xl:flex p-2 rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 ${onSettings ? 'bg-zinc-900 text-white' : 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900'}`}
-          >
-            <Settings size={20} />
-          </button>
-          <button
-            onClick={logout}
-            title="Log out"
-            aria-label="Log out"
-            className="hidden xl:flex p-2 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 rounded-full transition-colors"
-          >
-            <LogOut size={20} />
-          </button>
-
-          <button
-            onClick={() => setIsOpen(!isOpen)} 
+            onClick={() => setIsOpen(!isOpen)}
             aria-label={isOpen ? 'Close menu' : 'Open menu'}
             aria-expanded={isOpen}
             className="xl:hidden p-2 -mr-2 text-zinc-900 hover:bg-zinc-100 rounded-full transition-colors"
           >
             {isOpen ? <X size={24} /> : <Menu size={24} />}
+          </button>
+          <button
+            onClick={() => handleNav('settings')}
+            aria-label="Profile and settings"
+            aria-current={onSettings ? 'page' : undefined}
+            title="Profile and settings"
+            data-testid="nav-avatar"
+            className="flex rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 focus-visible:ring-offset-2"
+          >
+            <Avatar size={32} name={user?.displayName} src={avatarUrl} />
           </button>
         </div>
       </header>
@@ -102,7 +84,7 @@ function TopNav({ currentView, setCurrentView }) {
           onClick={() => setIsOpen(false)}
         >
            {/* Drawer Content */}
-           <div 
+           <div
              className="w-full bg-white glass-panel rounded-t-none shadow-2xl p-4 flex flex-col gap-1.5"
              onClick={e => e.stopPropagation()}
            >
@@ -134,13 +116,7 @@ function TopNav({ currentView, setCurrentView }) {
                 <Settings size={20} style={onSettings ? { color: '#ffffff' } : {}} className={onSettings ? '' : 'text-zinc-400'} />
                 <span>Settings</span>
               </button>
-              <button
-                onClick={() => { setIsOpen(false); logout(); }}
-                className="flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium w-full text-left text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 transition-all duration-200"
-              >
-                <LogOut size={20} className="text-zinc-400" />
-                <span>Log out</span>
-              </button>
+
            </div>
         </div>
       )}

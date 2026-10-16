@@ -12,14 +12,14 @@ import CurrentState from '../components/plans/CurrentState';
 import TopFindings from '../components/plans/TopFindings';
 import ActionList from '../components/plans/ActionList';
 import AnalysisDetails from '../components/plans/AnalysisDetails';
-import { Compass, Send, Mic, MicOff, RefreshCw, AlertTriangle, Info } from 'lucide-react';
+import { Compass, Send, Mic, MicOff, RefreshCw, AlertTriangle } from 'lucide-react';
 
 const API = import.meta.env.VITE_API_URL ?? 'http://localhost:5000/api';
 
 // Never shown from the server: an upstream message could echo the user's data. The page says what happened in its own words.
 const ANALYSIS_ERROR = "We couldn't run the analysis just now. Check that the analytics service is running, then try again.";
 
-const GREETING = 'I explain the results on this page. The health score and plan are rule-based; the forecast, anomalies and clusters come from ML models. I never invent figures.';
+const GREETING = 'Ask me about your results or what to focus on next.';
 
 export default function Plans() {
   const { transactions } = useFinance();
@@ -127,7 +127,7 @@ export default function Plans() {
           <div className="plans-icon-badge"><Compass size={20} /></div>
           <div>
             <h1 className="plans-title">Financial Intelligence</h1>
-            <p className="plans-subtitle">Your financial position, the biggest risks, and what to do next</p>
+            <p className="plans-subtitle">A clear view of your finances. A practical next step.</p>
           </div>
         </div>
         <button className={`run-ml-btn ${isLoading ? 'loading' : ''}`} onClick={runAnalysis} disabled={isLoading || noTransactions}>
@@ -154,7 +154,7 @@ export default function Plans() {
               <div className="ml-loading-spinner" aria-hidden="true" />
               <div className="ml-loading-text">
                 <p>Analysing your transactions…</p>
-                <small>Forecast · anomalies · spending clusters · health score · action plan</small>
+                <small>This may take a moment.</small>
               </div>
             </div>
           )}
@@ -162,15 +162,19 @@ export default function Plans() {
           {data && !isLoading && (
             <>
               <CurrentState state={state} />
-              <TopFindings findings={findings} />
               <ActionList plan={data.plan} planFailed={findings.planFailed} health={health} onNavigate={performNavigation} />
               <AnalysisDetails data={data} />
-              <div className="ml-metadata">
-                <Info size={12} />
-                {data.metadata?.transaction_count} transactions analysed
-                {data.metadata?.models_run?.length ? ` · ML: ${data.metadata.models_run.join(', ')}` : ''}
-                {data.metadata?.rule_engines_run?.length ? ` · Rules: ${data.metadata.rule_engines_run.join(', ')}` : ''}
-              </div>
+              <details className="intelligence-disclosure">
+                <summary>More insights and analysis methods</summary>
+                <div className="intelligence-disclosure-body">
+                  <TopFindings findings={findings} />
+                  <p className="ml-metadata">
+                    {data.metadata?.transaction_count} transactions analysed
+                    {data.metadata?.models_run?.length ? ` · ML: ${data.metadata.models_run.join(', ')}` : ''}
+                    {data.metadata?.rule_engines_run?.length ? ` · Rules: ${data.metadata.rule_engines_run.join(', ')}` : ''}
+                  </p>
+                </div>
+              </details>
             </>
           )}
 
@@ -183,13 +187,15 @@ export default function Plans() {
           )}
         </div>
 
-        <div className="plans-right">
+        <details className="intelligence-disclosure advisor-disclosure">
+          <summary>Ask about your analysis</summary>
+          <div className="plans-right">
           <div className="plan-chat-header">
             <div className="plan-chat-title">
               <div className="plan-chat-icon"><Compass size={16} /></div>
               <div>
                 <span>Advisor</span>
-                <small>Explains this analysis. It never invents figures.</small>
+                <small>Answers based on your latest analysis.</small>
               </div>
             </div>
           </div>
@@ -234,7 +240,8 @@ export default function Plans() {
               <Send size={16} />
             </button>
           </form>
-        </div>
+          </div>
+        </details>
       </div>
     </div>
   );

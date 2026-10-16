@@ -12,7 +12,7 @@ const SECONDARY = 'inline-flex items-center justify-center gap-2 rounded-xl bord
 
 function Section({ id, title, description, children }) {
   return (
-    <section aria-labelledby={id} className="glass-panel p-5 sm:p-6 min-w-0">
+    <section aria-labelledby={id} className="rounded-2xl border border-zinc-200 bg-white p-5 sm:p-7 min-w-0">
       <h2 id={id} className="text-xl font-bold tracking-tight text-zinc-900">{title}</h2>
       {description && <p className="mt-1 text-sm text-zinc-500">{description}</p>}
       <div className="mt-5">{children}</div>
@@ -117,10 +117,10 @@ function ProfileSection({ prepareImage }) {
   };
 
   return (
-    <Section id="settings-profile" title="Profile" description="Everything here is optional. FinSphere never needs your real name for your analysis.">
+    <Section id="settings-profile" title="Profile">
       <form onSubmit={save} className="flex flex-col gap-6" noValidate>
         <div className="flex flex-col sm:flex-row sm:items-center gap-4">
-          <Avatar size={96} name={name.trim() || saved} src={shownPhoto} label="Your profile photo" />
+          <Avatar size={72} name={name.trim() || saved} src={shownPhoto} label="Your profile photo" />
           <div className="flex flex-wrap gap-2">
             <button type="button" className={SECONDARY} onClick={() => fileInput.current?.click()} disabled={busy || picking}>
               <Camera size={16} aria-hidden="true" /> {hasPhotoToRemove ? 'Change photo' : 'Add photo'}
@@ -134,15 +134,15 @@ function ProfileSection({ prepareImage }) {
           </div>
         </div>
         <p className="-mt-3 text-xs text-zinc-500">
-          JPEG, PNG or WebP. Your photo is cropped to a circle and shrunk in your browser, stripped of camera details such as location, stored in FinSphere&apos;s database, and shown only to you. It is never sent to another service.
+          JPEG, PNG or WebP. Changes take effect when you save.
           {picking && ' Preparing your photo…'}
           {photo === 'remove' && ' Your photo will be removed when you save.'}
           {photo && photo !== 'remove' && ' This is a preview. It is saved when you press Save.'}
         </p>
 
         <div>
-          <label htmlFor="settings-name" className="block text-sm font-semibold text-zinc-800">Display name (optional)</label>
-          <p id="settings-name-hint" className="mt-1 mb-2 text-sm text-zinc-500">A nickname is fine. It is used for your greeting. Leave it empty to remove it.</p>
+          <label htmlFor="settings-name" className="block text-sm font-semibold text-zinc-800">Display name</label>
+          <p id="settings-name-hint" className="mt-1 mb-2 text-sm text-zinc-500">Optional. How you appear in FinSphere.</p>
           <input
             id="settings-name" className={FIELD} value={name} maxLength={NAME_MAX} autoComplete="nickname" aria-describedby="settings-name-hint settings-name-count"
             onChange={(e) => { setName(e.target.value); setStatus(''); }} disabled={busy} placeholder="e.g. Alex"
@@ -185,17 +185,17 @@ function AccountSection() {
   };
 
   return (
-    <Section id="settings-account" title="Account and security" description="How you sign in.">
+    <Section id="settings-account" title="Account">
       <div className="flex flex-col gap-6">
         <div>
           <p className="flex items-center gap-2 text-sm font-semibold text-zinc-800"><Mail size={16} aria-hidden="true" /> Sign-in email</p>
           <p className="mt-1 text-zinc-900 [overflow-wrap:anywhere]" data-testid="account-email">{user?.email}</p>
-          <p className="mt-1 text-sm text-zinc-500">Your email is how you sign in, so it can&apos;t be edited here. Changing it safely needs a verification step that FinSphere doesn&apos;t have yet.</p>
+          <p className="mt-1 text-sm text-zinc-500">Used to sign in. Read-only.</p>
         </div>
 
         <div>
           <p className="flex items-center gap-2 text-sm font-semibold text-zinc-800"><KeyRound size={16} aria-hidden="true" /> Password</p>
-          <p className="mt-1 mb-3 text-sm text-zinc-500">To set a new password, we&apos;ll email a reset link to your sign-in address. The link expires after 15 minutes.</p>
+          <p className="mt-1 mb-3 text-sm text-zinc-500">Get a password reset link by email. Valid for 15 minutes.</p>
           <button type="button" className={SECONDARY} onClick={sendLink} disabled={busy} data-testid="send-reset">{busy ? 'Sending…' : 'Email me a password reset link'}</button>
           <div className="mt-3 flex flex-col gap-2"><Message kind="error">{error}</Message><Message kind="status">{status}</Message></div>
         </div>
@@ -234,8 +234,8 @@ function DisplaySection() {
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <p id="reduce-motion-label" className="text-sm font-semibold text-zinc-800">Reduce dashboard animations</p>
-          <p id="reduce-motion-hint" className="mt-1 text-sm text-zinc-500">Shows a still greeting and turns off dashboard motion. FinSphere always follows your device&apos;s own reduced-motion setting too.</p>
-          {systemReduces && <p className="mt-1 text-sm text-zinc-600" data-testid="system-reduces">Your device is already set to reduce motion, so animations are off whatever you choose here.</p>}
+          <p id="reduce-motion-hint" className="mt-1 text-sm text-zinc-500">Use fewer animations. Your device preference is always respected.</p>
+          {systemReduces && <p className="mt-1 text-sm text-zinc-600" data-testid="system-reduces">Reduced motion is enabled on your device.</p>}
         </div>
         <button
           type="button" role="switch" aria-checked={on} aria-labelledby="reduce-motion-label" aria-describedby="reduce-motion-hint" onClick={toggle} data-testid="reduce-motion"
@@ -278,12 +278,17 @@ function Settings({ prepareImage }) {
     <div className="flex flex-col gap-6 max-w-3xl w-full mx-auto min-w-0" data-testid="settings-page">
       <header>
         <h1 className="text-3xl font-bold tracking-tight-display text-zinc-900">Settings</h1>
-        <p className="text-zinc-500 mt-1">Your profile, sign-in details and display preferences.</p>
+        <p className="text-zinc-500 mt-1">Manage your profile and account.</p>
       </header>
       <ProfileSection key={user?.id} prepareImage={prepareImage} />
       <AccountSection />
-      <DisplaySection />
-      <SetupGuideSection />
+      <details className="rounded-2xl border border-zinc-200 bg-white p-5 sm:p-7">
+        <summary className="cursor-pointer font-semibold text-zinc-900 focus-visible:outline-2 focus-visible:outline-offset-4">Preferences and setup</summary>
+        <div className="mt-5 flex flex-col gap-4">
+          <DisplaySection />
+          <SetupGuideSection />
+        </div>
+      </details>
     </div>
   );
 }
