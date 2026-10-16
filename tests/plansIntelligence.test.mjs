@@ -122,10 +122,19 @@ const json = (status, b) => ({ status, ok: status >= 200 && status < 300, json: 
 globalThis.fetch = async (url, opts = {}) => {
   const u = String(url);
   const method = (opts.method ?? 'GET').toUpperCase();
-  if (/\/ml\/analyze$/.test(u)) {
+  if (/\/ml\/analyze(?:\?|$)/.test(u)) {
     analyzeCalls += 1;
     if (analyzeMode === 'fail') return json(502, { error: 'ML service returned an error', detail: 'SECRET-UPSTREAM-TEXT lunch at Nobu' });
-    return json(200, analysisBody);
+    const period = Number(new URL(u, 'http://localhost').searchParams.get('months') || 3);
+    const result = structuredClone(analysisBody);
+    if (period !== 3) {
+      result.forecast.forecast.months = Array.from({length:period}, (_,i) => `Month ${i+1}`);
+      result.forecast.forecast.income.predictions = Array(period).fill(52000);
+      result.forecast.forecast.expenses.predictions = Array(period).fill(44000);
+      result.forecast.forecast.net = Array(period).fill(8000);
+      result.forecast.insights.projected_savings_total = period * 8000;
+    }
+    return json(200, result);
   }
   if (/\/plan-chat$/.test(u) && method === 'POST') {
     planChatBodies.push(JSON.parse(opts.body));
@@ -219,7 +228,7 @@ try {
   await mount();
   ok(await waitFor(() => document.querySelector('.state-card')), 'the analysis renders', document.body.textContent.slice(0, 400));
   ok(analyzeCalls === 1, 'one analysis request is made when there are transactions', String(analyzeCalls));
-  ok(document.querySelector('h1').textContent === 'Financial Intelligence' && page().includes('A clear view of your finances. A practical next step.'), 'header: title and subtitle');
+  ok(document.querySelector('h1').textContent === 'Financial Intelligence' && page().includes('Your outlook. Your next move.'), 'header: title and subtitle');
   ok(buttonIn(document, 'Refresh analysis'), 'header: "Refresh analysis" button');
 
   const headings = [...document.querySelectorAll('h2.section-heading')].map((h) => h.textContent.trim());
@@ -230,7 +239,8 @@ try {
   ok(details.tagName === 'DETAILS' && !details.hasAttribute('open'), 'Analysis details are collapsed by default');
 
   ok(document.querySelectorAll('[data-testid="action-list"] > li').length === 3, 'only three priority actions appear initially');
-  ok(!document.querySelector('.advisor-disclosure').open, 'advisor is collapsed initially');
+  ok(document.querySelector('section.advisor-panel[aria-labelledby=advisor-heading]'), 'advisor is always visible in a labelled section');
+  ok(!document.querySelector('.ml-metadata'), 'implementation metadata is omitted');
   ok(!document.querySelector('.intelligence-disclosure').open, 'secondary insights are collapsed initially');
   ok(!document.querySelector('.analysis-content > .details-card').closest('details'), 'forecast is visible without expanding details');
   await click(buttonIn(document, 'View all 6 actions'));
@@ -246,16 +256,17 @@ try {
   ok(!step$('HS-05').textContent.includes('HealthScorer') && !text.includes('source_model'), 'no HealthScorer-as-ML badge');
   const tags = [...document.querySelectorAll('.analysis-content .model-tag')].map((t) => t.textContent);
   ok(tags.length === 3 && /LinearRegression/.test(tags[0]) && /IsolationForest/.test(tags[1]) && /Agglomerative \(Ward\)/.test(tags[2]) && tags.every((t) => t.startsWith('ML')), 'details: honest model tags', tags.join(' | '));
-  ok(/ML: LinearRegression, IsolationForest, AgglomerativeClustering \(Ward\)/.test(text) && /Rules: HealthScorer \(rules\), PlanGenerator \(rules\)/.test(text), 'metadata line separates ML models from rule engines');
+  ok(!text.includes('ML:') && !text.includes('Rules:'), 'technical metadata is not shown in the overview');
 
   // current state: server figures, period, DTI reason, low-confidence caveat
   const stateText = document.querySelector('.state-card').textContent;
+  ok(!stateText.includes('About this figure') && [...document.querySelectorAll('.state-card .metric-note')].every(note=>note.tagName==='P'), 'financial figure notes are displayed directly');
   ok(stateText.includes('62.4') && stateText.includes('Grade C') && stateText.includes('from 5 of 6 ratios'), 'state: score, grade and ratios available', stateText);
   ok(stateText.includes('₹52,000') && stateText.includes('₹42,500') && stateText.includes('over 5 months'), 'state: monthly income and net spending with the period');
-  ok(stateText.includes('18.2%') && stateText.includes('1.4 months') && stateText.includes('₹21,000'), 'state: savings rate, emergency coverage, projected savings');
+  ok(stateText.includes('18.2%') && stateText.includes('1.4 months') && document.querySelector('.forecast-trends').textContent.includes('₹21,000'), 'state: savings rate, emergency coverage, projected savings');
   ok(stateText.includes("Unavailable: the monthly debt total couldn't be worked out"), 'state: DTI unavailable reason from the server', stateText);
   ok(/Based on 5 months of transactions \(2026-05 to 2026-09\)/.test(stateText), 'state: the analysed period is stated');
-  ok(stateText.includes('Low fit (income R² 0.20'), 'state: the low-confidence caveat comes from the backend text', stateText);
+  ok(document.querySelector('.analysis-content .metric-note').textContent.includes('Low fit (income R² 0.20'), 'forecast: the backend caveat is available in optional details', stateText);
 
   // findings: at most 3 risks and 2 opportunities, server order kept
   const risks = [...document.querySelectorAll('[data-testid="risk-list"] li')].map((li) => li.textContent);
@@ -307,12 +318,12 @@ try {
   ok(document.querySelector('.analysis-content .forecast-bars-wrap') && details.querySelector('.anomaly-item') && details.querySelectorAll('.cluster-card').length === 2, 'details: forecast, anomaly and cluster sections are inside');
 
   // the advisor: only the conversation is sent
-  const chip = [...document.querySelectorAll('.quick-prompt-chip')].find((c) => c.textContent === 'Why is this my top action?');
-  ok(chip && !chip.disabled, 'advisor: quick prompt "Why is this my top action?"');
+  const chip = [...document.querySelectorAll('.quick-prompt-chip')].find((c) => c.textContent === 'What should I do first?');
+  ok(chip && !chip.disabled, 'advisor: quick prompt "What should I do first?"');
   const rendersBeforeChat = globalThis.__analysisRenders;
   await click(chip);
   await waitFor(() => planChatBodies.length === 1);
-  ok(planChatBodies.length === 1 && !('mlContext' in planChatBodies[0]) && planChatBodies[0].messages.at(-1).content === 'Why is this my top action?', 'advisor: the request carries the conversation only (no client-side analysis context)', JSON.stringify(Object.keys(planChatBodies[0] ?? {})));
+  ok(planChatBodies.length === 1 && !('mlContext' in planChatBodies[0]) && planChatBodies[0].messages.at(-1).content === 'What should I do first?', 'advisor: the request carries the conversation only (no client-side analysis context)', JSON.stringify(Object.keys(planChatBodies[0] ?? {})));
   ok(document.querySelector('.plan-chat-body').textContent.includes('REPLY(ok)'), 'advisor: the reply is shown');
   ok(document.querySelector('.plan-chat-msg.bot .plan-msg-content').textContent === 'Ask me about your results or what to focus on next.', 'advisor: truthful greeting');
   ok(!/Every insight here comes directly/.test(page()), 'advisor: the false claim is gone');
@@ -347,7 +358,7 @@ try {
     await mount();
     await waitFor(() => document.querySelector('.state-card'));
     const s = document.querySelector('.state-card').textContent;
-    ok(s.includes('Projected savings, next 3 months') && /Projected savings, next 3 months\s*Unavailable/.test(s), 'partial failure: the forecast row reads Unavailable', s);
+    ok(!s.includes('Projected savings'), 'partial failure: no duplicate forecast metric in position card', s);
     ok(s.includes('62.4') && document.querySelector('[data-testid="action-list"]') && document.querySelector('[data-testid="risk-list"]'), 'partial failure: the unaffected sections still render');
     const d = document.querySelector('[data-testid="analysis-details"]');
     ok(/3-month forecast[\s\S]*Unavailable/.test(document.querySelector('.analysis-content').textContent) && d.querySelector('.anomaly-item') && d.querySelectorAll('.cluster-card').length === 2, 'partial failure: only the forecast section is Unavailable');
@@ -392,8 +403,23 @@ try {
   delete analysisBody.forecast.insights.projected_savings_3m;
   await mount();
   await waitFor(() => document.querySelector('.state-card'));
-  const forecastRow = [...document.querySelectorAll('.state-row')].find(row => row.textContent.includes('Projected savings'));
+  const forecastRow = document.querySelector('.forecast-trends');
   ok(forecastRow?.textContent.includes('Unavailable') && !forecastRow.textContent.includes('₹0'), 'missing projection is unavailable, not zero');
+  analysisBody = analysis();
+  await mount();
+  for (const period of [6,12,3]) {
+    await act(async () => {
+      const select = document.querySelector('#forecast-period');
+      select.value = String(period);
+      select.dispatchEvent(new window.Event('change', {bubbles:true}));
+      await tick(80);
+    });
+    await waitFor(() => document.querySelector('.analysis-content .section-heading')?.textContent === `${period}-month forecast`);
+    ok(document.querySelector('.analysis-content .section-heading')?.textContent === `${period}-month forecast`, `${period}-month selection updates actual forecast results`);
+    ok(document.querySelectorAll('.forecast-group').length === period, `${period} forecast months rendered`);
+  }
+  await act(async () => { document.querySelector('.advisor-invitation button').click(); });
+  ok(document.activeElement === document.querySelector('input[aria-label="Ask the advisor about this analysis"]'), 'Ask advisor invitation moves focus to the working composer');
 } finally {
   await vite.close();
 }

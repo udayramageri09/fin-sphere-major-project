@@ -6,7 +6,7 @@ for (const name of ['window','document','navigator']) Object.defineProperty(glob
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const { default: React, act } = await import('react'); const { createRoot } = await import('react-dom/client');
 globalThis.__activityFin = { transactions: [], loading: false };
-const vite = await createServer({ server: { middlewareMode: true }, appType: 'custom', logLevel: 'error', plugins: [{ name: 'mock-finance', enforce:'pre', resolveId(id) { if (id.endsWith('/context/FinanceContext')) return '\0fin'; }, load(id) { if(id === '\0fin') return 'export const useFinance=()=>globalThis.__activityFin;'; } }] });
+const vite = await createServer({ optimizeDeps: { noDiscovery: true, include: [], entries: [] }, server: { middlewareMode: true, hmr:false, ws:false }, appType: 'custom', logLevel: 'error', plugins: [{ name: 'mock-finance', enforce:'pre', resolveId(id) { if (id.endsWith('/context/FinanceContext')) return '\0fin'; }, load(id) { if(id === '\0fin') return 'export const useFinance=()=>globalThis.__activityFin;'; } }] });
 const container = document.getElementById('root'), root = createRoot(container); let passed = 0;
 const check = (value, name) => { assert.ok(value, name); passed++; };
 const click = async b => act(async () => b.click());
@@ -55,9 +55,16 @@ try {
   check(!/Your choice/.test(container.querySelector('[data-testid=spending-priorities]').textContent), 'saved priority does not cross accounts');
   globalThis.__activityFin={transactions:[t,{...t,id:'edit-2',title:'Second transaction',type:'income',amount:200,classification:'income'}],loading:false,updateTransaction:save};
   await act(async()=>root.render(React.createElement(Transactions)));
+  const historyToggle = [...container.querySelectorAll('.transaction-disclosure-trigger')].find(b => b.textContent.includes('Transaction history'));
+  check(historyToggle.getAttribute('aria-expanded') === 'false', 'history starts collapsed');
+  await click(historyToggle);
+  check(historyToggle.getAttribute('aria-expanded') === 'true', 'history opens');
   check(container.querySelectorAll('button[aria-label^="Edit transaction"]').length===2, 'each Activity transaction has a visible Edit control');
   await click(container.querySelector('button[aria-label="Edit transaction Second transaction"]'));
   check(container.querySelector('form[aria-label="Edit transaction Second transaction"]'), 'Activity opens editor for chosen income transaction');
   await click([...container.querySelectorAll('button')].find(b=>b.textContent==='Cancel'));
+  await click(historyToggle);
+  check(historyToggle.getAttribute('aria-expanded') === 'false', 'history closes');
+  check(container.querySelectorAll('button[aria-label^="Edit transaction"]').length === 2, 'closing history keeps its entries mounted');
   console.log(`Transaction editing UI: ${passed} checks passed`);
 } finally { await act(async()=>root.unmount()); await vite.close(); dom.window.close(); }

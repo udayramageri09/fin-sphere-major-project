@@ -1,11 +1,11 @@
-// A sphere for the whole financial picture, with a rising stroke for progress.
+// Minimal black-and-white growth mark, recreated from the approved concept.
 export default function BrandMark({ size = 32 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 40 40" fill="none" aria-hidden="true" focusable="false" className="shrink-0">
-      <rect width="40" height="40" rx="12" fill="#09090b" />
-      <circle cx="20" cy="20" r="12" stroke="white" strokeWidth="1.5" />
-      <path d="M14 27V14h12M14 20h9" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="m23 27 7-7" stroke="white" strokeWidth="2" strokeLinecap="round" />
+      <circle cx="20" cy="20" r="20" fill="#09090b" />
+      <rect x="10" y="23" width="5" height="7" rx="1" fill="white" />
+      <rect x="18" y="17" width="5" height="13" rx="1" fill="white" />
+      <rect x="26" y="10" width="5" height="20" rx="1" fill="white" />
     </svg>
   );
 }

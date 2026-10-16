@@ -1,6 +1,7 @@
+import { forecastMonths } from './forecastHorizon.js';
 /* eslint-disable no-undef, no-unused-vars, no-useless-assignment */
 import express from 'express';
-import { parseTrustProxy } from './runtimeConfig.js';
+import { parseTrustProxy, developmentOrigins } from './runtimeConfig.js';
 import { holdingsRouter } from './holdings.js';
 import cors from 'cors';
 import dotenv from 'dotenv';
@@ -85,7 +86,7 @@ async function authenticate(req, res, next) {
 
 // ── Deployment configuration (environment-driven; see docs/SECURITY_DEPLOYMENT.md) ──────────────────────────────
 // CORS_ORIGINS: comma-separated list of the exact frontend origins allowed to call this API with cookies.
-//   Unset in development -> only the Vite dev server (http://localhost:5173).
+//   Unset in development -> local Vite ports 5173 and 5174.
 //   Unset in production  -> NO cross-origin browser access (same-origin and non-browser clients still work).
 //   A wildcard is refused: it can never be combined with credentials.
 const configuredOrigins = (process.env.CORS_ORIGINS ?? '').split(',').map((o) => o.trim().replace(/\/+$/, '')).filter(Boolean);
@@ -93,7 +94,7 @@ if (configuredOrigins.includes('*')) {
   console.error('FATAL: CORS_ORIGINS must list explicit origins; "*" is not allowed with credentials.');
   process.exit(1);
 }
-const allowedOrigins = configuredOrigins.length > 0 ? configuredOrigins : (isProd ? [] : ['http://localhost:5173']);
+const allowedOrigins = configuredOrigins.length > 0 ? configuredOrigins : developmentOrigins(isProd);
 if (isProd && allowedOrigins.length === 0) {
   console.warn('WARNING: CORS_ORIGINS is not set; browsers on other origins cannot call this API. Set it to your frontend origin.');
 }
@@ -2163,6 +2164,8 @@ const planSnapshots = createSnapshotStore();
 
 // 6. GET /api/ml/analyze — proxies full analysis (ML models + rule engines) to the Python microservice
 app.get('/api/ml/analyze', authenticate, mlLimiter, async (req, res) => {
+  const months = forecastMonths(req.query.months);
+  if (months === null) return res.status(400).json({ error: 'Choose a 3, 6 or 12 month forecast.' });
   try {
     // Scope ML analysis to the authenticated user's own data only (ownership always comes
     // from req.user.id, never from the client). Besides transactions, the only other real
@@ -2201,7 +2204,7 @@ app.get('/api/ml/analyze', authenticate, mlLimiter, async (req, res) => {
       transactions: userTransactions,
       monthly_debt_payments: monthlyDebtPayments,
       emergency_fund: emergencyFund,
-      n_forecast_months: 3
+      n_forecast_months: months
     };
 
     // Only server-loaded, owner-scoped data crosses this boundary. The private Python
@@ -2280,6 +2283,8 @@ app.post('/api/plan-chat', authenticate, chatLimiter, async (req, res) => {
   const incomeTrend = forecast.insights?.income_momentum ?? 'unknown';
   const expenseTrend = forecast.insights?.expense_momentum ?? 'unknown';
   const projectedSavings = forecast.insights?.projected_savings_3m ?? 'N/A';
+  const forecastPeriod = forecast.forecast?.months?.length ?? 3;
+  const horizonSavings = forecast.insights?.projected_savings_total ?? projectedSavings;
 
   const anomalyCount = anomalies.total_flagged ?? 0;
   const topAnomaly = (Array.isArray(anomalies.anomalies) && isPlainObject(anomalies.anomalies[0]) ? anomalies.anomalies[0].title : null) ?? 'None';
@@ -2317,6 +2322,7 @@ ${optionalHealthLines}${notAnalysedLine}- Strengths:${strings(health.strengths).
 - Income Trend: ${incomeTrend}
 - Expense Trend: ${expenseTrend}
 - Projected Net Savings (next 3 months): ₹${projectedSavings}
+- Selected forecast period: ${forecastPeriod} months; projected net savings over that period: ₹${horizonSavings}
 ${caveatLine}
 === ANOMALIES (ML: Isolation Forest) ===
 - Transactions Flagged: ${anomalyCount}
@@ -2331,7 +2337,7 @@ ${planSteps || 'No plan steps generated.'}
 
 Guidelines:
 1. ONLY discuss the numbers above. Never say "I think" or invent figures.
-2. When explaining a step, say how it was found: health-score steps (HS-) are rule-based; forecast, anomaly and cluster findings come from ML models (e.g., "Our Isolation Forest flagged...").
+2. Explain actions in plain language using the recorded figures. Name models, formulas and statistical methods only when the user asks how a result was calculated.
    When asked "why" or "how was it calculated", quote the step's Evidence line.
 3. Be conversational, encouraging, and specific. Use ₹ for amounts.
 4. Keep responses concise (2–4 sentences) unless asked for detail.

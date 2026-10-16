@@ -823,9 +823,9 @@
 .analysis-method .model-tag { display: block; margin-top: .5rem; background: #fafafa; color: #52525b; border-color: #e4e4e7; font-family: inherit; max-width: 100%; }
 .analysis-details[open] { margin-top: 1rem; }
 .analysis-details .details-card:last-child { margin-bottom: 0; }
-.advisor-disclosure .plans-right { margin-top: 1rem; max-height: none; height: auto; border: 0; border-radius: 0; }
-.advisor-disclosure .plan-chat-body { min-height: 150px; max-height: 360px; }
-.advisor-disclosure .plan-chat-title small { font-family: inherit; }
+.advisor-panel .plans-right { margin-top: 1rem; max-height: none; height: auto; border: 0; border-radius: 0; }
+.advisor-panel .plan-chat-body { min-height: 150px; max-height: 360px; }
+.advisor-panel .plan-chat-title small { font-family: inherit; }
 .plan-chat-header { padding-inline: 0; }
 .forecast-trends { gap: .6rem; flex-wrap: wrap; }
 .trend-pill { font-family: inherit; }
@@ -840,3 +840,35 @@
   .analysis-details { padding: 1rem; }
   .cluster-grid { grid-template-columns: minmax(0, 1fr); }
 }
+
+.advisor-panel { min-width: 0; align-self: start; }
+.advisor-panel .plans-right { margin-top: 0; position: static; padding: 0; }
+.advisor-panel .plan-chat-title h2 { margin: 0; }
+/* Results-first layout, one typeface, and safe wrapping at narrow widths. */
+.plans-container, .plans-container :where(*) { font-family:inherit; }
+.plans-container, .plans-left, .analysis-content, .ml-card, .advisor-panel, .plan-chat-msg, .plan-msg-content { min-width:0; max-width:100%; }
+.plans-container :where(p,dd,small,.action-title,.plan-msg-content) { overflow-wrap:anywhere; }
+.plans-container .ml-card-header { flex-wrap:wrap; align-items:center; }
+.plans-container .section-heading { flex:1 1 180px; line-height:1.4; }
+.plans-container .action-title { min-width:0; flex:1 1 160px; line-height:1.5; }
+.plans-container .analysis-method { margin-left:0; max-width:100%; }
+.plans-container .model-tag { white-space:normal; overflow-wrap:anywhere; }
+.plans-split { display:grid; grid-template-columns:minmax(0,1.65fr) minmax(280px,1fr); align-items:start; }
+.advisor-panel { position:sticky; top:88px; }
+.advisor-panel .plan-chat-body { min-height:100px; max-height:300px; }
+.advisor-panel .plan-chat-input { min-width:0; }
+.advisor-panel .plan-chat-input input { min-width:0; width:100%; }
+.plan-quick-prompts { flex-wrap:wrap; }
+.quick-prompt-chip { white-space:normal; text-align:left; min-height:40px; }
+.forecast-period-control { display:flex; flex-wrap:wrap; align-items:center; gap:12px; }
+.forecast-period-control label { font-size:14px; font-weight:600; }
+.forecast-period-control select { min-height:44px; padding:8px 36px 8px 12px; border:1px solid #d4d4d8; border-radius:10px; background:#fff; color:#18181b; }
+.forecast-period-control select:focus-visible, .advisor-invitation button:focus-visible { outline:2px solid #2563eb; outline-offset:3px; }
+.advisor-invitation { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:12px; padding:16px; border:1px solid #e4e4e7; border-radius:16px; background:#fafafa; }
+.advisor-invitation strong { font-size:14px; color:#18181b; }
+.advisor-invitation p { font-size:13px; line-height:1.5; margin-top:4px; color:#52525b; }
+.advisor-invitation button { min-height:44px; border-radius:10px; padding:10px 16px; background:#18181b; color:#fff; font-size:14px; font-weight:600; }
+.forecast-detail-figures { flex-wrap:wrap; }
+.state-rows dd strong { overflow-wrap:anywhere; }
+@media(max-width:1023px) { .plans-split { grid-template-columns:minmax(0,1fr); } .advisor-panel { position:static; } }
+@media(max-width:390px) { .state-rows { grid-template-columns:minmax(0,1fr); } .forecast-detail-figures { display:grid; grid-template-columns:minmax(0,1fr); gap:12px; } }

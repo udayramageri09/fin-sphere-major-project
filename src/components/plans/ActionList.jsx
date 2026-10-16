@@ -31,7 +31,6 @@ export default function ActionList({ plan, planFailed, health, onNavigate }) {
                     <span className="action-title">{step.title}</span>
                     <span className={`step-priority-badge priority-${step.priority}`}>{step.priority}</span>
                   </div>
-                  <p className="action-reason">{step.description}</p>
                   <div className="action-foot">
                     {dest && (
                       <button type="button" className="action-go" onClick={() => onNavigate(dest.navigation)}>
@@ -40,6 +39,7 @@ export default function ActionList({ plan, planFailed, health, onNavigate }) {
                     )}
                     <details className="action-evidence">
                       <summary>Why this matters</summary>
+                      <p className="action-reason">{step.description}</p>
                       <p className="action-meta"><span>{methodLabel(step)}</span><span>{step.timeline}</span><span>{step.expected_outcome}</span></p>
                       <Explain step={step} controls={explainControls(step, health)} health={health} />
                     </details>

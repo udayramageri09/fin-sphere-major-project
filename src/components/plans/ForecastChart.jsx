@@ -94,12 +94,12 @@ export default function ForecastChart({ historical, forecast }) {
           <div><dt>{gap ? gap.label : 'Left after spending'}</dt><dd>{gap ? gap.value : 'Unavailable'}</dd></div>
         </dl>
         {current.kind === 'forecast' && (
-          <p className="forecast-detail-note">
+          <details className="forecast-detail-note"><summary>How this forecast works</summary><p>
             ML · LinearRegression
             {r2('income') !== null || r2('expenses') !== null
               ? ` · R² ${[r2('income') !== null ? `income ${r2('income')}` : null, r2('expenses') !== null ? `spending ${r2('expenses')}` : null].filter(Boolean).join(', ')}`
               : ''}
-          </p>
+          </p></details>
         )}
       </div>
 

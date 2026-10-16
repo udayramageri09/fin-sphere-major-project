@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Camera, LogOut, Trash2, KeyRound, Mail, AlertCircle, CheckCircle2 } from 'lucide-react';
 import { useAuth, passwordRecovery } from '../context/AuthContext';
 import { usePrefersReducedMotion } from '../hooks/useMotionPreference';
+import './Settings.css';
 import Avatar from '../components/Avatar';
 import { AVATAR_ACCEPT, avatarFileProblem, prepareAvatarImage } from '../utils/avatarImage';
 
@@ -12,7 +13,7 @@ const SECONDARY = 'inline-flex items-center justify-center gap-2 rounded-xl bord
 
 function Section({ id, title, description, children }) {
   return (
-    <section aria-labelledby={id} className="rounded-2xl border border-zinc-200 bg-white p-5 sm:p-7 min-w-0">
+    <section aria-labelledby={id} className="rounded-2xl border border-zinc-200 bg-white p-5 sm:p-7 min-w-0 scroll-mt-24">
       <h2 id={id} className="text-xl font-bold tracking-tight text-zinc-900">{title}</h2>
       {description && <p className="mt-1 text-sm text-zinc-500">{description}</p>}
       <div className="mt-5">{children}</div>
@@ -166,7 +167,7 @@ function ProfileSection({ prepareImage }) {
 
 // ── Account and security ────────────────────────────────────────────────────────────────────────────────────────────────
 function AccountSection() {
-  const { user, logout } = useAuth();
+  const { user } = useAuth();
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState('');
   const [error, setError] = useState('');
@@ -185,12 +186,12 @@ function AccountSection() {
   };
 
   return (
-    <Section id="settings-account" title="Account">
+    <Section id="settings-account" title="Account & security">
       <div className="flex flex-col gap-6">
         <div>
           <p className="flex items-center gap-2 text-sm font-semibold text-zinc-800"><Mail size={16} aria-hidden="true" /> Sign-in email</p>
           <p className="mt-1 text-zinc-900 [overflow-wrap:anywhere]" data-testid="account-email">{user?.email}</p>
-          <p className="mt-1 text-sm text-zinc-500">Used to sign in. Read-only.</p>
+          <p className="mt-1 text-sm text-zinc-500">Your sign-in email.</p>
         </div>
 
         <div>
@@ -200,9 +201,6 @@ function AccountSection() {
           <div className="mt-3 flex flex-col gap-2"><Message kind="error">{error}</Message><Message kind="status">{status}</Message></div>
         </div>
 
-        <div>
-          <button type="button" className={SECONDARY} onClick={logout} data-testid="settings-logout"><LogOut size={16} aria-hidden="true" /> Log out</button>
-        </div>
       </div>
     </Section>
   );
@@ -230,7 +228,7 @@ function DisplaySection() {
   };
 
   return (
-    <Section id="settings-display" title="Display" description="How the dashboard moves.">
+    <Section id="settings-display" title="Accessibility" description="Choose the motion level that is comfortable for you.">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <p id="reduce-motion-label" className="text-sm font-semibold text-zinc-800">Reduce dashboard animations</p>
@@ -249,46 +247,28 @@ function DisplaySection() {
   );
 }
 
-// ── Setup guide ───────────────────────────────────────────────────────────────────
-const GUIDE_STATUS = { pending: 'The setup guide is waiting for you.', skipped: 'You skipped the setup guide.', completed: 'You have used the setup guide.' };
-function SetupGuideSection() {
-  const { user, setOnboardingState } = useAuth();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const inFlight = useRef(false);
-  const show = async () => {
-    if (inFlight.current) return;
-    inFlight.current = true; setBusy(true); setError('');
-    try { await setOnboardingState('pending'); } catch (err) { setError(err.message); } finally { inFlight.current = false; setBusy(false); }
-  };
-  return (
-    <Section id="settings-setup" title="Setup guide" description="Where to start with your own data.">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-sm text-zinc-600" data-testid="setup-status">{GUIDE_STATUS[user?.onboardingState] ?? GUIDE_STATUS.completed}</p>
-        <button type="button" className={SECONDARY} onClick={show} disabled={busy} data-testid="show-setup-guide">Show the setup guide</button>
-      </div>
-      <div className="mt-3"><Message kind="error">{error}</Message></div>
-    </Section>
-  );
-}
-
 function Settings({ prepareImage }) {
-  const { user } = useAuth();
+  const { user, logout } = useAuth();
+  const [section, setSection] = useState('profile');
   return (
-    <div className="flex flex-col gap-6 max-w-3xl w-full mx-auto min-w-0" data-testid="settings-page">
+    <div className="flex flex-col gap-6 max-w-5xl w-full mx-auto min-w-0" data-testid="settings-page">
       <header>
         <h1 className="text-3xl font-bold tracking-tight-display text-zinc-900">Settings</h1>
-        <p className="text-zinc-500 mt-1">Manage your profile and account.</p>
+        <p className="text-zinc-500 mt-1">Manage your account and preferences.</p>
       </header>
-      <ProfileSection key={user?.id} prepareImage={prepareImage} />
-      <AccountSection />
-      <details className="rounded-2xl border border-zinc-200 bg-white p-5 sm:p-7">
-        <summary className="cursor-pointer font-semibold text-zinc-900 focus-visible:outline-2 focus-visible:outline-offset-4">Preferences and setup</summary>
-        <div className="mt-5 flex flex-col gap-4">
-          <DisplaySection />
-          <SetupGuideSection />
+      <div className="settings-layout">
+        <nav aria-label="Settings sections" className="settings-menu">
+          {[['profile', 'Profile'], ['account', 'Account & security'], ['display', 'Accessibility']].map(([id, label]) => (
+            <button type="button" key={id} aria-current={section === id ? 'page' : undefined} onClick={() => setSection(id)} className={section === id ? 'is-active' : ''}>{label}</button>
+          ))}
+          <button type="button" onClick={logout} data-testid="settings-logout" className="flex items-center gap-2"><LogOut size={16} aria-hidden="true" />Log out</button>
+        </nav>
+        <div className="settings-content">
+          <div hidden={section !== 'profile'}><ProfileSection key={user?.id} prepareImage={prepareImage} /></div>
+          <div hidden={section !== 'account'}><AccountSection key={`account-${user?.id}`} /></div>
+          <div hidden={section !== 'display'}><DisplaySection key={`display-${user?.id}`} /></div>
         </div>
-      </details>
+      </div>
     </div>
   );
 }

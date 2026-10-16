@@ -1,7 +1,5 @@
 import { LayoutDashboard, Wallet, CreditCard, PieChart, Target, CalendarRange, Brain, Menu, X, Settings } from 'lucide-react';
 import { useState } from 'react';
-import { useAuth } from '../context/AuthContext';
-import Avatar from './Avatar';
 import BrandMark from './BrandMark';
 
 const navItems = [
@@ -16,7 +14,6 @@ const navItems = [
 
 function TopNav({ currentView, setCurrentView }) {
   const [isOpen, setIsOpen] = useState(false);
-  const { user, avatarUrl } = useAuth();
   const onSettings = currentView === 'settings';
 
   const handleNav = (id) => {
@@ -69,10 +66,10 @@ function TopNav({ currentView, setCurrentView }) {
             aria-label="Profile and settings"
             aria-current={onSettings ? 'page' : undefined}
             title="Profile and settings"
-            data-testid="nav-avatar"
-            className="flex rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 focus-visible:ring-offset-2"
+            data-testid="nav-settings"
+            className="hidden xl:inline-flex h-11 w-11 items-center justify-center text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 focus-visible:ring-offset-2"
           >
-            <Avatar size={32} name={user?.displayName} src={avatarUrl} />
+            <Settings size={20} aria-hidden="true" />
           </button>
         </div>
       </header>

@@ -30,7 +30,7 @@ let fetchCount = 0;
 globalThis.fetch = async () => { fetchCount++; throw new Error('the guide must not make requests of its own'); };
 
 const vite = await createServer({
-  server: { middlewareMode: true }, appType: 'custom', logLevel: 'error',
+  optimizeDeps: { noDiscovery: true, include: [], entries: [] }, server: { middlewareMode: true, hmr: false, ws: false }, appType: 'custom', logLevel: 'error',
   plugins: [{ name: 'auth-mock', enforce: 'pre', resolveId(id) { if (id.endsWith('/context/AuthContext')) return '\0auth-mock'; }, load(id) { if (id === '\0auth-mock') return 'export const useAuth=()=>globalThis.__auth();'; } }]
 });
 
@@ -38,78 +38,55 @@ try {
   const { default: Onboarding } = await vite.ssrLoadModule('/src/components/Onboarding.jsx');
   const mount = async () => { calls = []; navigated = []; behaviour = async () => ({}); await act(async () => root.unmount()); root = createRoot(container); await act(async () => root.render(React.createElement(Onboarding, { onNavigate: (v) => navigated.push(v) }))); };
 
-  await check('a labelled modal dialog; focus starts on its heading', async () => {
+  await check('first-login tour opens real pages and persists completion only at the end', async () => {
     await mount();
-    const dialog = q('[role=dialog]');
-    assert.equal(dialog.getAttribute('aria-modal'), 'true');
-    assert.equal(text(document.getElementById(dialog.getAttribute('aria-labelledby'))), 'Welcome to FinSphere');
-    assert.match(text(document.getElementById(dialog.getAttribute('aria-describedby'))), /Nothing is added for you/);
-    assert.ok(document.activeElement === q('#onboarding-title'), 'heading focused');
+    assert.equal(q('[role=dialog]').getAttribute('aria-modal'), 'false');
+    assert.equal(document.querySelector('[inert]'), null);
+    await click(qa('button').find(b => text(b) === 'Start feature tour'));
+    assert.deepEqual(navigated, ['dashboard']);
+    assert.deepEqual(calls, []);
+    for (let i = 1; i < 8; i++) await click(qa('button').find(b => text(b) === 'Next'));
+    assert.deepEqual(navigated, ['dashboard','transactions','liabilities','portfolio','goals','subscriptions','plans','settings']);
+    assert.equal(text(q('[data-testid=tour-title]')), 'Settings');
+    await click(qa('button').find(b => text(b) === 'Back'));
+    assert.equal(navigated.at(-1), 'plans');
+    await click(qa('button').find(b => text(b) === 'Next'));
+    await click(qa('button').find(b => text(b) === 'Finish tour'));
+    assert.deepEqual(calls, ['completed']);
   });
-
-  await check('concise: two ways to start and Skip for now; no form, no field, nothing that adds data', async () => {
+  await check('skip saves once and a failed save remains retryable', async () => {
     await mount();
-    assert.deepEqual(qa('button').map((b) => b.querySelector('.font-semibold')?.textContent ?? text(b)), ['Add a transaction', 'Import a statement', 'Skip for now']);
-    assert.equal(qa('input, textarea, select, form').length, 0);
-    assert.match(text(), /reopen this guide from Settings/);
-    assert.ok(text().length < 520, `short copy (${text().length} characters)`);
-  });
-
-  for (const [name, testid] of [['Add a transaction', 'onboarding-add'], ['Import a statement', 'onboarding-import']]) {
-    await check(`${name}: saves "completed" once, then opens Transactions`, async () => {
-      await mount();
-      await act(async () => { q(`[data-testid=${testid}]`).click(); q(`[data-testid=${testid}]`).click(); });
-      assert.deepEqual(calls, ['completed'], 'one save however often it is clicked');
-      assert.deepEqual(navigated, ['transactions']);
-    });
-  }
-
-  await check('Skip for now saves "skipped" and goes nowhere', async () => {
-    await mount();
+    behaviour = async () => { throw new Error('Offline'); };
     await click(q('[data-testid=onboarding-skip]'));
-    assert.deepEqual(calls, ['skipped']);
-    assert.deepEqual(navigated, []);
-  });
-
-  await check('Escape means skip for now, once', async () => {
-    await mount();
-    await keydown(q('[role=dialog]'), 'Escape'); await keydown(q('[role=dialog]'), 'Escape');
-    assert.deepEqual(calls, ['skipped']);
-  });
-
-  await check('while saving the buttons are disabled; a failed save keeps the guide open with the reason and allows a retry', async () => {
-    await mount();
-    let release;
-    behaviour = () => new Promise((_, reject) => { release = () => reject(new Error('Could not save your changes. Please try again.')); });
-    await act(async () => { q('[data-testid=onboarding-add]').click(); });
-    assert.ok(qa('button').every((b) => b.disabled), 'all buttons disabled while the request is in flight');
-    await act(async () => { release(); });
-    assert.equal(text(q('[role=alert]')), 'Could not save your changes. Please try again.');
-    assert.deepEqual(navigated, [], 'no navigation after a failed save');
-    assert.ok(qa('button').every((b) => !b.disabled));
+    assert.equal(text(q('[role=alert]')), 'Offline');
     behaviour = async () => ({});
-    await click(q('[data-testid=onboarding-add]'));
-    assert.deepEqual(calls, ['completed', 'completed']);
-    assert.deepEqual(navigated, ['transactions']);
+    await act(async () => { q('[data-testid=onboarding-skip]').click(); q('[data-testid=onboarding-skip]').click(); });
+    assert.deepEqual(calls, ['skipped','skipped']);
   });
-
-  await check('Tab stays inside the dialog (wraps in both directions)', async () => {
+  await check('audio starts only on request, follows navigation and stops on unmount', async () => {
+    const spoken = []; let cancels = 0;
+    window.speechSynthesis = { speak: u => spoken.push(u), cancel: () => { cancels++; } };
+    window.SpeechSynthesisUtterance = class { constructor(text) { this.text = text; } };
     await mount();
-    const buttons = qa('button');
-    buttons.at(-1).focus();
-    await keydown(buttons.at(-1), 'Tab');
-    assert.ok(document.activeElement === buttons[0], 'Tab from the last control goes to the first');
-    await keydown(buttons[0], 'Tab', { shiftKey: true });
-    assert.ok(document.activeElement === buttons.at(-1), 'Shift+Tab from the first control goes to the last');
-    q('#onboarding-title').focus();
-    await keydown(q('#onboarding-title'), 'Tab', { shiftKey: true });
-    assert.ok(document.activeElement === buttons.at(-1), 'Shift+Tab from the heading goes to the last control');
+    assert.equal(spoken.length, 0);
+    await click(qa('button').find(b => text(b) === 'Start audio tour'));
+    assert.match(spoken[0].text, /^Dashboard/);
+    await click(qa('button').find(b => text(b) === 'Next'));
+    assert.match(spoken[1].text, /^Transactions/);
+    assert.equal(navigated.at(-1), 'transactions');
+    const before = cancels;
+    await mount(); assert.ok(cancels > before);
+    delete window.speechSynthesis; delete window.SpeechSynthesisUtterance;
   });
-
-  await check('the guide makes no requests of its own and does not know about financial data', async () => {
+  await check('no audio support leaves text and navigation usable; no financial writes', async () => {
+    await mount();
+    await click(qa('button').find(b => text(b) === 'Start audio tour'));
+    assert.match(text(q('[role=status]')), /Audio is unavailable/);
+    assert.ok(text(q('[data-testid=tour-transcript]')).length > 0);
     assert.equal(fetchCount, 0);
-    const source = fs.readFileSync('src/components/Onboarding.jsx', 'utf8');
-    assert.ok(!/FinanceContext|useFinance|addTransaction|fetch\(/.test(source));
+    const app = fs.readFileSync('src/App.jsx','utf8');
+    assert.match(app, /user\?\.onboardingState === 'pending' && <Onboarding/);
+    assert.ok(!fs.readFileSync('src/pages/Settings.jsx','utf8').includes('setOnboardingState'));
   });
 
   await act(async () => root.unmount());
@@ -117,7 +94,7 @@ try {
 
   // ═══ Part 2: the real AuthProvider ═══
   delete globalThis.__auth;
-  const vite2 = await createServer({ server: { middlewareMode: true }, appType: 'custom', logLevel: 'error' });
+  const vite2 = await createServer({ optimizeDeps: { noDiscovery: true, include: [], entries: [] }, server: { middlewareMode: true, hmr: false, ws: false }, appType: 'custom', logLevel: 'error' });
   const { AuthProvider, useAuth } = await vite2.ssrLoadModule('/src/context/AuthContext.jsx');
   const requests = [];
   let respond;

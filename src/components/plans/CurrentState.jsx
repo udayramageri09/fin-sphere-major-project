@@ -8,9 +8,9 @@ function Score({ score }) {
     <div className="state-score" data-testid="health-score">
       <div className="state-score-number">{score.value}<span>/100</span></div>
       <div className="state-score-grade">Grade {score.grade} · {score.label}</div>
-      <div className="state-score-note">
+      <details className="state-score-note"><summary>About this score</summary>
         Rule-based score{score.ratiosUsed < score.ratiosTotal ? ` · from ${score.ratiosUsed} of ${score.ratiosTotal} ratios` : ''}
-      </div>
+      </details>
     </div>
   );
 }
@@ -25,13 +25,13 @@ function CurrentState({ state }) {
       <div className="state-body">
         {state.score ? <Score score={state.score} /> : <div className="state-score unavailable-block">Health score unavailable</div>}
         <dl className="state-rows">
-          {state.rows.map((r) => (
+          {state.rows.filter(row => row.key !== 'forecast').map((r) => (
             <div key={r.key} className={`state-row ${r.unavailable ? 'is-unavailable' : ''}`}>
               <dt>{r.label}</dt>
               <dd>
                 <strong>{r.unavailable ? 'Unavailable' : r.value}</strong>
-                {r.unavailable && <details className="metric-note"><summary>Why unavailable?</summary><small>{r.value}</small></details>}
-                {r.note && <details className="metric-note"><summary>About this figure</summary><small>{r.note}</small></details>}
+                {r.unavailable && <p className="metric-note">{r.value}</p>}
+                {r.note && <p className="metric-note">{r.note}</p>}
               </dd>
             </div>
           ))}

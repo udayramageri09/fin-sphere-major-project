@@ -25,3 +25,8 @@ export function parseTrustProxy(value) {
   if (valid) return text;
   throw new Error('TRUST_PROXY must be false, a nonnegative safe hop count, or valid IP/subnet list; true is forbidden');
 }
+
+// Development Vite origins only. Production still requires explicit origins.
+export function developmentOrigins(isProduction) {
+  return isProduction ? [] : ['http://localhost:5173', 'http://localhost:5174'];
+}

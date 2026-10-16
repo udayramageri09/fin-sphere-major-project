@@ -26,6 +26,14 @@ export default function Plans() {
   const { performNavigation } = useAvatarActions();
   const guardedFetch = useGuardedFetch();   // names the account this tab shows; a refusal re-checks the session
 
+  const [months, setMonths] = useState(3);
+  const analysisRequest = useRef(null);
+  useEffect(() => () => {
+    const request = analysisRequest.current;
+    analysisRequest.current = null;
+    request?.abort();
+  }, []);
+  const advisorInput = useRef(null);
   const [data, setData] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -80,20 +88,39 @@ export default function Plans() {
     } catch { /* ignored */ }
   };
 
-  const runAnalysis = async () => {
+  const runAnalysis = async (period = months) => {
+    if (analysisRequest.current || isThinking) return;
+    const controller = new AbortController();
+    analysisRequest.current = controller;
+    const timeout = setTimeout(() => controller.abort(), 75_000);
+    setMonths(period);
     setIsLoading(true);
     setError(null);
     try {
-      const res = await guardedFetch(`${API}/ml/analyze`, { credentials: 'include' });
+      const res = await guardedFetch(`${API}/ml/analyze${period === 3 ? '' : `?months=${period}`}`, { credentials: 'include', signal: controller.signal });
       if (!res.ok) throw new Error(res.status === 401 ? 'Your session has expired. Please sign in again.' : res.status === 422 ? 'Analysis supports up to 3000 transactions per account. Your saved transactions have not changed.' : ANALYSIS_ERROR);
       const body = await res.json();
+      if (analysisRequest.current !== controller) return;
+      const returnedMonths = body.forecast?.forecast?.months;
+      if (Array.isArray(returnedMonths) && returnedMonths.length !== period) throw new Error(ANALYSIS_ERROR);
       setData(body);
+      if (period !== months) setMessages([{ id: Date.now(), sender: 'bot', text: GREETING }]);
       announce(body.plan?.step_count);
     } catch (err) {
+      if (analysisRequest.current !== controller) return;
+      if (controller.signal.aborted) {
+        setError('Analysis is taking too long. Check that the API and analytics service are running, then try again.');
+        setData(null);
+        return;
+      }
       setError(err.message === 'Your session has expired. Please sign in again.' || err.message.startsWith('Analysis supports up to 3000 transactions') || err.message === ACCOUNT_CHANGED_MESSAGE ? err.message : ANALYSIS_ERROR);
       setData(null);
     } finally {
-      setIsLoading(false);
+      clearTimeout(timeout);
+      if (analysisRequest.current === controller) {
+        analysisRequest.current = null;
+        setIsLoading(false);
+      }
     }
   };
 
@@ -127,22 +154,28 @@ export default function Plans() {
           <div className="plans-icon-badge"><Compass size={20} /></div>
           <div>
             <h1 className="plans-title">Financial Intelligence</h1>
-            <p className="plans-subtitle">A clear view of your finances. A practical next step.</p>
+            <p className="plans-subtitle">Your outlook. Your next move.</p>
           </div>
         </div>
-        <button className={`run-ml-btn ${isLoading ? 'loading' : ''}`} onClick={runAnalysis} disabled={isLoading || noTransactions}>
+        <button className={`run-ml-btn ${isLoading ? 'loading' : ''}`} onClick={() => runAnalysis()} disabled={isLoading || isThinking || noTransactions}>
           <RefreshCw size={16} className={isLoading ? 'spinning' : ''} />
           {isLoading ? 'Analysing…' : 'Refresh analysis'}
         </button>
       </div>
 
+      <div className="forecast-period-control">
+        <label htmlFor="forecast-period">Forecast period</label>
+        <select id="forecast-period" value={months} disabled={isLoading || isThinking || noTransactions} onChange={event => runAnalysis(Number(event.target.value))}>
+          {[3, 6, 12].map(period => <option key={period} value={period}>{period} months</option>)}
+        </select>
+      </div>
       {error && (
         <div className="plans-error-banner" role="alert" data-testid="analysis-error">
           <AlertTriangle size={18} />
           <div>
             <strong>Analysis unavailable</strong>
             <p>{error}</p>
-            <button type="button" className="retry-btn" onClick={runAnalysis} disabled={isLoading}>Try again</button>
+            <button type="button" className="retry-btn" onClick={() => runAnalysis()} disabled={isLoading}>Try again</button>
           </div>
         </div>
       )}
@@ -161,18 +194,18 @@ export default function Plans() {
 
           {data && !isLoading && (
             <>
+              <div className="advisor-invitation">
+                <div><strong>Not sure where to start?</strong><p>Ask your advisor to turn these results into a practical next step.</p></div>
+                <button type="button" onClick={() => advisorInput.current?.focus()}>Ask advisor</button>
+              </div>
               <CurrentState state={state} />
               <ActionList plan={data.plan} planFailed={findings.planFailed} health={health} onNavigate={performNavigation} />
-              <AnalysisDetails data={data} />
+              <AnalysisDetails data={data} months={months} />
               <details className="intelligence-disclosure">
-                <summary>More insights and analysis methods</summary>
+                <summary>More insights</summary>
                 <div className="intelligence-disclosure-body">
                   <TopFindings findings={findings} />
-                  <p className="ml-metadata">
-                    {data.metadata?.transaction_count} transactions analysed
-                    {data.metadata?.models_run?.length ? ` · ML: ${data.metadata.models_run.join(', ')}` : ''}
-                    {data.metadata?.rule_engines_run?.length ? ` · Rules: ${data.metadata.rule_engines_run.join(', ')}` : ''}
-                  </p>
+
                 </div>
               </details>
             </>
@@ -187,14 +220,13 @@ export default function Plans() {
           )}
         </div>
 
-        <details className="intelligence-disclosure advisor-disclosure">
-          <summary>Ask about your analysis</summary>
+        <section className="intelligence-disclosure advisor-panel" aria-labelledby="advisor-heading">
           <div className="plans-right">
           <div className="plan-chat-header">
             <div className="plan-chat-title">
               <div className="plan-chat-icon"><Compass size={16} /></div>
               <div>
-                <span>Advisor</span>
+                <h2 id="advisor-heading" className="text-base font-semibold">Advisor</h2>
                 <small>Answers based on your latest analysis.</small>
               </div>
             </div>
@@ -216,32 +248,33 @@ export default function Plans() {
           </div>
 
           <div className="plan-quick-prompts">
-            {['Why is this my top action?', 'How is my health score calculated?', 'What caused my biggest risk?'].map((q) => (
-              <button key={q} className="quick-prompt-chip" onClick={() => sendToBot(q)} disabled={!data || isThinking}>{q}</button>
+            {['What should I do first?', 'How can I save more?', 'Explain my forecast'].map((q) => (
+              <button key={q} className="quick-prompt-chip" onClick={() => sendToBot(q)} disabled={!data || isThinking || isLoading}>{q}</button>
             ))}
           </div>
 
           <form className="plan-chat-input" onSubmit={(e) => { e.preventDefault(); sendToBot(chatInput); }}>
             <input
+              ref={advisorInput}
               type="text"
               aria-label="Ask the advisor about this analysis"
               placeholder={data ? 'Ask about this analysis…' : 'Run the analysis first…'}
               value={chatInput}
               onChange={(e) => setChatInput(e.target.value)}
-              disabled={!data}
+              disabled={!data || isLoading}
             />
             {voiceSupported && (
               <button type="button" className={`plan-voice-btn ${isListening ? 'listening' : ''}`}
-                onClick={isListening ? stopListening : startListening} disabled={!data} aria-label={isListening ? 'Stop listening' : 'Speak'}>
+                onClick={isListening ? stopListening : startListening} disabled={!data || isLoading} aria-label={isListening ? 'Stop listening' : 'Speak'}>
                 {isListening ? <MicOff size={16} /> : <Mic size={16} />}
               </button>
             )}
-            <button type="submit" className="plan-send-btn" disabled={!chatInput.trim() || isThinking || !data} aria-label="Send">
+            <button type="submit" className="plan-send-btn" disabled={!chatInput.trim() || isThinking || isLoading || !data} aria-label="Send">
               <Send size={16} />
             </button>
           </form>
           </div>
-        </details>
+        </section>
       </div>
     </div>
   );

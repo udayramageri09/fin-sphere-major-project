@@ -33,7 +33,12 @@
     "test:confirmation": "node --test tests/actionConfirmation.test.mjs",
     "test:copilot": "node tests/financialCopilot.test.mjs",
     "test:plans": "node tests/plansIntelligence.test.mjs",
-    "test:companion": "node --test tests/companionState.test.mjs tests/speechText.test.mjs"
+    "test:companion": "node --test tests/companionState.test.mjs tests/speechText.test.mjs",
+    "demo:seed": "node scripts/seedFacultyDemo.mjs",
+    "test:analysis-startup": "node tests/analysisStartup.test.mjs",
+    "test:faculty-demo": "node tests/facultyDemo.test.mjs",
+    "dev:5173": "vite --host localhost --port 5173 --strictPort",
+    "dev:5174": "vite --host localhost --port 5174 --strictPort"
   },
   "dependencies": {
     "framer-motion": "^13.1.0",

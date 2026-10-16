@@ -149,7 +149,7 @@ def run_forecaster(transactions: list[dict], n_future: int = 3) -> dict:
     expense_trend = _trend(expense_result['slope'])
 
     avg_savings = float(monthly['net'].mean())
-    projected_savings_3m = sum(net_forecast)
+    projected_savings_3m = sum(net_forecast[:3])
     avg_income = float(monthly['income'].mean())
     savings_rate = (avg_savings / avg_income * 100) if avg_income > 0 else 0.0
 
@@ -179,6 +179,8 @@ def run_forecaster(transactions: list[dict], n_future: int = 3) -> dict:
             'expense_momentum': expense_trend,
             'avg_monthly_savings': round(avg_savings, 2),
             'projected_savings_3m': round(projected_savings_3m, 2),
+            'projected_savings_total': round(sum(net_forecast), 2),
+            'forecast_months': n_future,
             'savings_rate_pct': round(savings_rate, 1),
             'months_analyzed': len(monthly)
         }
