@@ -14,7 +14,9 @@ import os
 os.environ['OMP_NUM_THREADS'] = '1'   # Prevent MKL threadpool crash on Anaconda/Windows
 
 from fastapi import FastAPI, HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from typing import Optional, Union
 import time
@@ -42,6 +44,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def refuse_invalid_request(request, exc: RequestValidationError):
+    """Say WHERE and WHY a request was refused, never WHAT was submitted.
+
+    The default handler echoes every rejected value back: an oversized history returned all of its rows, and a non-finite
+    amount made the default response itself un-serialisable, so the refusal surfaced as HTTP 500. Financial rows must not
+    be reflected in responses or logs, and a refusal must be a clean 422.
+    """
+    problems = [{'loc': list(error.get('loc', ())), 'msg': str(error.get('msg', '')), 'type': str(error.get('type', ''))} for error in exc.errors()[:20]]
+    return JSONResponse(status_code=422, content={'detail': problems})
 
 
 # ── Pydantic Models ────────────────────────────────────────────────────────────

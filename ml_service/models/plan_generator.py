@@ -451,11 +451,11 @@ def generate_plan(
         if high_value_pct > 70:
             steps.append(_make_step(
                 'CL-01', 'High Concentration in Large Transactions',
-                f'Spending clustering (Agglomerative, Ward) shows {high_value_pct:.1f}% of your spending is in high-value transactions. '
-                f'This indicates high fixed-cost exposure (EMIs, rent). '
-                f'Consider restructuring fixed liabilities for more flexible cash flow.',
+                f'Spending clustering (Agglomerative, Ward) shows {high_value_pct:.1f}% of your spending value is in your largest transactions. '
+                f'Clusters group amounts only, so this does not show what the money was for. '
+                f'Check whether these are recurring commitments or one-off purchases, and whether any can be spread out or reduced.',
                 'high', '2–3 months',
-                'Reduce fixed-cost concentration below 60%',
+                'Bring the share of spending in your largest transactions below 60%',
                 high_value_pct, 'advisory',
                 _evidence(
                     'high_value_exposure_pct', 'Spending in the largest-amount cluster', high_value_pct, '%',

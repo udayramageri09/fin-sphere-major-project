@@ -188,6 +188,14 @@ async function run() {
     if (status === 429) n429++;
   }
   ok(n429 === 0, 'override raises the limit below its new ceiling');
+  // A malformed spreadsheet must not put the parser's error object (stack frames, file paths) or any statement text into the log.
+  const hostile = Buffer.concat([Buffer.from('PK\x03\x04SENTINEL-STATEMENT-TEXT 12/01/2026 Salary +50000.00 '), Buffer.alloc(200, 7)]);
+  const fdBad = new FormData(); fdBad.append('statementFile', new Blob([hostile]), 'broken.xlsx');
+  const bad = await fetch(base(P3) + '/api/transactions/parse-statement', { method: 'POST', headers: { cookie: tok3 }, body: fdBad });
+  const badBody = await bad.text();
+  await new Promise((res) => setTimeout(res, 300));
+  ok(bad.status >= 400 && !/SENTINEL|\.mjs|\bat .*\(/.test(badBody), 'malformed spreadsheet is refused without parser internals in the response', `${bad.status} ${badBody.slice(0, 80)}`);
+  ok(!/SENTINEL/.test(raised.out()) && !/\n\s+at .*\(|xlsx\.mjs/.test(raised.out()), 'malformed spreadsheet does not put statement text, stack frames or file paths in the log', raised.out().slice(-300));
   raised.child.kill();
 
   // ── Production-mode server: secure cookie, no CORS when unset, override ignored ─

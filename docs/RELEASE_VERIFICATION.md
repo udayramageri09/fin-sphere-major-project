@@ -216,3 +216,19 @@ Changed/added/deleted paths in this combined release (includes incoming user wor
 Follow RELEASE_RUNBOOK.md and the README's faculty startup/contingency. Keep the prepared
 faculty environment separate, private and unchanged. If free hosting is unavailable, present
 locally; no purchase, merge or deployment is required or authorized for this handoff.
+
+## Independent review addendum (17 Oct 2026, one Windows machine, synthetic data, disposable databases)
+
+Changes: Python analytics service returns a clean 422 for invalid input (a non-finite amount was HTTP 500; an oversized history was echoed back);
+plan step CL-01 and cluster descriptions no longer claim a purpose for amount groups; API parse-failure logs record only the error name;
+holdings valuation date allows one day past the UTC date (users east of UTC could not save a holding dated their local today between
+00:00 and 05:30 IST); `public/_headers` adds nosniff, frame denial, referrer and permissions policies (no full CSP, see the runbook);
+compose gives the API `mem_limit: 1024m`; the ML image installs wheels only.
+
+Measured (not a load test): 3,000-row analysis 0.5 to 1.2 s, Python peak about 304 MB, no growth over repeats; saturated OCR queue peak about
+290 MB, back to about 77 MB. No speedup is claimed. Re-run after the changes: lint, build, all frontend and server scripts (one gated database
+test via a disposable database), Python 47 tests, npm audits (0), pip-audit of pinned requirements (clean), secret scan (no hits), Node 22.23.3 build
+and suites, synthetic browser checks (26/26).
+
+Not verified: Docker/compose/Oracle ARM64 execution, host HTTPS/proxy/cookies/CORS, database TLS and roles, real Groq/email/microphone,
+production restore, multi-instance behaviour (rate limits and snapshots are per process), spreadsheet decompression limits.

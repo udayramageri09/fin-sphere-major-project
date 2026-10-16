@@ -16,6 +16,20 @@ Cloudflare Pages' default SPA fallback applies when there is no top-level 404.ht
 Verify direct navigation, login, cookies, account switches and a refreshed page on the
 actual host before accepting a release.
 
+`public/_headers` is copied to `dist/_headers` by the build and Cloudflare Pages applies it to
+every path: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy:
+strict-origin-when-cross-origin`, `Permissions-Policy` (camera, geolocation and payment off,
+microphone allowed for this site because the voice assistant needs it) and `Content-Security-Policy:
+frame-ancestors 'none'`. It is deliberately **not** a full Content-Security-Policy: a script/connect
+policy needs the final API origin and has not been exercised in a browser against the real host.
+Candidate to try in **staging** with the browser console open, then tighten or loosen from the
+reported violations (never enable it unobserved): `default-src 'self'; script-src 'self'; style-src
+'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'
+https://api.YOUR-DOMAIN.in; base-uri 'self'; form-action 'self'; object-src 'none'; frame-ancestors
+'none'`. `'unsafe-inline'` for styles is expected (React style props); `blob:` images are the profile
+photo. This candidate is untested. Cloudflare Pages is separate from the API: the API's own
+headers (Helmet) only protect API responses.
+
 Use `app.YOUR-DOMAIN.in` and `api.YOUR-DOMAIN.in` over HTTPS. The current Strict cookie
 requires the frontend and API to be same-site. A pages.dev frontend and unrelated Oracle
 hostname are unsuitable for this cookie configuration. Use the custom frontend domain.
@@ -35,6 +49,33 @@ approval to deploy. For ARM64, validate with `docker buildx build --platform lin
 platform override; actual native bcrypt/scientific wheel installation and OCR must be
 tested on Oracle ARM64. Docker is unavailable on the current verification machine, so
 these images and compose have not been executed. Do not treat the template as ARM64 proof.
+
+What *was* checked without Docker (availability only, not runtime): PyPI metadata shows a prebuilt
+Linux **aarch64 and x86_64** wheel (or a pure-Python wheel) for every one of the 25 pins in
+`ml_service/requirements.txt`, including numpy, pandas, scipy, scikit-learn and pydantic-core;
+the ML image therefore installs with `--only-binary=:all:` and fails loudly instead of compiling.
+On the Node side `bcrypt` 6.0.0 ships `linux-arm64` glibc and musl prebuilds (the image is
+Debian/glibc) and every other API dependency is pure JavaScript or WebAssembly (Tesseract.js).
+`compose.yaml` was parsed as YAML (API published on loopback only, analytics on an internal
+network with no published port). Verify on the target: `npm ci --omit=dev` in the API image,
+`pip install` in the ML image, real OCR of an image, and `GET /api/health` / `/health`.
+
+## Capacity bounds (measured on one Windows machine, synthetic data, not a load test)
+
+* **Financial Intelligence, 3,000 rows (the limit):** one analysis took about 0.5 to 1.2 s; the
+  private Python process peaked at about 304 MB and did not grow over three repeats; the API
+  peaked at about 94 MB. The container limit for the analysis service is 1,536 MB. 3,001 rows are
+  refused with HTTP 422 and the exact message "Analysis supports up to 3000 transactions per
+  account."; the saved ledger is untouched. Ward clustering is quadratic, so do **not** raise the
+  limit without repeating this measurement at the new size.
+* **OCR, saturated queue:** two active plus three queued 20-megapixel images took the API from about
+  72 MB idle to about 290 MB peak and back to about 77 MB six seconds later; jobs finished in
+  1.9 to 4.4 s. `compose.yaml` sets the API to `mem_limit: 1024m`, about 3.5 times that peak. The
+  limit is not container-verified; the timeout path (30 s per job) is covered by unit tests, not by
+  this memory run.
+* The private Python service now answers a refused request with a clean 422 that names the field
+  and reason only. Previously a non-finite amount produced HTTP 500 and an oversized history was
+  echoed back in full.
 
 ## Database migration, backup and restore
 

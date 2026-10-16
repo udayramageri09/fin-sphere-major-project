@@ -12,7 +12,9 @@ export function validHolding(body, today = new Date().toISOString().slice(0,10))
   if (typeof body.name !== 'string' || !body.name.trim() || body.name.length > 100 || /[\p{Cc}\p{Cf}]/u.test(body.name) || !ASSET_CLASSES.includes(body.assetClass)) return false;
   if (![body.investedPaise,body.currentPaise].every(n => Number.isSafeInteger(n) && n >= 0 && n <= 1e12)) return false;
   const d = body.valuedOn;
-  return typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d) && d >= '1900-01-01' && d <= today && Number.isFinite(Date.parse(d)) && new Date(d).toISOString().slice(0,10) === d;
+  // One day of tolerance past the UTC date: a user east of UTC (IST is +5:30) is already on "tomorrow" in UTC for part of their day.
+  const latest = new Date(Date.parse(today) + 86400000).toISOString().slice(0,10);
+  return typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d) && d >= '1900-01-01' && d <= latest &&Number.isFinite(Date.parse(d)) && new Date(d).toISOString().slice(0,10) === d;
 }
 export function holdingsRouter(authenticate, limiter) {
   const router = express.Router();

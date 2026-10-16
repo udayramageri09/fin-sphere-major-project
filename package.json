@@ -10,6 +10,7 @@
     "test:duplicate-review": "node tests/duplicateReviewUi.test.mjs",
     "test:analytics-ui": "node tests/spendingAnalyticsUi.test.mjs",
     "test:insights-css": "node tests/insightsRevealCss.test.mjs",
+    "test:static-headers": "node tests/staticHeaders.test.mjs",
     "test:analytics": "node --test tests/spendingAnalytics.test.mjs",
     "test:month-range": "node --test tests/monthRange.test.mjs",
     "test:priorities": "node --test tests/spendingPriorities.test.mjs",

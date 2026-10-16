@@ -12,6 +12,11 @@ services:
     ports:
       - '127.0.0.1:5000:5000'
     networks: [analytics, outbound]
+    # Bound the API process. Measured on Windows/Node 24 with synthetic data (docs/RELEASE_VERIFICATION.md, addendum): about 290 MB peak
+    # with the OCR queue saturated by 20-megapixel images, 94 MB for a 3,000-row analysis, back to about 77 MB when idle. 1 GiB leaves
+    # roughly 3x headroom; an oversized spreadsheet that exceeds it is killed and restarted instead of taking the host down.
+    # Container behaviour was NOT verified (Docker was unavailable): confirm the limit on the target host.
+    mem_limit: 1024m
     depends_on:
       analytics:
         condition: service_healthy

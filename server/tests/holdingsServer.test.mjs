@@ -54,11 +54,13 @@ try {
  const holding={name:'Test index fund',assetClass:'Mutual funds',investedPaise:1000050,currentPaise:1200075,valuedOn:new Date().toISOString().slice(0,10)};
  let r=await call(a,'POST','/holdings',holding);check(r.status===201,'created');const id=r.data.id;
  check(r.data.investedPaise===1000050&&r.data.currentPaise===1200075,'paise preserved');
+ check((await call(a,'POST','/holdings',{...holding,valuedOn:new Date(Date.now()+86400000).toISOString().slice(0,10)})).status===201,'a user east of UTC can value a holding on their local today');
+ await call(a,'DELETE',`/holdings/${(await call(a,'GET','/holdings')).data.find(h=>h.valuedOn!==holding.valuedOn)?.id}`);
  check((await call(b,'GET','/holdings')).data.length===0,'other account empty');
  check((await call(b,'PUT',`/holdings/${id}`,holding)).status===404,'cross-owner update rejected');
  check((await call(b,'DELETE',`/holdings/${id}`)).status===404,'cross-owner delete rejected');
  check((await call(a,'PUT','/holdings/not-an-id',holding)).status===404,'invalid id safely rejected');
- for(const field of [null,[],{}, {...holding,ownerId:3},{...holding,name:''},{...holding,name:'a\nb'},{...holding,name:'x'.repeat(101)},{...holding,assetClass:'Made up'},{...holding,currentPaise:-1},{...holding,currentPaise:1.1},{...holding,currentPaise:'500'},{...holding,investedPaise:1e12+1},{...holding,valuedOn:'2026-02-30'},{...holding,valuedOn:'2099-01-01'},{...holding,valuedOn:'0000-01-01'}]) {
+ for(const field of [null,[],{}, {...holding,ownerId:3},{...holding,name:''},{...holding,name:'a\nb'},{...holding,name:'x'.repeat(101)},{...holding,assetClass:'Made up'},{...holding,currentPaise:-1},{...holding,currentPaise:1.1},{...holding,currentPaise:'500'},{...holding,investedPaise:1e12+1},{...holding,valuedOn:'2026-02-30'},{...holding,valuedOn:'2099-01-01'},{...holding,valuedOn:new Date(Date.now()+2*86400000).toISOString().slice(0,10)},{...holding,valuedOn:'0000-01-01'}]) {
    check((await call(a,'POST','/holdings',field)).status===400,'bad create rejected');
    check((await call(a,'PUT',`/holdings/${id}`,field)).status===400,'bad update rejected');
  }

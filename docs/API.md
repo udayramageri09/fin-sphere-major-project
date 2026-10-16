@@ -69,7 +69,7 @@ Every route requires a current session and is limited to 120 requests/minute/use
 
 POST/PUT accept exactly name (1–100 characters, trimmed, no control characters), assetClass (Stocks, Mutual funds, Bonds,
 Deposits, Gold, Other), investedPaise and currentPaise (integer, 0–1,000,000,000,000), and valuedOn (valid YYYY-MM-DD,
-1900 onward, no later than the server's current UTC date). Unknown fields and invalid bodies return 400. Reads return the
+1900 onward, no later than one day after the server's current UTC date, so users east of UTC can use their local today). Unknown fields and invalid bodies return 400. Reads return the
 same fields plus id. Amounts are total position values, not unit prices. There is no market feed or historical valuation endpoint.
 
 ## PATCH /api/auth/profile (setup guide state)

@@ -1430,7 +1430,7 @@ app.post('/api/transactions/parse-statement', authenticate, parseLimiter, (req, 
 
       return res.status(400).json({ error: 'Could not parse transactions from Excel. Make sure it is a valid bank statement.' });
     } catch (excelErr) {
-      console.error('Error parsing Excel:', excelErr);
+      console.error('Error parsing Excel:', excelErr?.name ?? 'error');   // name only: never the error object (stack with paths, parser text)
       return res.status(500).json({ error: 'Failed to parse Excel statement.' });
     }
   }
@@ -1440,7 +1440,7 @@ app.post('/api/transactions/parse-statement', authenticate, parseLimiter, (req, 
     try {
       statementText = req.file.buffer.toString('utf8');
     } catch (err) {
-      console.error('Error reading text file from buffer:', err);
+      console.error('Error reading text file from buffer:', err?.name ?? 'error');
       return res.status(500).json({ error: 'Failed to read statement file.' });
     }
   } else if (req.body.text) {
@@ -1587,7 +1587,7 @@ Return only the valid JSON array, like: [{"title": "Salary", "amount": 50000, "d
 
     res.status(400).json({ error: 'Could not parse any transactions from the provided statement. Check the format.' });
   } catch (err) {
-    console.error('Error parsing file locally:', err);
+    console.error('Error parsing file locally:', err?.name ?? 'error');
     res.status(500).json({ error: 'Failed parsing bank statement' });
   }
 });
