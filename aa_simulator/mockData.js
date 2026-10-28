@@ -11,13 +11,6 @@ const accountSeeds = [
   ['Zerodha / Mutual Funds', 'MUTUAL-FUND', 'MF-4201', 218750.35]
 ];
 
-export const DEMO_APPS = [
-  { id: 'gpay', name: 'Google Pay', handle: 'demo@okaxis', accent: 'G' },
-  { id: 'phonepe', name: 'PhonePe', handle: 'demo@ybl', accent: 'P' },
-  { id: 'paytm', name: 'Paytm', handle: 'demo@paytm', accent: '₹' },
-  { id: 'bhim', name: 'BHIM', handle: 'demo@upi', accent: 'B' }
-];
-
 const descriptions = [
   'Salary Credit', 'Grocery Store', 'Electricity Bill', 'Restaurant',
   'Mutual Fund SIP', 'Online Shopping', 'Rent Transfer', 'Fuel Station',
@@ -37,22 +30,28 @@ export function createAccounts() {
   }));
 }
 
+// Relative to "now" (never a hardcoded calendar date) so the generated history is always
+// in the past, however long after this was written the simulator happens to be run.
+function ymdDaysAgo(daysAgo) {
+  return new Date(Date.now() - daysAgo * 86400000).toISOString().slice(0, 10);
+}
+
 export function createTransactions(accounts) {
   const transactions = [];
   let sequence = 1;
   accounts.forEach((account, accountIndex) => {
     const base = account.balance;
     const rows = [
-      { amount: Math.round(Math.max(500, base * 0.12)), type: 'CREDIT', description: 'Salary Credit', category: 'INCOME' },
-      { amount: 850 + accountIndex * 75, type: 'DEBIT', description: descriptions[(accountIndex + 1) % descriptions.length], category: 'EXPENSE' },
-      { amount: 1250 + accountIndex * 110, type: 'DEBIT', description: descriptions[(accountIndex + 3) % descriptions.length], category: 'EXPENSE' },
-      { amount: 500 + accountIndex * 50, type: 'DEBIT', description: descriptions[(accountIndex + 5) % descriptions.length], category: 'EXPENSE' }
+      { amount: Math.round(Math.max(500, base * 0.12)), type: 'CREDIT', description: 'Salary Credit', category: 'INCOME', daysAgo: 28 },
+      { amount: 850 + accountIndex * 75, type: 'DEBIT', description: descriptions[(accountIndex + 1) % descriptions.length], category: 'EXPENSE', daysAgo: 23 },
+      { amount: 1250 + accountIndex * 110, type: 'DEBIT', description: descriptions[(accountIndex + 3) % descriptions.length], category: 'EXPENSE', daysAgo: 18 },
+      { amount: 500 + accountIndex * 50, type: 'DEBIT', description: descriptions[(accountIndex + 5) % descriptions.length], category: 'EXPENSE', daysAgo: 13 }
     ];
-    rows.forEach((row, rowIndex) => {
+    rows.forEach((row) => {
       transactions.push({
         transactionId: `AA-TX-${String(sequence++).padStart(4, '0')}`,
         accountId: account.accountId,
-        date: `2026-10-${String(2 + rowIndex * 5).padStart(2, '0')}`,
+        date: ymdDaysAgo(row.daysAgo),
         amount: row.amount,
         type: row.type,
         description: row.description,
@@ -82,24 +81,6 @@ export function maskPan(pan) {
   return `${'*'.repeat(Math.max(0, trimmed.length - 3))}${visible}`;
 }
 
-export function createUpiTransactions() {
-  const apps = DEMO_APPS;
-  const merchants = ['Swiggy', 'Amazon', 'Uber', 'Bharat Petroleum', 'BookMyShow', 'BigBasket', 'Electricity Board', 'College Canteen'];
-  return Array.from({ length: 24 }, (_, index) => {
-    const app = apps[index % apps.length];
-    const amount = [349, 799, 220, 1450, 299, 560, 1825, 120][index % 8];
-    const direction = index % 7 === 0 ? 'CREDIT' : 'DEBIT';
-    return {
-      transactionId: `UPI-TX-${String(index + 1).padStart(4, '0')}`,
-      appId: app.id,
-      appName: app.name,
-      upiId: app.handle,
-      date: `2026-10-${String((index % 20) + 1).padStart(2, '0')}`,
-      amount,
-      direction,
-      merchant: direction === 'CREDIT' ? 'Demo Refund' : merchants[index % merchants.length],
-      status: 'SUCCESS',
-      source: 'UPI_SIMULATOR'
-    };
-  });
-}
+// Note: UPI simulation (apps, connections, transactions) lives in server/upiSimulator.js, not
+// here. That keeps the one authenticated FinSphere API as the only thing the frontend ever talks
+// to for UPI, with no second unauthenticated network hop - see docs/AA_SIMULATOR.md.

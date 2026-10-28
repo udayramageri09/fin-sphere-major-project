@@ -167,7 +167,7 @@ app.post('/v1/fi-requests', (req, res) => {
 app.get('/v1/fi-requests/:fiRequestId/status', (req, res) => {
   const request = state.fiRequests.get(req.params.fiRequestId);
   if (!request) return res.status(404).json({ error: 'FI request not found' });
-  res.json({ fiRequestId: request.fiRequestId, status: request.status });
+  res.json({ fiRequestId: request.fiRequestId, aaId: request.aaId, status: request.status });
 });
 
 app.get('/v1/fi-requests/:fiRequestId/data', (req, res) => {
