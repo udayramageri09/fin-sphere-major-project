@@ -40,6 +40,9 @@ export function aaRouter(authenticate, { createTransactionFor, aaProvider, upiSi
   // POST .../connect is idempotent (repeat calls never duplicate transactions). Keyed by
   // `${userId}:${fiRequestId}`. Lost on a server restart, same as the rest of this simulator's state.
   const connectedFiRequests = new Set();
+  // How many accounts each connected FI request covered, for the "N accounts connected" summary
+  // the Financial Connections page shows without the caller needing to know any FI-request id.
+  const connectedAccountCounts = new Map();
 
   // ── PAN linking (simulated) ─────────────────────────────────────────────────────────────────
   router.post('/pan/verify', async (req, res) => {
@@ -169,6 +172,7 @@ export function aaRouter(authenticate, { createTransactionFor, aaProvider, upiSi
         if (outcome.ok) added++;
       }
       connectedFiRequests.add(key);
+      connectedAccountCounts.set(key, data.accounts.length);
       res.json({ connected: true, alreadyConnected: false, transactionsAdded: added });
     } catch (err) { sendProviderError(res, err, 'Could not connect this financial data'); }
   });
@@ -182,15 +186,20 @@ export function aaRouter(authenticate, { createTransactionFor, aaProvider, upiSi
       if (pan.panStatus === 'VERIFIED') {
         accountsDiscovered = (await aaProvider.discoverAccounts(aaId)).accounts.length;
       }
+      let connectedRequests = 0;
       let connectedAccounts = 0;
       for (const key of connectedFiRequests) {
-        if (key.startsWith(`${req.user.id}:`)) connectedAccounts += 1;
+        if (key.startsWith(`${req.user.id}:`)) {
+          connectedRequests += 1;
+          connectedAccounts += connectedAccountCounts.get(key) ?? 0;
+        }
       }
       res.json({
         panVerified: pan.panStatus === 'VERIFIED',
         maskedPan: pan.maskedPan,
         accountsDiscovered,
-        financialDataConnected: connectedAccounts > 0,
+        financialDataConnected: connectedRequests > 0,
+        connectedAccounts,
         upiConnectedApps: upiSimulator.listApps(req.user.id).filter((a) => a.connected).length
       });
     } catch (err) { sendProviderError(res, err, 'Could not load connection status'); }

@@ -30,7 +30,7 @@ const UPI_APPS = [
   { id: 'gpay', name: 'Google Pay', handle: 'demo@okaxis' }, { id: 'phonepe', name: 'PhonePe', handle: 'demo@ybl' },
   { id: 'paytm', name: 'Paytm', handle: 'demo@paytm' }, { id: 'bhim', name: 'BHIM', handle: 'demo@upi' }
 ];
-const state = { panVerified: false, consents: new Map(), fiRequests: new Map(), connected: false, upiConnected: new Set(), upiSynced: new Set(), calls: [] };
+const state = { panVerified: false, consents: new Map(), fiRequests: new Map(), connected: false, connectedAccounts: 0, upiConnected: new Set(), upiSynced: new Set(), calls: [] };
 const upiTx = (appId) => Array.from({ length: 6 }, (_, i) => ({ transactionId: `${appId}-${i}`, appId, appName: UPI_APPS.find((a) => a.id === appId).name, upiId: 'demo@x', date: '2026-10-01', amount: 100 + i, direction: i === 0 ? 'CREDIT' : 'DEBIT', merchant: 'Demo Merchant', status: 'SUCCESS', source: 'UPI_SIMULATOR' }));
 
 globalThis.fetch = async (url, opts = {}) => {
@@ -60,11 +60,12 @@ globalThis.fetch = async (url, opts = {}) => {
   }
   if (method === 'POST' && /^\/aa\/fi-requests\/.+\/connect$/.test(path)) {
     const already = state.connected;
+    if (!already) state.connectedAccounts = state.consents.get('consent-1').accountIds.length;
     state.connected = true;
     return json(200, { connected: true, alreadyConnected: already, transactionsAdded: already ? 0 : 16 });
   }
   if (method === 'GET' && path === '/aa/status') {
-    return json(200, { panVerified: state.panVerified, maskedPan: state.panVerified ? '*********001' : null, accountsDiscovered: state.panVerified ? 10 : 0, financialDataConnected: state.connected, upiConnectedApps: state.upiConnected.size });
+    return json(200, { panVerified: state.panVerified, maskedPan: state.panVerified ? '*********001' : null, accountsDiscovered: state.panVerified ? 10 : 0, financialDataConnected: state.connected, connectedAccounts: state.connectedAccounts, upiConnectedApps: state.upiConnected.size });
   }
   if (method === 'GET' && path === '/upi/apps') return json(200, { apps: UPI_APPS.map((a) => ({ ...a, connected: state.upiConnected.has(a.id) })) });
   if (method === 'POST' && /^\/upi\/apps\/.+\/connect$/.test(path)) { const id = path.split('/')[3]; state.upiConnected.add(id); return json(200, { ...UPI_APPS.find((a) => a.id === id), connected: true }); }
@@ -99,11 +100,16 @@ try {
   await flush();
 
   check(container.textContent.includes('Financial Connections'), 'page renders its title');
-  check(container.textContent.includes('Demo / Synthetic Data'), 'the synthetic-data disclosure is always visible');
-  check(container.textContent.includes('0 accounts discovered'), 'overview starts with zero accounts discovered');
+  check(container.textContent.includes('Connect your finances'), 'the simplified landing copy is shown');
+  check(container.textContent.includes('Demo environment') && container.textContent.includes('Synthetic financial data'), 'the short, unobtrusive synthetic-data disclosure is always visible');
+  check(!container.textContent.includes('ReBIT'), 'implementation terminology is not shown prominently on the normal page');
+  check(container.textContent.includes('Bank Accounts') && container.textContent.includes('UPI'), 'the two plain connection cards are shown');
+  check([...container.querySelectorAll('h3')].filter((h) => h.textContent === 'Bank Accounts' || h.textContent === 'UPI').length === 2, 'Bank Accounts and UPI are each a plain card title');
+  const cardText = () => container.querySelector('.grid').textContent;
+  check(cardText().includes('Not connected yet'), 'both cards start as not connected, with no AA/UPI lifecycle terminology on the landing page');
 
   // ── Account Aggregator flow ──────────────────────────────────────────────
-  await click('Start Connection');
+  await click('Manage accounts');
   check(container.textContent.includes('Connect Financial Accounts'), 'AA panel opens');
   await act(async () => {
     const panInput = container.querySelector('#aa-pan');
@@ -136,7 +142,7 @@ try {
   await click('Done');
   check(!container.textContent.includes('Connect Financial Accounts'), 'closing the AA panel hides it');
   await flush();
-  check(container.textContent.includes('Financial data connected'), 'the overview now reflects a connected AA state');
+  check(cardText().includes('2 connected'), 'the Bank Accounts card plainly shows the connected count, with no AA terminology');
 
   // ── UPI flow ───────────────────────────────────────────────────────────────
   await click('Manage UPI');
@@ -153,6 +159,7 @@ try {
   await click('Synchronize');
   await flush();
   check(container.textContent.includes('Synchronized 6 UPI transaction'), 'sync reports how many transactions were added');
+  check(cardText().includes('1 app connected'), 'the UPI card plainly shows the connected app count, with no UPI lifecycle terminology');
 
   console.log(`Financial Connections UI: ${checks} checks passed`);
 } finally {

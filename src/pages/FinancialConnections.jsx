@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  Info, Landmark, Smartphone, ShieldCheck, CheckCircle2, XCircle, AlertCircle, Loader2,
+  Landmark, Smartphone, ShieldCheck, CheckCircle2, AlertCircle, Loader2,
   ChevronRight, ChevronLeft, X, Link2, Unlink
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
@@ -31,6 +31,25 @@ function StepDots({ step, steps }) {
       {steps.map((s, i) => (
         <span key={s} className={`h-1.5 rounded-full transition-all ${i <= index ? 'bg-zinc-900 w-6' : 'bg-zinc-200 w-3'}`} />
       ))}
+    </div>
+  );
+}
+
+// A plain settings-style summary card. No AA/UPI lifecycle terminology here by design - that
+// detail lives inside the connection flow it opens, where it actually helps the user.
+function ConnectionCard({ icon: Icon, title, loading, summary, buttonLabel, onManage }) {
+  return (
+    <div className="glass-panel p-6 flex flex-col gap-4 min-w-0">
+      <div className="flex items-center gap-3">
+        <div className="p-2 rounded-lg bg-zinc-100 text-zinc-700 shrink-0"><Icon size={22} /></div>
+        <div className="min-w-0">
+          <h3 className="text-base font-semibold text-zinc-900">{title}</h3>
+          <p className="text-sm text-zinc-500">{loading ? 'Loading…' : summary}</p>
+        </div>
+      </div>
+      <button type="button" onClick={onManage} className={`${secondaryBtn} self-start`}>
+        {buttonLabel} <ChevronRight size={16} />
+      </button>
     </div>
   );
 }
@@ -213,13 +232,8 @@ function FinancialConnections() {
   return (
     <div className="animate-fade-in">
       <h2 style={{ fontSize: '2rem' }}>Financial Connections</h2>
-      <p className="text-sm text-zinc-500 mt-1 mb-4 max-w-2xl">
-        Connect synthetic bank accounts and UPI apps using FinSphere's local Account Aggregator development simulator.
-      </p>
-      <div className="glass-panel p-3 mb-6 flex items-start gap-2 text-xs text-zinc-600 max-w-2xl">
-        <Info size={14} className="mt-0.5 shrink-0" />
-        <span><strong className="text-zinc-800">Demo / Synthetic Data.</strong> This is a ReBIT-inspired local Account Aggregator development simulator. It is not a certified Account Aggregator, a real bank connection, or a real UPI integration.</span>
-      </div>
+      <p className="text-sm text-zinc-500 mt-1 mb-1 max-w-2xl">Connect your finances</p>
+      <p className="text-sm text-zinc-500 mb-4 max-w-2xl">Bring your accounts and UPI activity into FinSphere.</p>
 
       {statusError && (
         <div className="mb-6 max-w-2xl flex flex-col items-start gap-2">
@@ -228,66 +242,26 @@ function FinancialConnections() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-        {/* Account Aggregator card */}
-        <div className="glass-panel p-6 flex flex-col gap-4 min-w-0">
-          <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-zinc-100 text-zinc-700 shrink-0"><Landmark size={22} /></div>
-            <h3 className="text-lg font-semibold text-zinc-900">Account Aggregator</h3>
-          </div>
-          {statusLoading ? (
-            <p className="text-sm text-zinc-500">Loading...</p>
-          ) : (
-            <div className="text-sm text-zinc-600 flex flex-col gap-1">
-              <span>{status?.accountsDiscovered ?? 0} account{status?.accountsDiscovered === 1 ? '' : 's'} discovered</span>
-              <span>{status?.financialDataConnected ? 'Financial data connected' : 'No accounts connected yet'}</span>
-              {status?.maskedPan && <span className="text-zinc-400">PAN {status.maskedPan}</span>}
-            </div>
-          )}
-          <button type="button" onClick={openAa} className={`${primaryBtn} self-start`}>
-            {status?.financialDataConnected ? 'Manage Accounts' : 'Start Connection'} <ChevronRight size={16} />
-          </button>
-        </div>
-
-        {/* UPI card */}
-        <div className="glass-panel p-6 flex flex-col gap-4 min-w-0">
-          <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-zinc-100 text-zinc-700 shrink-0"><Smartphone size={22} /></div>
-            <h3 className="text-lg font-semibold text-zinc-900">UPI Apps</h3>
-          </div>
-          {statusLoading ? (
-            <p className="text-sm text-zinc-500">Loading...</p>
-          ) : (
-            <div className="text-sm text-zinc-600 flex flex-col gap-1">
-              <span>{status?.upiConnectedApps ?? 0} of 4 apps connected</span>
-              <span className="text-zinc-400">Synthetic transactions only</span>
-            </div>
-          )}
-          <button type="button" onClick={openUpi} className={`${primaryBtn} self-start`}>
-            Manage UPI <ChevronRight size={16} />
-          </button>
-        </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-4">
+        <ConnectionCard
+          icon={Landmark}
+          title="Bank Accounts"
+          loading={statusLoading}
+          summary={status?.connectedAccounts > 0 ? `${status.connectedAccounts} connected` : 'Not connected yet'}
+          buttonLabel="Manage accounts"
+          onManage={openAa}
+        />
+        <ConnectionCard
+          icon={Smartphone}
+          title="UPI"
+          loading={statusLoading}
+          summary={status?.upiConnectedApps > 0 ? `${status.upiConnectedApps} app${status.upiConnectedApps === 1 ? '' : 's'} connected` : 'Not connected yet'}
+          buttonLabel="Manage UPI"
+          onManage={openUpi}
+        />
       </div>
 
-      {/* Connection status checklist */}
-      {!statusLoading && status && (
-        <div className="glass-panel p-6 mb-6 max-w-2xl">
-          <h3 className="text-sm font-semibold text-zinc-900 mb-3">Connection status</h3>
-          <ul className="flex flex-col gap-2 text-sm">
-            {[
-              ['PAN verified', status.panVerified],
-              ['Accounts discovered', status.accountsDiscovered > 0],
-              ['Financial data connected', status.financialDataConnected],
-              ['UPI synchronized', status.upiConnectedApps > 0]
-            ].map(([label, done]) => (
-              <li key={label} className="flex items-center gap-2">
-                {done ? <CheckCircle2 size={16} className="text-zinc-900 shrink-0" /> : <XCircle size={16} className="text-zinc-300 shrink-0" />}
-                <span className={done ? 'text-zinc-900' : 'text-zinc-400'}>{label}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      <p className="text-xs text-zinc-400 mb-6">Demo environment · Synthetic financial data</p>
 
       {/* ── AA flow panel ────────────────────────────────────────────────── */}
       {aaOpen && (
