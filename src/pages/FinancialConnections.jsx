@@ -45,14 +45,16 @@ function FinancialConnections() {
   const [statusLoading, setStatusLoading] = useState(true);
   const [statusError, setStatusError] = useState('');
 
+  // Used by action handlers (never from an effect directly - see the mount effect below, which
+  // inlines its own fetch instead, following React's own guidance for data fetching in effects).
   const loadStatus = async () => {
-    setStatusLoading(true); setStatusError('');
     try {
       const data = await request('GET', '/aa/status');
-      if (mounted.current) setStatus(data);
+      if (mounted.current) { setStatus(data); setStatusError(''); }
     } catch (e) { if (mounted.current) setStatusError(e.message); }
     finally { if (mounted.current) setStatusLoading(false); }
   };
+  const retryStatus = () => { setStatusLoading(true); setStatusError(''); loadStatus(); };
 
   // All requests go through FinSphere's own authenticated API - never directly to the simulator.
   async function request(method, path, body) {
@@ -66,7 +68,18 @@ function FinancialConnections() {
     return data;
   }
 
-  useEffect(() => { loadStatus(); }, []);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await request('GET', '/aa/status');
+        if (!cancelled) { setStatus(data); setStatusError(''); }
+      } catch (e) { if (!cancelled) setStatusError(e.message); }
+      finally { if (!cancelled) setStatusLoading(false); }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `request` is redefined every render but only closes over stable (hook-provided) references; adding it here would re-run this effect on every render for no benefit.
+  }, []);
 
   // ── Account Aggregator flow ────────────────────────────────────────────
   const AA_STEPS = ['pan', 'accounts', 'consent', 'processing', 'connected'];
@@ -208,7 +221,12 @@ function FinancialConnections() {
         <span><strong className="text-zinc-800">Demo / Synthetic Data.</strong> This is a ReBIT-inspired local Account Aggregator development simulator. It is not a certified Account Aggregator, a real bank connection, or a real UPI integration.</span>
       </div>
 
-      {statusError && <div className="mb-6 max-w-2xl"><ErrorBox message={statusError} /></div>}
+      {statusError && (
+        <div className="mb-6 max-w-2xl flex flex-col items-start gap-2">
+          <ErrorBox message={statusError} />
+          <button type="button" onClick={retryStatus} className={secondaryBtn}>Retry</button>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
         {/* Account Aggregator card */}
@@ -377,6 +395,7 @@ function FinancialConnections() {
                   ? 'This financial data was already synchronized into your FinSphere transactions.'
                   : `${connectResult.transactionsAdded} synthetic transactions were added to your FinSphere transactions.`}
               </p>
+              {fiRequest && <p className="text-xs text-zinc-400">FI Request ID {fiRequest.fiRequestId}</p>}
               <button type="button" onClick={closeAa} className={`${secondaryBtn} self-start`}>Done</button>
             </div>
           )}

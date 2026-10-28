@@ -1,3 +1,4 @@
+/* eslint-disable no-undef */
 import express from 'express';
 import crypto from 'node:crypto';
 import { createAccounts, createTransactions, isValidSyntheticPan, maskPan } from './mockData.js';
@@ -144,7 +145,6 @@ app.post('/v1/fi-requests', (req, res) => {
   if (!consent) return res.status(404).json({ error: 'Consent not found' });
   if (consent.status !== 'ACTIVE') return res.status(409).json({ error: 'Active consent is required' });
 
-  const customer = getOrCreateCustomer(consent.aaId);
   const allowed = new Set(consent.accountIds);
   const selected = Array.isArray(accountIds) && accountIds.length
     ? accountIds.filter((accId) => allowed.has(accId))

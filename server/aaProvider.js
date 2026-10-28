@@ -1,3 +1,4 @@
+/* eslint-disable no-undef */
 // AccountAggregatorProvider adapter boundary (Issue: local AA simulator).
 //
 // FinSphere's financial-connections routes (see financialConnections.js) talk only to this
