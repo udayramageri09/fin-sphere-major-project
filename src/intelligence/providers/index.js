@@ -28,3 +28,4 @@ export function saveStoredProvider(userId, provider) {
 }
 
 export { createGroqProvider } from './groqProvider.js';
+export { createWebLLMProvider, createBrowserWebLLMEngine, isWebGpuAvailable, buildLocalMessages, LOCAL_MODEL, WEBLLM_STATUS } from './webllmProvider.js';
