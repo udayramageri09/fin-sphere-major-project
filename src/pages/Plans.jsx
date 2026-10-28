@@ -3,6 +3,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import './Plans.css';
 import AssistantReply from '../components/AssistantReply';
 import { useFinance } from '../context/FinanceContext';
+import { useAuth } from '../context/AuthContext';
 import { useAvatarActions } from '../hooks/useAvatarActions';
 import { useGuardedFetch } from '../hooks/useGuardedFetch';
 import { ACCOUNT_CHANGED_MESSAGE } from '../utils/accountGuard';
@@ -12,7 +13,12 @@ import CurrentState from '../components/plans/CurrentState';
 import TopFindings from '../components/plans/TopFindings';
 import ActionList from '../components/plans/ActionList';
 import AnalysisDetails from '../components/plans/AnalysisDetails';
-import { Compass, Send, Mic, MicOff, RefreshCw, AlertTriangle } from 'lucide-react';
+import { Compass, Send, Mic, MicOff, RefreshCw, AlertTriangle, Zap, Lock } from 'lucide-react';
+import {
+  PROVIDERS, DEFAULT_PROVIDER, loadStoredProvider, saveStoredProvider,
+  createGroqProvider, createWebLLMProvider, createBrowserWebLLMEngine, LOCAL_MODEL, WEBLLM_STATUS
+} from '../intelligence/providers/index.js';
+import { buildIntelligenceContext } from '../intelligence/intelligenceContext.js';
 
 const API = import.meta.env.VITE_API_URL ?? 'http://localhost:5000/api';
 
@@ -23,8 +29,52 @@ const GREETING = 'Ask me about your results or what to focus on next.';
 
 export default function Plans() {
   const { transactions } = useFinance();
+  const { user } = useAuth();
   const { performNavigation } = useAvatarActions();
   const guardedFetch = useGuardedFetch();   // names the account this tab shows; a refusal re-checks the session
+
+  // ── Advisor provider (Fast = Groq, Local = on-device WebLLM) ──────────────────────────────
+  // Restored from this user's saved preference on mount, but NEVER auto-initialized: Local only
+  // ever loads a model when the user explicitly selects it (here, or again after a refresh).
+  const [provider, setProvider] = useState(DEFAULT_PROVIDER);
+  const [localStatus, setLocalStatus] = useState(WEBLLM_STATUS.IDLE);
+  const [localProgress, setLocalProgress] = useState(null);
+  const [localError, setLocalError] = useState(null);
+  const groqProviderRef = useRef(null);
+  if (!groqProviderRef.current) groqProviderRef.current = createGroqProvider({ guardedFetch, apiUrl: API });
+  const webllmRef = useRef(null);
+
+  useEffect(() => {
+    if (user?.id != null) setProvider(loadStoredProvider(user.id));
+  }, [user?.id]);
+
+  // The worker-backed engine, once created, is kept alive for the life of this page (so
+  // switching between Fast and Local never re-downloads the model); it is only ever released
+  // when the page itself goes away.
+  useEffect(() => () => { webllmRef.current?.terminate(); }, []);
+
+  const selectFast = () => {
+    setProvider(PROVIDERS.GROQ);
+    if (user?.id != null) saveStoredProvider(user.id, PROVIDERS.GROQ);
+  };
+
+  const selectLocal = async () => {
+    setProvider(PROVIDERS.LOCAL);
+    if (user?.id != null) saveStoredProvider(user.id, PROVIDERS.LOCAL);
+    if (!webllmRef.current) webllmRef.current = createWebLLMProvider({ createEngine: createBrowserWebLLMEngine, modelId: LOCAL_MODEL });
+    const local = webllmRef.current;
+    if (local.status === WEBLLM_STATUS.READY) { setLocalStatus(WEBLLM_STATUS.READY); return; }
+    setLocalError(null);
+    setLocalProgress(null);
+    setLocalStatus(WEBLLM_STATUS.LOADING);
+    try {
+      await local.init((report) => setLocalProgress(report));
+      setLocalStatus(WEBLLM_STATUS.READY);
+    } catch (err) {
+      setLocalStatus(WEBLLM_STATUS.ERROR);
+      setLocalError(err);
+    }
+  };
 
   const [months, setMonths] = useState(3);
   const analysisRequest = useRef(null);
@@ -51,26 +101,29 @@ export default function Plans() {
     if (chatBodyRef.current) chatBodyRef.current.scrollTop = chatBodyRef.current.scrollHeight;
   }, [messages, isThinking]);
 
-  // The advisor narrates the SERVER's snapshot of the last analysis: only the conversation is sent.
+  // The advisor narrates FinSphere's own deterministic analysis, never the model's own numbers.
+  // Fast (Groq) narrates the SERVER's stored snapshot of the last analysis - only the
+  // conversation is sent, exactly as before. Local (WebLLM) never calls /plan-chat or sends
+  // anything to Groq: it runs entirely on-device, given a compact copy of the same analysis.
   const sendToBot = async (text) => {
     if (!text.trim() || isThinking) return;
     setMessages((prev) => [...prev, { id: Date.now(), sender: 'user', text }]);
     setChatInput('');
+    if (provider === PROVIDERS.LOCAL && localStatus !== WEBLLM_STATUS.READY) {
+      setMessages((prev) => [...prev, { id: Date.now() + 1, sender: 'bot', text: "Local AI isn't ready yet. Select Local again to load it, or switch to Fast." }]);
+      return;
+    }
     setIsThinking(true);
     try {
-      // Bounded to the server's chat contract (last 12 user/assistant turns, each at most 2000 characters).
+      // Bounded to the same contract for both providers (last 12 user/assistant turns, each at most 2000 characters).
       const history = buildChatHistory(
         messages.map((m) => ({ role: m.sender === 'bot' ? 'assistant' : 'user', content: m.text })),
         text
       );
-      const res = await guardedFetch(`${API}/plan-chat`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: history })
-      });
-      const body = await res.json().catch(() => ({}));
-      const reply = res.ok && typeof body.reply === 'string' ? body.reply : "I couldn't answer that just now.";
+      const activeProvider = provider === PROVIDERS.LOCAL ? webllmRef.current : groqProviderRef.current;
+      // Only built (and only ever sent) for Local - Groq's provider ignores this argument entirely.
+      const context = provider === PROVIDERS.LOCAL ? buildIntelligenceContext(data, { forecastPeriodMonths: months }) : null;
+      const { text: reply } = await activeProvider.generate(history, context);
       setMessages((prev) => [...prev, { id: Date.now() + 1, sender: 'bot', text: reply }]);
       window.dispatchEvent(new CustomEvent('bot-speak', { detail: { message: reply.slice(0, 80) + (reply.length > 80 ? '…' : '') } }));
     } catch (err) {
@@ -229,6 +282,41 @@ export default function Plans() {
                 <h2 id="advisor-heading" className="text-base font-semibold">Advisor</h2>
                 <small>Answers based on your latest analysis.</small>
               </div>
+            </div>
+
+            <div className="ai-provider-selector" role="group" aria-label="AI processing">
+              <span className="ai-provider-label">AI processing</span>
+              <div className="ai-provider-buttons">
+                <button type="button" className="ai-provider-btn" aria-pressed={provider === PROVIDERS.GROQ} onClick={selectFast}>
+                  <Zap size={13} /> Fast
+                </button>
+                <button type="button" className="ai-provider-btn" aria-pressed={provider === PROVIDERS.LOCAL} onClick={selectLocal}>
+                  <Lock size={13} /> Local
+                </button>
+              </div>
+              <p className="ai-provider-subtext">
+                {provider === PROVIDERS.GROQ ? 'Groq · faster responses' : 'On-device AI · private processing'}
+              </p>
+              {provider === PROVIDERS.LOCAL && localStatus === WEBLLM_STATUS.LOADING && (
+                <p className="ai-provider-status" role="status">
+                  Loading local model… {localProgress?.progress != null ? `${Math.round(localProgress.progress * 100)}%` : ''}
+                </p>
+              )}
+              {provider === PROVIDERS.LOCAL && localStatus === WEBLLM_STATUS.READY && (
+                <p className="ai-provider-status">Local AI ready. AI responses are generated on your device using WebLLM.</p>
+              )}
+              {provider === PROVIDERS.LOCAL && localStatus === WEBLLM_STATUS.ERROR && localError?.code === 'WEBGPU_UNAVAILABLE' && (
+                <div className="ai-provider-error" role="alert">
+                  <p>Local AI isn't available on this device.</p>
+                  <button type="button" onClick={selectFast}>Use Fast AI</button>
+                </div>
+              )}
+              {provider === PROVIDERS.LOCAL && localStatus === WEBLLM_STATUS.ERROR && localError?.code !== 'WEBGPU_UNAVAILABLE' && (
+                <div className="ai-provider-error" role="alert">
+                  <p>Local AI could not be loaded.</p>
+                  <button type="button" onClick={selectLocal}>Try again</button>
+                </div>
+              )}
             </div>
           </div>
 
