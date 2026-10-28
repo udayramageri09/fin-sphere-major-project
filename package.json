@@ -27,6 +27,7 @@
     "test:assistant-reply": "node tests/assistantReplyUi.test.mjs",
     "test:financial-connections-ui": "node tests/financialConnectionsUi.test.mjs",
     "test:intelligence-providers": "node --test tests/intelligenceProviders.test.mjs",
+    "test:provider-selector": "node tests/intelligenceProviderSelectorUi.test.mjs",
     "dev": "vite",
     "server": "node server/server.js",
     "build": "vite build",
