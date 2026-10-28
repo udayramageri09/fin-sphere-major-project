@@ -24,6 +24,7 @@
     "test:forecast-chart": "node tests/forecastChartUi.test.mjs",
     "test:settings": "node tests/settingsProfileUi.test.mjs",
     "test:portfolio": "node tests/profilePortfolioUi.test.mjs",
+    "test:assistant-reply": "node tests/assistantReplyUi.test.mjs",
     "dev": "vite",
     "server": "node server/server.js",
     "build": "vite build",
@@ -38,7 +39,9 @@
     "test:analysis-startup": "node tests/analysisStartup.test.mjs",
     "test:faculty-demo": "node tests/facultyDemo.test.mjs",
     "dev:5173": "vite --host localhost --port 5173 --strictPort",
-    "dev:5174": "vite --host localhost --port 5174 --strictPort"
+    "dev:5174": "vite --host localhost --port 5174 --strictPort",
+    "test:all": "node scripts/run-all-tests.mjs",
+    "test": "npm run test:all"
   },
   "dependencies": {
     "framer-motion": "^13.1.0",
