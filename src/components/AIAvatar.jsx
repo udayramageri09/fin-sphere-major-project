@@ -323,12 +323,6 @@ function AIAvatar() {
     try {
       const answer = await sendAssistantMessage(history);
       reply = answer.reply;
-      if (!answer.action && answer.visualization?.rows?.length === 3) {
-        const figures = answer.visualization.rows;
-        spokenReply = `${answer.visualization.title}. ${figures.map(row => `${row.label}: ${Number(row.amount).toLocaleString('en-IN', { style: 'currency', currency: 'INR' })}`).join('. ')}. ${answer.visualization.provisional ? 'These totals include unclassified transactions and are provisional. ' : ''}The full answer is on your screen.`;
-        // Keep cancellation notices and other safety context verbatim when a proposal was open.
-        if (active) spokenReply = null;
-      }
       const next = actionFromServer(answer.action);
       setActive(next);                       // no action in the response means nothing is open on the server any more
       setMessages((prev) => [...prev, { id: nextId(), text: reply, sender: 'bot', visualization: answer.visualization }]);
