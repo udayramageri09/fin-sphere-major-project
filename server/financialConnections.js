@@ -25,7 +25,12 @@ function sendProviderError(res, err, fallbackMessage) {
   return res.status(500).json({ error: fallbackMessage });
 }
 
-export function financialConnectionsRouter(authenticate, { createTransactionFor, aaProvider, upiSimulator, limiter }) {
+// Mounted at /api/aa (a dedicated prefix, exactly like holdingsRouter is mounted at
+// /api/holdings - see server.js). router.use(authenticate) only ever sees requests already
+// narrowed to this prefix, so it can never intercept an unrelated /api/* route that happens not
+// to match anything here; an unmatched path under /api/aa/* still correctly falls through to
+// Express's normal 404, not a 401.
+export function aaRouter(authenticate, { createTransactionFor, aaProvider, upiSimulator, limiter }) {
   const router = express.Router();
   router.use(authenticate);
   if (limiter) router.use(limiter);
@@ -37,7 +42,7 @@ export function financialConnectionsRouter(authenticate, { createTransactionFor,
   const connectedFiRequests = new Set();
 
   // ── PAN linking (simulated) ─────────────────────────────────────────────────────────────────
-  router.post('/aa/pan/verify', async (req, res) => {
+  router.post('/pan/verify', async (req, res) => {
     const { pan } = req.body ?? {};
     if (typeof pan !== 'string') return res.status(400).json({ error: 'A PAN is required.' });
     try {
@@ -46,7 +51,7 @@ export function financialConnectionsRouter(authenticate, { createTransactionFor,
     } catch (err) { sendProviderError(res, err, 'Could not verify PAN'); }
   });
 
-  router.get('/aa/pan', async (req, res) => {
+  router.get('/pan', async (req, res) => {
     try {
       const result = await aaProvider.getPanStatus(aaIdFor(req.user.id));
       res.json({ panStatus: result.panStatus, maskedPan: result.maskedPan });
@@ -54,7 +59,7 @@ export function financialConnectionsRouter(authenticate, { createTransactionFor,
   });
 
   // ── Account discovery ───────────────────────────────────────────────────────────────────────
-  router.get('/aa/accounts', async (req, res) => {
+  router.get('/accounts', async (req, res) => {
     try {
       const result = await aaProvider.discoverAccounts(aaIdFor(req.user.id));
       res.json({ accounts: result.accounts.map(normalizeAaAccount) });
@@ -62,7 +67,7 @@ export function financialConnectionsRouter(authenticate, { createTransactionFor,
   });
 
   // ── Consent lifecycle ───────────────────────────────────────────────────────────────────────
-  router.post('/aa/consents', async (req, res) => {
+  router.post('/consents', async (req, res) => {
     const { accountIds, purpose } = req.body ?? {};
     if (accountIds !== undefined && (!Array.isArray(accountIds) || !accountIds.every((a) => typeof a === 'string'))) {
       return res.status(400).json({ error: 'accountIds must be an array of account id strings.' });
@@ -83,14 +88,14 @@ export function financialConnectionsRouter(authenticate, { createTransactionFor,
     return consent;
   }
 
-  router.get('/aa/consents/:id', async (req, res) => {
+  router.get('/consents/:id', async (req, res) => {
     try {
       const consent = await ownConsentOr404(req, res, req.params.id);
       if (consent) res.json(consent);
     } catch (err) { sendProviderError(res, err, 'Could not load consent'); }
   });
 
-  router.post('/aa/consents/:id/approve', async (req, res) => {
+  router.post('/consents/:id/approve', async (req, res) => {
     try {
       const consent = await ownConsentOr404(req, res, req.params.id);
       if (!consent) return;
@@ -98,7 +103,7 @@ export function financialConnectionsRouter(authenticate, { createTransactionFor,
     } catch (err) { sendProviderError(res, err, 'Could not approve consent'); }
   });
 
-  router.post('/aa/consents/:id/reject', async (req, res) => {
+  router.post('/consents/:id/reject', async (req, res) => {
     try {
       const consent = await ownConsentOr404(req, res, req.params.id);
       if (!consent) return;
@@ -107,7 +112,7 @@ export function financialConnectionsRouter(authenticate, { createTransactionFor,
   });
 
   // ── Financial Information request lifecycle ────────────────────────────────────────────────
-  router.post('/aa/fi-requests', async (req, res) => {
+  router.post('/fi-requests', async (req, res) => {
     const { consentId } = req.body ?? {};
     if (typeof consentId !== 'string') return res.status(400).json({ error: 'consentId is required.' });
     try {
@@ -124,7 +129,7 @@ export function financialConnectionsRouter(authenticate, { createTransactionFor,
     return data;
   }
 
-  router.get('/aa/fi-requests/:id/status', async (req, res) => {
+  router.get('/fi-requests/:id/status', async (req, res) => {
     try {
       const status = await aaProvider.getFiRequestStatus(req.params.id);
       if (status.aaId !== aaIdFor(req.user.id)) return res.status(404).json({ error: 'FI request not found' });
@@ -132,7 +137,7 @@ export function financialConnectionsRouter(authenticate, { createTransactionFor,
     } catch (err) { sendProviderError(res, err, 'Could not load financial information status'); }
   });
 
-  router.get('/aa/fi-requests/:id/data', async (req, res) => {
+  router.get('/fi-requests/:id/data', async (req, res) => {
     try {
       const data = await ownFiDataOr404(req, res, req.params.id);
       if (!data) return;
@@ -150,7 +155,7 @@ export function financialConnectionsRouter(authenticate, { createTransactionFor,
   // uses - so connected AA data goes through the same validation and ownership stamping as any
   // manually entered transaction, and shows up in the existing Transactions/Dashboard/analytics
   // with no parallel storage of its own. Idempotent: a repeat call never inserts twice.
-  router.post('/aa/fi-requests/:id/connect', async (req, res) => {
+  router.post('/fi-requests/:id/connect', async (req, res) => {
     try {
       const data = await ownFiDataOr404(req, res, req.params.id);
       if (!data) return;
@@ -169,7 +174,7 @@ export function financialConnectionsRouter(authenticate, { createTransactionFor,
   });
 
   // ── Overview for the "Financial Connections" page ──────────────────────────────────────────
-  router.get('/aa/status', async (req, res) => {
+  router.get('/status', async (req, res) => {
     const aaId = aaIdFor(req.user.id);
     try {
       const pan = await aaProvider.getPanStatus(aaId);
@@ -191,35 +196,44 @@ export function financialConnectionsRouter(authenticate, { createTransactionFor,
     } catch (err) { sendProviderError(res, err, 'Could not load connection status'); }
   });
 
-  // ── UPI simulator ───────────────────────────────────────────────────────────────────────────
-  // Synthetic development data only. Never calls a real Google Pay/PhonePe/Paytm/BHIM API.
-  router.get('/upi/apps', (req, res) => {
+  return router;
+}
+
+// Mounted at /api/upi (its own dedicated prefix, for the same reason aaRouter is mounted at
+// /api/aa rather than the shared /api). Synthetic development data only - never calls a real
+// Google Pay/PhonePe/Paytm/BHIM API.
+export function upiRouter(authenticate, { createTransactionFor, upiSimulator, limiter }) {
+  const router = express.Router();
+  router.use(authenticate);
+  if (limiter) router.use(limiter);
+
+  router.get('/apps', (req, res) => {
     res.json({ apps: upiSimulator.listApps(req.user.id) });
   });
 
-  router.post('/upi/apps/:id/connect', (req, res) => {
+  router.post('/apps/:id/connect', (req, res) => {
     const app = upiSimulator.connect(req.user.id, req.params.id);
     if (!app) return res.status(404).json({ error: 'Unknown UPI app' });
     res.json(app);
   });
 
-  router.post('/upi/apps/:id/disconnect', (req, res) => {
+  router.post('/apps/:id/disconnect', (req, res) => {
     const app = upiSimulator.disconnect(req.user.id, req.params.id);
     if (!app) return res.status(404).json({ error: 'Unknown UPI app' });
     res.json(app);
   });
 
-  router.get('/upi/transactions', (req, res) => {
+  router.get('/transactions', (req, res) => {
     res.json({ transactions: upiSimulator.transactions(req.user.id) });
   });
 
-  router.get('/upi/summary', (req, res) => {
+  router.get('/summary', (req, res) => {
     res.json(upiSimulator.summary(req.user.id));
   });
 
   // Normalizes every connected-but-not-yet-synced app's transactions into the real transactions
-  // table, reusing createTransactionFor exactly like the AA /connect route above. Idempotent per app.
-  router.post('/upi/sync', async (req, res) => {
+  // table, reusing createTransactionFor exactly like aaRouter's /fi-requests/:id/connect. Idempotent per app.
+  router.post('/sync', async (req, res) => {
     try {
       const apps = upiSimulator.listApps(req.user.id).filter((a) => a.connected && !upiSimulator.isSynced(req.user.id, a.id));
       let added = 0;

@@ -36,7 +36,7 @@ import { createSnapshotStore, sanitizeAnalysis } from './planSnapshot.js';
 import { createResetDelivery, createDevMailHandlers, createPasswordResetHandlers } from './passwordReset.js';
 import { createAaProvider } from './aaProvider.js';
 import { createUpiSimulator } from './upiSimulator.js';
-import { financialConnectionsRouter } from './financialConnections.js';
+import { aaRouter, upiRouter } from './financialConnections.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -2396,12 +2396,9 @@ Guidelines:
 // certified Account Aggregator or a real bank/UPI integration - see aa_simulator/README.md.
 const aaProvider = createAaProvider();
 const upiSimulator = createUpiSimulator();
-app.use('/api', financialConnectionsRouter(authenticate, {
-  createTransactionFor,
-  aaProvider,
-  upiSimulator,
-  limiter: perUserLimiter(120, 'financial connections')
-}));
+const financialConnectionsLimiter = perUserLimiter(120, 'financial connections');
+app.use('/api/aa', aaRouter(authenticate, { createTransactionFor, aaProvider, upiSimulator, limiter: financialConnectionsLimiter }));
+app.use('/api/upi', upiRouter(authenticate, { createTransactionFor, upiSimulator, limiter: financialConnectionsLimiter }));
 
 // Last-resort error handler: always JSON, never a stack trace, and nothing from the request body is logged.
 // (Without it Express answers body-parser and multer failures with an HTML page that includes the stack
