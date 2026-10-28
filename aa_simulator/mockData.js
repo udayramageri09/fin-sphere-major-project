@@ -64,6 +64,24 @@ export function createTransactions(accounts) {
   return transactions;
 }
 
+// A real-format PAN (ABCDE1234F) or the documented demo token (DEMO-PAN-001..999).
+// This simulator never contacts a real PAN registry; verification is purely synthetic.
+export const PAN_FORMAT = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
+export const DEMO_PAN_FORMAT = /^DEMO-PAN-\d{3}$/i;
+
+export function isValidSyntheticPan(value) {
+  if (typeof value !== 'string') return false;
+  const trimmed = value.trim().toUpperCase();
+  return PAN_FORMAT.test(trimmed) || DEMO_PAN_FORMAT.test(trimmed);
+}
+
+// Only the masked form is ever stored; the raw PAN exists only for the duration of this call.
+export function maskPan(pan) {
+  const trimmed = pan.trim().toUpperCase();
+  const visible = trimmed.slice(-3);
+  return `${'*'.repeat(Math.max(0, trimmed.length - 3))}${visible}`;
+}
+
 export function createUpiTransactions() {
   const apps = DEMO_APPS;
   const merchants = ['Swiggy', 'Amazon', 'Uber', 'Bharat Petroleum', 'BookMyShow', 'BigBasket', 'Electricity Board', 'College Canteen'];
