@@ -34,6 +34,9 @@ import { sanitizeProfileImage, ProfileImageError, AVATAR_LIMITS } from './profil
 import { MAX_IMPORT_ROWS, findDuplicates, buildPreview, reviewDigest, digestsEqual, parseConfirmRequest, planImport } from './importDuplicates.js';
 import { createSnapshotStore, sanitizeAnalysis } from './planSnapshot.js';
 import { createResetDelivery, createDevMailHandlers, createPasswordResetHandlers } from './passwordReset.js';
+import { createAaProvider } from './aaProvider.js';
+import { createUpiSimulator } from './upiSimulator.js';
+import { financialConnectionsRouter } from './financialConnections.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -2387,6 +2390,18 @@ Guidelines:
     if (!res.headersSent) res.status(500).json({ error: 'Could not answer right now' });
   }
 });
+
+// FinSphere Local Account Aggregator Development Simulator integration (PAN linking, synthetic
+// account discovery/consent/FI-request flow, and the separate UPI connection simulator). Not a
+// certified Account Aggregator or a real bank/UPI integration - see aa_simulator/README.md.
+const aaProvider = createAaProvider();
+const upiSimulator = createUpiSimulator();
+app.use('/api', financialConnectionsRouter(authenticate, {
+  createTransactionFor,
+  aaProvider,
+  upiSimulator,
+  limiter: perUserLimiter(120, 'financial connections')
+}));
 
 // Last-resort error handler: always JSON, never a stack trace, and nothing from the request body is logged.
 // (Without it Express answers body-parser and multer failures with an HTML page that includes the stack
