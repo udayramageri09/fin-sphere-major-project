@@ -73,7 +73,26 @@ export function useVoiceSession({ runTurn }) {
     if (!synth || !spoken) { done(); return; }
     stopSpeaking();
     const utterance = new window.SpeechSynthesisUtterance(spoken);
-    utterance.lang = 'en-IN';
+
+    const voices = synth.getVoices();
+
+    const preferredVoice =
+      voices.find((v) => v.name === 'Google US English') ||
+      voices.find((v) => v.name === 'Google UK English Female') ||
+      voices.find((v) => v.name === 'Microsoft Zira - English (United States)') ||
+      voices.find((v) => v.name === 'Microsoft Mark - English (United States)') ||
+      voices.find((v) => v.name === 'Microsoft David - English (United States)');
+
+    if (preferredVoice) {
+      utterance.voice = preferredVoice;
+      utterance.lang = preferredVoice.lang;
+    } else {
+      utterance.lang = 'en-US';
+    }
+
+    utterance.rate = 0.95;
+    utterance.pitch = 1;
+    utterance.volume = 1;
     const finish = () => {
       if (utteranceRef.current !== utterance) return;      // cancelled or superseded: do nothing
       utteranceRef.current = null;
