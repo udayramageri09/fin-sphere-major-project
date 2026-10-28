@@ -7,7 +7,9 @@ export function createGroqProvider({ guardedFetch, apiUrl }) {
   return {
     name: 'groq',
     status: 'ready',
-    async generate(messages, _context) {
+    // A second `context` argument may be passed (the uniform provider contract), but the server
+    // already narrates its own stored snapshot of the last analysis, so it is never read here.
+    async generate(messages) {
       const res = await guardedFetch(`${apiUrl}/plan-chat`, {
         method: 'POST',
         credentials: 'include',
