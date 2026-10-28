@@ -13,6 +13,7 @@ const Goals = lazy(() => import('./pages/Goals'))
 const Subscriptions = lazy(() => import('./pages/Subscriptions'))
 const Plans = lazy(() => import('./pages/Plans'))
 const Settings = lazy(() => import('./pages/Settings'))
+const FinancialConnections = lazy(() => import('./pages/FinancialConnections'))
 import AIAvatar from './components/AIAvatar'
 import AuthPage from './pages/AuthPage'
 import Onboarding from './components/Onboarding'
@@ -59,6 +60,7 @@ function AuthenticatedApp({ hidden }) {
                 {currentView === 'goals' && <Goals />}
                 {currentView === 'subscriptions' && <Subscriptions />}
                 {currentView === 'plans' && <Plans />}
+                {currentView === 'connections' && <FinancialConnections />}
                 {currentView === 'settings' && <Settings />}
               </PageBoundary>
             </div>

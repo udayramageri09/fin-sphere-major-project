@@ -1,4 +1,4 @@
-import { LayoutDashboard, Wallet, CreditCard, PieChart, Target, CalendarRange, Brain, Menu, X, Settings } from 'lucide-react';
+import { LayoutDashboard, Wallet, CreditCard, PieChart, Target, CalendarRange, Brain, Menu, X, Settings, Link2 } from 'lucide-react';
 import { useState } from 'react';
 import BrandMark from './BrandMark';
 
@@ -10,6 +10,7 @@ const navItems = [
   { id: 'goals', label: 'Goals', icon: Target },
   { id: 'subscriptions', label: 'SIPs & Subs', icon: CalendarRange },
   { id: 'plans', label: 'Financial Intelligence', icon: Brain },
+  { id: 'connections', label: 'Connections', icon: Link2 },
 ];
 
 function TopNav({ currentView, setCurrentView }) {
