@@ -29,7 +29,13 @@
     "test:liability": "node --test tests/liabilityActions.test.mjs",
     "test:plans": "node tests/plans.test.mjs",
     "test:groq": "node tests/groq.test.mjs",
-    "test:holdings": "node tests/holdingsServer.test.mjs"
+    "test:holdings": "node tests/holdingsServer.test.mjs",
+    "test:forecast-horizon": "node tests/forecastHorizon.test.mjs",
+    "test:forecast-route": "node tests/forecastRoute.test.mjs",
+    "test:runtime-config": "node --test tests/runtimeConfig.test.mjs",
+    "test:runtime-config-db": "node --test tests/runtimeConfigDb.test.mjs",
+    "test:all": "node scripts/run-all-tests.mjs",
+    "test": "npm run test:all"
   },
   "dependencies": {
     "@tesseract.js-data/eng": "1.0.0",
@@ -41,7 +47,7 @@
     "express-rate-limit": "^8.7.0",
     "helmet": "^8.3.0",
     "jsonwebtoken": "^9.0.3",
-    "multer": "2.4.0",
+    "multer": "2.5.0",
     "pg": "^8.23.1",
     "tesseract.js": "7.0.0",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"

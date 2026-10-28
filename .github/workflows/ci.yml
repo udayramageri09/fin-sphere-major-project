@@ -1,0 +1,200 @@
+name: CI
+
+# Minimal predeployment check. This workflow does NOT deploy anything: it only installs
+# dependencies, lints, builds and runs the existing test suites. No secrets are required --
+# Groq and email delivery are left unconfigured (empty) so the suites exercise their
+# documented deterministic-fallback / local-capture paths, never a live provider. The
+# faculty and report-kit databases are never referenced; every database-dependent test
+# creates its own disposable, uniquely-named database on the ephemeral Postgres service
+# below and either drops it itself or lets the whole service container disappear with the
+# job. See docs/RELEASE_RUNBOOK.md for the versions this mirrors (Node 22, Python 3.12).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Minimal permissions: this workflow only reads the repository and reports check results.
+permissions:
+  contents: read
+
+# A new push to the same PR/branch cancels the previous, still-running run for it.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend (lint, build, tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install (frontend lockfile)
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Production build
+        run: npm run build
+
+      - name: All frontend test suites
+        # IMPORT_LEGACY_JSON is irrelevant to the frontend, set only for parity with how the
+        # suites are documented to run. No GROQ/RESEND/MAIL values are set, so the assistant
+        # and password-recovery UI suites exercise their deterministic/local-capture paths.
+        env:
+          IMPORT_LEGACY_JSON: 'false'
+        run: npm run test:all
+
+      - name: Production dependency audit (must stay clean)
+        run: npm audit --omit=dev
+
+      - name: Full dependency audit (informational; dev-tool advisories do not block CI)
+        if: always()
+        continue-on-error: true
+        run: npm audit
+
+  server:
+    name: Server (API tests against disposable PostgreSQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          # Throwaway CI-only credentials for an ephemeral service container that exists only
+          # for the lifetime of this job and is never reachable outside this runner. Not a
+          # real secret; nothing production-facing ever uses it.
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci_only_throwaway
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # The test harnesses create and drop their own "finsphere_<suite>_<pid>" database on
+      # this maintenance connection; none of them ever read or write the "postgres" database
+      # named here (see each file's own header comment, e.g. server/tests/accountGuard.test.mjs).
+      DATABASE_URL: postgres://postgres:ci_only_throwaway@localhost:5432/postgres
+      DATABASE_SSL: 'false'
+      IMPORT_LEGACY_JSON: 'false'
+      # A CI-only dummy value satisfying the server's own startup length check (>=32 chars);
+      # never used outside this job, never a real session secret.
+      JWT_SECRET: ci-only-dummy-secret-not-used-outside-this-workflow-run
+      # Left empty on purpose: no live Groq or Resend calls are made in CI; the suites already
+      # stub/mock these providers locally (see server/tests/groq.test.mjs, passwordReset tests).
+      GROQ_API_KEY: ''
+      RESEND_API_KEY: ''
+      PASSWORD_RESET_DELIVERY: ''
+      PASSWORD_RESET_FROM: ''
+      PASSWORD_RESET_URL: ''
+      MAIL_USER: ''
+      MAIL_PASS: ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install (server lockfile)
+        working-directory: server
+        run: npm ci
+
+      - name: Wait for PostgreSQL
+        run: |
+          for i in $(seq 1 20); do
+            pg_isready -h localhost -p 5432 -U postgres && exit 0
+            sleep 2
+          done
+          echo "PostgreSQL did not become ready" >&2
+          exit 1
+
+      - name: Provision the disposable password-reset-db test database
+        # test:password-reset-db (unlike every other DB-dependent suite) does not create its
+        # own database -- it requires one pre-provisioned and named by
+        # FINSPHERE_RESET_TEST_DATABASE_URL, matching finsphere_reset_test_<digits>
+        # (see server/tests/passwordResetDb.test.mjs). github.run_id is unique per workflow
+        # run, so this never collides with a concurrent run or anything else.
+        working-directory: server
+        run: |
+          node -e "
+            const pg = require('pg');
+            (async () => {
+              const admin = new pg.Client({ connectionString: process.env.DATABASE_URL });
+              await admin.connect();
+              await admin.query('CREATE DATABASE finsphere_reset_test_' + process.env.GITHUB_RUN_ID);
+              await admin.end();
+            })();
+          "
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+
+      - name: All server test suites (including the gated password-reset-db test)
+        working-directory: server
+        env:
+          FINSPHERE_RESET_TEST_DATABASE_URL: postgres://postgres:ci_only_throwaway@localhost:5432/finsphere_reset_test_${{ github.run_id }}
+        run: npm run test:all
+
+      - name: Drop the disposable password-reset-db test database
+        if: always()
+        working-directory: server
+        run: |
+          node -e "
+            const pg = require('pg');
+            (async () => {
+              const admin = new pg.Client({ connectionString: process.env.DATABASE_URL });
+              await admin.connect();
+              await admin.query('DROP DATABASE IF EXISTS finsphere_reset_test_' + process.env.GITHUB_RUN_ID + ' WITH (FORCE)');
+              await admin.end();
+            })();
+          "
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+
+      - name: Production dependency audit (must stay clean)
+        working-directory: server
+        run: npm audit --omit=dev
+
+      - name: Full dependency audit (informational; dev-tool advisories do not block CI)
+        if: always()
+        continue-on-error: true
+        working-directory: server
+        run: npm audit
+
+  python:
+    name: Python ML service (unit tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: ml_service/requirements.txt
+
+      - name: Install the pinned application closure
+        working-directory: ml_service
+        run: |
+          pip install --only-binary=:all: -r requirements.txt
+
+      - name: Python unit tests
+        working-directory: ml_service
+        run: python -m unittest discover -s tests -v

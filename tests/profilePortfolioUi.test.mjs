@@ -62,7 +62,7 @@ try {
  const analytics=container.querySelector('[data-testid=spending-analytics]');
  check(!!analytics.closest('[hidden]'),'Activity opens with Insights hidden');
  const actions = [...container.querySelectorAll('[data-testid="transaction-disclosure"] > button')];
- check(actions.length === 2 && actions.every(b => b.getAttribute('aria-expanded') === 'false'), 'both actions start collapsed');
+ check(actions.length === 3 && actions.every(b => b.getAttribute('aria-expanded') === 'false'), 'all three actions start collapsed');
  check(actions.every(b => document.getElementById(b.getAttribute('aria-controls')).hasAttribute('inert')), 'closed controls cannot receive keyboard focus');
  await act(async () => actions[0].click());
  check(actions[0].getAttribute('aria-expanded') === 'true', 'entry opens with a named expanded-state button');
