@@ -25,6 +25,7 @@
     "test:settings": "node tests/settingsProfileUi.test.mjs",
     "test:portfolio": "node tests/profilePortfolioUi.test.mjs",
     "test:assistant-reply": "node tests/assistantReplyUi.test.mjs",
+    "test:financial-connections-ui": "node tests/financialConnectionsUi.test.mjs",
     "dev": "vite",
     "server": "node server/server.js",
     "build": "vite build",
