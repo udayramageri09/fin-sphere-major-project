@@ -504,11 +504,11 @@ def generate_plan(
         plan_title = "✅ Financial Maintenance Plan — You're on Track"
 
     score = health_score  # None when there is no health result: nothing is invented
-    score_text = f"Overall health score: {score:.0f}/100 (rule-based). " if score is not None else ""
+    score_text = f"Overall health score: {score:.0f}/100. " if score is not None else ""
     plan_summary = (
         f"{score_text}"
-        f"{len(steps)} action items from rule-based health checks and ML signals "
-        f"(forecast, anomalies, spending clusters)."
+        f"This plan is based on the financial patterns identified in your data, "
+        f"with {len(steps)} action item{'s' if len(steps) != 1 else ''} for you to review."
     )
 
     from datetime import datetime, timezone

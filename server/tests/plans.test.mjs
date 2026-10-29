@@ -188,6 +188,11 @@ async function run() {
   r = await planChat(A);
   ok(r.status === 200 && r.json.reply.startsWith('SUMMARY-A-salary') && /The analysis identified 2 action items/.test(r.json.reply), 'plan-chat: A is answered from A\'s server snapshot', r.text);
   ok(!/ML models identified/.test(r.json.reply), 'plan-chat: the fallback no longer calls rule output "ML"');
+  // The Groq-unavailable fallback reply is user-visible chat content, so none of these implementation
+  // terms may ever appear in it, however plan_summary (the trusted server snapshot) is worded.
+  for (const bad of ['rule-based', 'ML signals', 'LinearRegression', 'IsolationForest', 'Agglomerative', 'Ward', 'R²', 'silhouette']) {
+    ok(!r.json.reply.includes(bad), `plan-chat: the fallback reply never exposes "${bad}"`, r.json.reply);
+  }
   r = await planChat(A, { mlContext: { plan: { plan_summary: 'FORGED-SUMMARY', step_count: 99, steps: [] }, health: { composite_score: 99 } } });
   ok(r.status === 200 && r.json.reply.startsWith('SUMMARY-A-salary') && !r.text.includes('FORGED') && !r.text.includes('99 action'), 'plan-chat: a forged mlContext changes nothing', r.text);
   r = await planChat(B, { mlContext: { plan: { plan_summary: "A's SUMMARY-A-salary" } } });
