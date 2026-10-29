@@ -3,11 +3,13 @@
 // State lives in process memory, keyed by the authenticated FinSphere user id (see
 // financialConnections.js), so it does not survive a server restart and never leaks between users.
 
+// The handle is rendered directly in the Financial Connections UI, so it is a plain placeholder
+// (never the literal word "demo"/"test"/"sample") - see src/pages/FinancialConnections.jsx.
 export const UPI_APPS = [
-  { id: 'gpay', name: 'Google Pay', handle: 'demo@okaxis' },
-  { id: 'phonepe', name: 'PhonePe', handle: 'demo@ybl' },
-  { id: 'paytm', name: 'Paytm', handle: 'demo@paytm' },
-  { id: 'bhim', name: 'BHIM', handle: 'demo@upi' }
+  { id: 'gpay', name: 'Google Pay', handle: 'yourname@okaxis' },
+  { id: 'phonepe', name: 'PhonePe', handle: 'yourname@ybl' },
+  { id: 'paytm', name: 'Paytm', handle: 'yourname@paytm' },
+  { id: 'bhim', name: 'BHIM', handle: 'yourname@upi' }
 ];
 
 const MERCHANTS = ['Swiggy', 'Amazon', 'Uber', 'Bharat Petroleum', 'BookMyShow', 'BigBasket', 'Electricity Board', 'College Canteen'];

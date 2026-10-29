@@ -295,15 +295,15 @@ export default function Plans() {
                 </button>
               </div>
               <p className="ai-provider-subtext">
-                {provider === PROVIDERS.GROQ ? 'Groq · faster responses' : 'On-device AI · private processing'}
+                {provider === PROVIDERS.GROQ ? 'Faster responses' : 'Processing stays on your device'}
               </p>
               {provider === PROVIDERS.LOCAL && localStatus === WEBLLM_STATUS.LOADING && (
                 <p className="ai-provider-status" role="status">
-                  Loading local model… {localProgress?.progress != null ? `${Math.round(localProgress.progress * 100)}%` : ''}
+                  Setting up Local AI… {localProgress?.progress != null ? `${Math.round(localProgress.progress * 100)}%` : ''}
                 </p>
               )}
               {provider === PROVIDERS.LOCAL && localStatus === WEBLLM_STATUS.READY && (
-                <p className="ai-provider-status">Local AI ready. AI responses are generated on your device using WebLLM.</p>
+                <p className="ai-provider-status">Local AI ready.</p>
               )}
               {provider === PROVIDERS.LOCAL && localStatus === WEBLLM_STATUS.ERROR && localError?.code === 'WEBGPU_UNAVAILABLE' && (
                 <div className="ai-provider-error" role="alert">

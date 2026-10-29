@@ -57,7 +57,9 @@ app.post('/v1/pan/verify', (req, res) => {
   const { aaId, pan } = req.body ?? {};
   if (!aaId || typeof aaId !== 'string') return res.status(400).json({ error: 'aaId is required' });
   if (!isValidSyntheticPan(pan)) {
-    return res.status(400).json({ error: 'Enter a 10-character PAN (e.g. ABCDE1234F) or a demo PAN such as DEMO-PAN-001.' });
+    // User-facing (reaches the Financial Connections error UI): never mentions the internal
+    // DEMO-PAN-### token format this simulator also accepts - see mockData.js:isValidSyntheticPan.
+    return res.status(400).json({ error: 'Enter a 10-character PAN (e.g. ABCDE1234F).' });
   }
   const customer = getOrCreateCustomer(aaId);
   const maskedPan = maskPan(pan);

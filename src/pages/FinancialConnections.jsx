@@ -13,6 +13,9 @@ const inputClass = 'w-full px-3 py-2 rounded-xl border border-zinc-200 bg-white 
 const labelClass = 'text-xs font-medium text-zinc-500';
 const primaryBtn = 'inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl text-sm font-medium bg-zinc-900 text-white hover:bg-zinc-800 disabled:opacity-60 disabled:cursor-not-allowed';
 const secondaryBtn = 'inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl text-sm font-medium text-zinc-700 border border-zinc-200 bg-white hover:bg-zinc-100 disabled:opacity-60 disabled:cursor-not-allowed';
+// Plain-language labels for the backend's consent protocol states - the raw PENDING/ACTIVE/
+// REJECTED values are a backend concept and never shown to the user directly.
+const CONSENT_STATUS_LABEL = { PENDING: 'Awaiting approval', ACTIVE: 'Approved', REJECTED: 'Declined' };
 
 function ErrorBox({ message }) {
   if (!message) return null;
@@ -37,16 +40,15 @@ function StepDots({ step, steps }) {
 
 // A plain settings-style summary card. No AA/UPI lifecycle terminology here by design - that
 // detail lives inside the connection flow it opens, where it actually helps the user.
-function ConnectionCard({ icon: Icon, title, loading, summary, buttonLabel, onManage }) {
+function ConnectionCard({ icon: Icon, title, description, loading, status, buttonLabel, onManage }) {
   return (
     <div className="glass-panel p-6 flex flex-col gap-4 min-w-0">
       <div className="flex items-center gap-3">
         <div className="p-2 rounded-lg bg-zinc-100 text-zinc-700 shrink-0"><Icon size={22} /></div>
-        <div className="min-w-0">
-          <h3 className="text-base font-semibold text-zinc-900">{title}</h3>
-          <p className="text-sm text-zinc-500">{loading ? 'Loading…' : summary}</p>
-        </div>
+        <h3 className="text-base font-semibold text-zinc-900">{title}</h3>
       </div>
+      <p className="text-sm text-zinc-500">{description}</p>
+      <p className="text-sm text-zinc-600 font-medium">{loading ? 'Loading…' : status}</p>
       <button type="button" onClick={onManage} className={`${secondaryBtn} self-start`}>
         {buttonLabel} <ChevronRight size={16} />
       </button>
@@ -106,16 +108,15 @@ function FinancialConnections() {
   const [aaStep, setAaStep] = useState('pan');
   const [aaBusy, setAaBusy] = useState(false);
   const [aaError, setAaError] = useState('');
-  const [pan, setPan] = useState('DEMO-PAN-001');
+  const [pan, setPan] = useState('');
   const [maskedPan, setMaskedPan] = useState('');
   const [accounts, setAccounts] = useState([]);
   const [selected, setSelected] = useState(() => new Set());
   const [consent, setConsent] = useState(null);
-  const [fiRequest, setFiRequest] = useState(null);
   const [connectResult, setConnectResult] = useState(null);
 
   const openAa = () => {
-    setAaOpen(true); setAaStep('pan'); setAaError(''); setConsent(null); setFiRequest(null); setConnectResult(null);
+    setAaOpen(true); setAaStep('pan'); setAaError(''); setConsent(null); setConnectResult(null);
   };
   const closeAa = () => setAaOpen(false);
 
@@ -161,7 +162,6 @@ function FinancialConnections() {
       setAaStep('processing');
       const created = await request('POST', '/aa/fi-requests', { consentId: approved.consentId });
       if (!mounted.current) return;
-      setFiRequest(created);
       const connected = await request('POST', `/aa/fi-requests/${created.fiRequestId}/connect`);
       if (!mounted.current) return;
       setConnectResult(connected);
@@ -220,8 +220,8 @@ function FinancialConnections() {
     try {
       const result = await request('POST', '/upi/sync');
       setUpiNotice(result.transactionsAdded > 0
-        ? `Synchronized ${result.transactionsAdded} UPI transaction${result.transactionsAdded === 1 ? '' : 's'} into your FinSphere transactions.`
-        : 'Already up to date - nothing new to synchronize.');
+        ? `Added ${result.transactionsAdded} transaction${result.transactionsAdded === 1 ? '' : 's'} to FinSphere.`
+        : 'Already up to date.');
       loadStatus();
     } catch (e) { if (mounted.current) setUpiError(e.message); }
     finally { if (mounted.current) setUpiSyncing(false); }
@@ -232,8 +232,7 @@ function FinancialConnections() {
   return (
     <div className="animate-fade-in">
       <h2 style={{ fontSize: '2rem' }}>Financial Connections</h2>
-      <p className="text-sm text-zinc-500 mt-1 mb-1 max-w-2xl">Connect your finances</p>
-      <p className="text-sm text-zinc-500 mb-4 max-w-2xl">Bring your accounts and UPI activity into FinSphere.</p>
+      <p className="text-sm text-zinc-500 mt-1 mb-4 max-w-2xl">Bring your accounts and UPI activity into FinSphere.</p>
 
       {statusError && (
         <div className="mb-6 max-w-2xl flex flex-col items-start gap-2">
@@ -242,57 +241,58 @@ function FinancialConnections() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
         <ConnectionCard
           icon={Landmark}
           title="Bank Accounts"
+          description="Connect your financial accounts to bring transactions into FinSphere."
           loading={statusLoading}
-          summary={status?.connectedAccounts > 0 ? `${status.connectedAccounts} connected` : 'Not connected yet'}
-          buttonLabel="Manage accounts"
+          status={status?.connectedAccounts > 0 ? `${status.connectedAccounts} accounts connected` : 'Not connected'}
+          buttonLabel="Connect accounts"
           onManage={openAa}
         />
         <ConnectionCard
           icon={Smartphone}
           title="UPI"
+          description="Connect your UPI activity to keep your transactions in one place."
           loading={statusLoading}
-          summary={status?.upiConnectedApps > 0 ? `${status.upiConnectedApps} app${status.upiConnectedApps === 1 ? '' : 's'} connected` : 'Not connected yet'}
+          status={status?.upiConnectedApps > 0 ? `${status.upiConnectedApps} app${status.upiConnectedApps === 1 ? '' : 's'} connected` : 'Not connected'}
           buttonLabel="Manage UPI"
           onManage={openUpi}
         />
       </div>
 
-      <p className="text-xs text-zinc-400 mb-6">Demo environment · Synthetic financial data</p>
-
       {/* ── AA flow panel ────────────────────────────────────────────────── */}
       {aaOpen && (
-        <div className="glass-panel p-6 mb-6 max-w-2xl flex flex-col gap-4" role="region" aria-label="Account Aggregator connection">
+        <div className="glass-panel p-6 mb-6 max-w-2xl flex flex-col gap-4" role="region" aria-label="Connect bank accounts">
           <div className="flex items-center justify-between">
-            <h3 className="text-lg font-semibold text-zinc-900">Connect Financial Accounts</h3>
+            <h3 className="text-lg font-semibold text-zinc-900">Connect accounts</h3>
             <button type="button" onClick={closeAa} aria-label="Close" className="p-1.5 rounded-lg text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900"><X size={16} /></button>
           </div>
           {aaStep !== 'connected' && <StepDots step={aaStep} steps={AA_STEPS} />}
 
           {aaStep === 'pan' && (
             <form onSubmit={submitPan} className="flex flex-col gap-3">
-              <p className="text-sm text-zinc-500">Enter your PAN to simulate verification through FinSphere's local Account Aggregator.</p>
+              <p className="text-sm text-zinc-500">Verify your identity to continue.</p>
               <div className="flex flex-col gap-1">
-                <label htmlFor="aa-pan" className={labelClass}>PAN (demo)</label>
-                <input id="aa-pan" type="text" required value={pan} onChange={(e) => setPan(e.target.value.toUpperCase())} className={inputClass} placeholder="DEMO-PAN-001" />
-                <span className="text-xs text-zinc-400">Use a demo token like DEMO-PAN-001, or any 10-character synthetic PAN (e.g. ABCDE1234F). Never enter a real PAN.</span>
+                <label htmlFor="aa-pan" className={labelClass}>PAN</label>
+                <input id="aa-pan" type="text" required value={pan} onChange={(e) => setPan(e.target.value.toUpperCase())} className={inputClass} placeholder="ABCDE1234F" autoComplete="off" />
+                <span className="text-xs text-zinc-400">This step does not contact any government database - avoid entering a real PAN.</span>
               </div>
               {aaError && <ErrorBox message={aaError} />}
               <button type="submit" disabled={aaBusy} className={`${primaryBtn} self-start`}>
-                {aaBusy ? <><Loader2 size={16} className="animate-spin" /> Verifying...</> : 'Continue'}
+                {aaBusy ? <><Loader2 size={16} className="animate-spin" /> Verifying...</> : 'Verify'}
               </button>
             </form>
           )}
 
           {aaStep === 'accounts' && (
             accounts.length === 0 ? (
-              <p className="text-sm text-zinc-500 flex items-center gap-2"><Loader2 size={16} className="animate-spin" /> Finding financial accounts...</p>
+              <p className="text-sm text-zinc-500 flex items-center gap-2"><Loader2 size={16} className="animate-spin" /> Finding your accounts...</p>
             ) : (
               <div className="flex flex-col gap-3">
                 {maskedPan && <p className="text-xs text-zinc-500 flex items-center gap-1.5"><ShieldCheck size={14} className="text-zinc-700" /> PAN verified · {maskedPan}</p>}
+                <p className="text-xs text-zinc-400">These are not live connections to your real accounts.</p>
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-zinc-600">{selected.size} of {accounts.length} selected</span>
                   <div className="flex gap-2">
@@ -317,7 +317,7 @@ function FinancialConnections() {
                 {aaError && <ErrorBox message={aaError} />}
                 <div className="flex gap-2">
                   <button type="button" onClick={continueToConsent} disabled={aaBusy || selected.size === 0} className={primaryBtn}>
-                    {aaBusy ? <><Loader2 size={16} className="animate-spin" /> Continuing...</> : <>Continue <ChevronRight size={16} /></>}
+                    {aaBusy ? <><Loader2 size={16} className="animate-spin" /> Continuing...</> : <>Review <ChevronRight size={16} /></>}
                   </button>
                   <button type="button" onClick={() => setAaStep('pan')} className={secondaryBtn}><ChevronLeft size={16} /> Back</button>
                 </div>
@@ -327,8 +327,8 @@ function FinancialConnections() {
 
           {aaStep === 'consent' && consent && (
             <div className="flex flex-col gap-3">
-              <h4 className="text-base font-semibold text-zinc-900">Account Aggregator Consent</h4>
-              <p className="text-sm text-zinc-600">FinSphere is requesting access to:</p>
+              <h4 className="text-base font-semibold text-zinc-900">Review connection</h4>
+              <p className="text-sm text-zinc-600">This connection will share:</p>
               <ul className="text-sm text-zinc-700 flex flex-col gap-1 pl-1">
                 {consent.dataTypes.map((t) => (
                   <li key={t} className="flex items-center gap-2"><CheckCircle2 size={14} className="text-zinc-700" /> {t === 'PROFILE' ? 'Account profile' : t === 'SUMMARY' ? 'Account summary' : 'Transaction history'}</li>
@@ -338,26 +338,24 @@ function FinancialConnections() {
                 <div><span className="text-zinc-500 block text-xs">Purpose</span><span className="text-zinc-900">{consent.purpose}</span></div>
                 <div><span className="text-zinc-500 block text-xs">Date range</span><span className="text-zinc-900">{consent.dateRange.from} to {consent.dateRange.to}</span></div>
                 <div><span className="text-zinc-500 block text-xs">Selected accounts</span><span className="text-zinc-900">{consent.accountIds.length}</span></div>
-                <div><span className="text-zinc-500 block text-xs">Status</span><span className="text-zinc-900">{consent.status}</span></div>
+                <div><span className="text-zinc-500 block text-xs">Status</span><span className="text-zinc-900">{CONSENT_STATUS_LABEL[consent.status] ?? consent.status}</span></div>
               </div>
-              <p className="text-xs text-zinc-400">Consent ID {consent.consentId}</p>
               {aaError && <ErrorBox message={aaError} />}
               {consent.status === 'PENDING' && (
                 <div className="flex gap-2">
                   <button type="button" onClick={approveConsent} disabled={aaBusy} className={primaryBtn}>
-                    {aaBusy ? <><Loader2 size={16} className="animate-spin" /> Processing...</> : 'Approve Consent'}
+                    {aaBusy ? <><Loader2 size={16} className="animate-spin" /> Connecting...</> : 'Approve'}
                   </button>
-                  <button type="button" onClick={rejectConsent} disabled={aaBusy} className={secondaryBtn}>Reject</button>
+                  <button type="button" onClick={rejectConsent} disabled={aaBusy} className={secondaryBtn}>Cancel</button>
                 </div>
               )}
-              {consent.status === 'REJECTED' && <p className="text-sm text-zinc-500">Consent rejected. No data was requested.</p>}
+              {consent.status === 'REJECTED' && <p className="text-sm text-zinc-500">Connection cancelled. No data was shared.</p>}
             </div>
           )}
 
           {aaStep === 'processing' && (
             <div className="flex flex-col items-start gap-2 text-sm text-zinc-600">
-              <p className="flex items-center gap-2"><CheckCircle2 size={16} className="text-zinc-900" /> Consent approved</p>
-              <p className="flex items-center gap-2"><Loader2 size={16} className="animate-spin" /> Requesting financial information...</p>
+              <p className="flex items-center gap-2"><Loader2 size={16} className="animate-spin" /> Connecting your accounts...</p>
             </div>
           )}
 
@@ -366,10 +364,9 @@ function FinancialConnections() {
               <p className="flex items-center gap-2 text-sm font-medium text-zinc-900"><CheckCircle2 size={18} className="text-zinc-900" /> Accounts connected</p>
               <p className="text-sm text-zinc-600">
                 {connectResult.alreadyConnected
-                  ? 'This financial data was already synchronized into your FinSphere transactions.'
-                  : `${connectResult.transactionsAdded} synthetic transactions were added to your FinSphere transactions.`}
+                  ? 'Your transactions were already added to FinSphere.'
+                  : `${connectResult.transactionsAdded} transactions were added to FinSphere.`}
               </p>
-              {fiRequest && <p className="text-xs text-zinc-400">FI Request ID {fiRequest.fiRequestId}</p>}
               <button type="button" onClick={closeAa} className={`${secondaryBtn} self-start`}>Done</button>
             </div>
           )}
@@ -383,7 +380,7 @@ function FinancialConnections() {
             <h3 className="text-lg font-semibold text-zinc-900">UPI Connections</h3>
             <button type="button" onClick={closeUpi} aria-label="Close" className="p-1.5 rounded-lg text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900"><X size={16} /></button>
           </div>
-          <p className="text-xs text-zinc-500">Demo UPI connection. Synthetic transactions only - this never calls a real Google Pay, PhonePe, Paytm or BHIM API.</p>
+          <p className="text-xs text-zinc-500">These are not live connections to Google Pay, PhonePe, Paytm or BHIM.</p>
 
           {upiLoading ? (
             <p className="text-sm text-zinc-500 flex items-center gap-2"><Loader2 size={16} className="animate-spin" /> Loading UPI apps...</p>
@@ -421,7 +418,7 @@ function FinancialConnections() {
                   <div className="flex items-center justify-between">
                     <h4 className="text-sm font-semibold text-zinc-900">UPI Activity</h4>
                     <button type="button" onClick={syncUpi} disabled={upiSyncing} className={secondaryBtn}>
-                      {upiSyncing ? <><Loader2 size={14} className="animate-spin" /> Synchronizing...</> : 'Synchronize'}
+                      {upiSyncing ? <><Loader2 size={14} className="animate-spin" /> Syncing...</> : 'Sync transactions'}
                     </button>
                   </div>
                   {upiNotice && <p className="text-xs text-zinc-500">{upiNotice}</p>}
