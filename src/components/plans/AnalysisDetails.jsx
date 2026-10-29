@@ -1,7 +1,8 @@
 import { memo } from 'react';
-// AnalysisDetails - the ML outputs behind the findings (Issue #80): forecast, anomalies and spending clusters.
-// Collapsed by default. Each section is tagged with the model that really produced it, and a section that failed
-// reads "Unavailable" while the others still render. Presentation only.
+// AnalysisDetails - the outputs behind the findings (Issue #80): forecast, anomalies and spending clusters.
+// Collapsed by default. A section that failed reads "Unavailable" while the others still render.
+// Presentation only, and deliberately free of model/algorithm names, formulas or statistical
+// metrics - this is a finished-product screen, not an ML implementation debug view.
 import { Activity, BarChart2, Minus, Target, TrendingDown, TrendingUp } from 'lucide-react';
 import { sectionFailed } from '../../utils/planIntelligence';
 import ForecastChart from './ForecastChart';
@@ -28,7 +29,6 @@ function AnalysisDetails({ data, months = 3 }) {
       <div className="ml-card details-card" data-avatar-target="forecast-section">
         <div className="ml-card-header">
           <BarChart2 size={16} /><h3 className="section-heading">{months}-month forecast</h3>
-          <details className="analysis-method"><summary>Method</summary><span className="model-tag" title="R² describes the fit to recorded months, not the probability of a correct forecast">ML · LinearRegression{forecast?.forecast?.income?.r2 !== undefined ? ` (R² ${forecast.forecast.income.r2})` : ''}</span></details>
         </div>
         {!forecast ? <p className="unavailable-block">Unavailable</p> : (
           <>
@@ -60,7 +60,6 @@ function AnalysisDetails({ data, months = 3 }) {
       <div className="ml-card details-card anomaly-card" data-avatar-target="anomaly-section">
         <div className="ml-card-header">
           <Activity size={16} /><h3 className="section-heading">Unusual transactions</h3>
-          <details className="analysis-method"><summary>Method</summary><span className="model-tag">ML · IsolationForest</span></details>
         </div>
         <p className="explain-note">These are statistical signals from your own history. A flag does not establish fraud or an error.</p>
         {!anomalies ? <p className="unavailable-block">Unavailable</p> : anomalies.total_flagged > 0 ? (
@@ -82,7 +81,6 @@ function AnalysisDetails({ data, months = 3 }) {
       <div className="ml-card details-card" data-avatar-target="cluster-section">
         <div className="ml-card-header">
           <Target size={16} /><h3 className="section-heading">Spending by transaction size</h3>
-          <details className="analysis-method"><summary>Method</summary><span className="model-tag">ML · Agglomerative (Ward){clusters?.model_metrics?.silhouette_score !== undefined ? ` · silhouette ${clusters.model_metrics.silhouette_score}` : ''}</span></details>
         </div>
         <p className="explain-note">Groups describe transaction sizes, not merchant categories. Percentages represent the share of spending value; income, refunds and transfers are excluded.</p>
         {!clusters ? <p className="unavailable-block">Unavailable</p> : (clusters.clusters || []).length === 0 ? (

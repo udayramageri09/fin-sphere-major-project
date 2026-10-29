@@ -1,10 +1,12 @@
 // ActionList - the prioritised next actions (Issue #80), in the order the server returned them.
-// Each action shows its severity, whether it is a rule or an ML signal, a button to the page where it can be acted on
-// (when the server named one) and the explain controls.
+// Each action shows its severity, a button to the page where it can be acted on (when the server
+// named one) and the explain controls. Deliberately does not say whether an action came from a
+// rule or an ML signal - that distinction is an implementation detail, not something the user
+// needs to act on the result.
 import { useState } from 'react';
 import { ArrowRight, Zap } from 'lucide-react';
 import Explain from './Explain';
-import { destinationFor, explainControls, methodLabel } from '../../utils/planIntelligence';
+import { destinationFor, explainControls } from '../../utils/planIntelligence';
 
 export default function ActionList({ plan, planFailed, health, onNavigate }) {
   const steps = Array.isArray(plan?.steps) ? plan.steps : [];
@@ -40,8 +42,8 @@ export default function ActionList({ plan, planFailed, health, onNavigate }) {
                     <details className="action-evidence">
                       <summary>Why this matters</summary>
                       <p className="action-reason">{step.description}</p>
-                      <p className="action-meta"><span>{methodLabel(step)}</span><span>{step.timeline}</span><span>{step.expected_outcome}</span></p>
-                      <Explain step={step} controls={explainControls(step, health)} health={health} />
+                      <p className="action-meta"><span>{step.timeline}</span><span>{step.expected_outcome}</span></p>
+                      <Explain step={step} controls={explainControls(step, health)} />
                     </details>
                   </div>
                 </li>

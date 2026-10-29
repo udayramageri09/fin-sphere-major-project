@@ -36,7 +36,6 @@ export default function ForecastChart({ historical, forecast }) {
   const current = months[selected];
   const peak = Math.max(1, ...months.flatMap((m) => [m.income ?? 0, m.spending ?? 0]));
   const gap = difference(current.income, current.spending);
-  const r2 = (side) => (finite(forecast?.[side]?.r2) ? forecast[side].r2 : null);
 
   const move = (to) => {
     const i = Math.min(Math.max(to, 0), months.length - 1);
@@ -93,14 +92,6 @@ export default function ForecastChart({ historical, forecast }) {
           <div><dt>Spending</dt><dd>{figure(current.spending)}</dd></div>
           <div><dt>{gap ? gap.label : 'Left after spending'}</dt><dd>{gap ? gap.value : 'Unavailable'}</dd></div>
         </dl>
-        {current.kind === 'forecast' && (
-          <details className="forecast-detail-note"><summary>How this forecast works</summary><p>
-            ML · LinearRegression
-            {r2('income') !== null || r2('expenses') !== null
-              ? ` · R² ${[r2('income') !== null ? `income ${r2('income')}` : null, r2('expenses') !== null ? `spending ${r2('expenses')}` : null].filter(Boolean).join(', ')}`
-              : ''}
-          </p></details>
-        )}
       </div>
 
       <details className="forecast-table-details">
