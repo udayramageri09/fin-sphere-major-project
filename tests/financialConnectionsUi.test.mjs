@@ -22,16 +22,19 @@ const vite = await createServer({
 // shapes) against a minimal fake backend. The real backend's business rules (PAN gating, consent
 // lifecycle, idempotency, cross-account isolation) are already verified end-to-end against the
 // actual authenticated API in server/tests/financialConnectionsServer.test.mjs.
+// Fixture values deliberately avoid the word "demo" themselves, matching what the real
+// backend now returns (see server/upiSimulator.js) - this test renders them, so a stray "demo"
+// here would silently defeat its own "no demo wording" assertions below.
 const ACCOUNTS = Array.from({ length: 10 }, (_, i) => ({
-  institution: `Demo Bank ${i + 1}`, fipId: `FIP-${i + 1}`, accountId: `FS-DEMO-${String(i + 1).padStart(3, '0')}`,
+  institution: `Bank ${i + 1}`, fipId: `FIP-${i + 1}`, accountId: `FS-${String(i + 1).padStart(3, '0')}`,
   accountType: 'SAVINGS', maskedAccountNumber: `XXXXXX${1000 + i}`, balance: 50000 + i * 1000, currency: 'INR', linked: true
 }));
 const UPI_APPS = [
-  { id: 'gpay', name: 'Google Pay', handle: 'demo@okaxis' }, { id: 'phonepe', name: 'PhonePe', handle: 'demo@ybl' },
-  { id: 'paytm', name: 'Paytm', handle: 'demo@paytm' }, { id: 'bhim', name: 'BHIM', handle: 'demo@upi' }
+  { id: 'gpay', name: 'Google Pay', handle: 'yourname@okaxis' }, { id: 'phonepe', name: 'PhonePe', handle: 'yourname@ybl' },
+  { id: 'paytm', name: 'Paytm', handle: 'yourname@paytm' }, { id: 'bhim', name: 'BHIM', handle: 'yourname@upi' }
 ];
 const state = { panVerified: false, consents: new Map(), fiRequests: new Map(), connected: false, connectedAccounts: 0, upiConnected: new Set(), upiSynced: new Set(), calls: [] };
-const upiTx = (appId) => Array.from({ length: 6 }, (_, i) => ({ transactionId: `${appId}-${i}`, appId, appName: UPI_APPS.find((a) => a.id === appId).name, upiId: 'demo@x', date: '2026-10-01', amount: 100 + i, direction: i === 0 ? 'CREDIT' : 'DEBIT', merchant: 'Demo Merchant', status: 'SUCCESS', source: 'UPI_SIMULATOR' }));
+const upiTx = (appId) => Array.from({ length: 6 }, (_, i) => ({ transactionId: `${appId}-${i}`, appId, appName: UPI_APPS.find((a) => a.id === appId).name, upiId: 'yourname@x', date: '2026-10-01', amount: 100 + i, direction: i === 0 ? 'CREDIT' : 'DEBIT', merchant: 'Local Store', status: 'SUCCESS', source: 'UPI_SIMULATOR' }));
 
 globalThis.fetch = async (url, opts = {}) => {
   const path = url.replace(/^https?:\/\/[^/]+\/api/, '');
@@ -88,11 +91,18 @@ const root = createRoot(container);
 let checks = 0;
 const check = (v, m) => { assert.ok(v, m); checks++; };
 const click = async (text) => {
-  const b = [...container.querySelectorAll('button')].find((b) => b.textContent.includes(text));
+  const b = [...container.querySelectorAll('button')].find((b) => b.textContent.trim() === text || b.textContent.includes(text));
   assert.ok(b, `button containing "${text}"`);
   await act(async () => b.click());
 };
 const flush = () => act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+// The full set of implementation/demo terms this production-facing page must never render,
+// regardless of which step is open (section 4/5/6 of the cleanup pass).
+const BANNED_TERMS = [
+  'Demo', 'demo', 'DEMO', 'Synthetic', 'synthetic', 'simulator', 'simulated', 'sandbox',
+  'ReBIT', 'Account Aggregator Consent', 'Consent ID', 'FI Request ID', 'FIU', 'FIP',
+];
 
 try {
   const { default: FinancialConnections } = await vite.ssrLoadModule('/src/pages/FinancialConnections.jsx');
@@ -100,27 +110,30 @@ try {
   await flush();
 
   check(container.textContent.includes('Financial Connections'), 'page renders its title');
-  check(container.textContent.includes('Connect your finances'), 'the simplified landing copy is shown');
-  check(container.textContent.includes('Demo environment') && container.textContent.includes('Synthetic financial data'), 'the short, unobtrusive synthetic-data disclosure is always visible');
-  check(!container.textContent.includes('ReBIT'), 'implementation terminology is not shown prominently on the normal page');
+  check(container.textContent.includes('Bring your accounts and UPI activity into FinSphere.'), 'the simplified landing copy is shown');
+  check(container.textContent.includes('Connect your financial accounts to bring transactions into FinSphere.'), 'the Bank Accounts card has a short benefit description');
+  check(container.textContent.includes('Connect your UPI activity to keep your transactions in one place.'), 'the UPI card has a short benefit description');
   check(container.textContent.includes('Bank Accounts') && container.textContent.includes('UPI'), 'the two plain connection cards are shown');
   check([...container.querySelectorAll('h3')].filter((h) => h.textContent === 'Bank Accounts' || h.textContent === 'UPI').length === 2, 'Bank Accounts and UPI are each a plain card title');
   const cardText = () => container.querySelector('.grid').textContent;
-  check(cardText().includes('Not connected yet'), 'both cards start as not connected, with no AA/UPI lifecycle terminology on the landing page');
+  check(cardText().includes('Not connected'), 'both cards start as not connected, with no AA/UPI lifecycle terminology on the landing page');
+  for (const term of BANNED_TERMS) check(!container.textContent.includes(term), `landing page never shows the implementation/demo term "${term}"`);
 
   // ── Account Aggregator flow ──────────────────────────────────────────────
-  await click('Manage accounts');
-  check(container.textContent.includes('Connect Financial Accounts'), 'AA panel opens');
+  await click('Connect accounts');
+  check(container.textContent.includes('Connect accounts'), 'AA panel opens (plain "Connect accounts" title, not "Connect Financial Accounts")');
+  const panInput = () => container.querySelector('#aa-pan');
+  check(panInput().value === '', 'the PAN field starts empty - no pre-filled demo PAN');
   await act(async () => {
-    const panInput = container.querySelector('#aa-pan');
-    Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(panInput, 'DEMO-PAN-001');
-    panInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+    Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(panInput(), 'ABCDE1234F');
+    panInput().dispatchEvent(new window.Event('input', { bubbles: true }));
   });
   await act(async () => container.querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })));
   await flush();
   check(container.textContent.includes('PAN verified'), 'PAN verification success is shown');
   check(container.querySelectorAll('input[type=checkbox]').length === 10, 'all 10 discovered accounts are listed with checkboxes');
   check([...container.querySelectorAll('input[type=checkbox]')].every((c) => c.checked), 'every account starts selected');
+  check(container.textContent.includes('These are not live connections to your real accounts.'), 'a plain (non-"demo") disclosure clarifies these are not live account connections');
 
   await click('Deselect');
   check([...container.querySelectorAll('input[type=checkbox]')].every((c) => !c.checked), 'Deselect clears every selection');
@@ -128,38 +141,45 @@ try {
   await act(async () => container.querySelectorAll('input[type=checkbox]')[1].click());
   check(container.textContent.includes('2 of 10 selected'), 'the selected count reflects individual toggles');
 
-  await click('Continue');
+  await click('Review');
   await flush();
-  check(container.textContent.includes('Account Aggregator Consent'), 'consent review screen is shown');
+  check(container.textContent.includes('Review connection'), 'the plain "Review connection" heading is shown instead of "Account Aggregator Consent"');
   check(container.textContent.includes('Selected accounts'), 'consent shows the selected-accounts summary');
+  check(container.textContent.includes('Awaiting approval'), 'the raw PENDING status is shown in plain language');
   check(state.consents.get('consent-1').accountIds.length === 2, 'the server received exactly the 2 selected account ids');
 
-  await click('Approve Consent');
+  await click('Approve');
   await flush();
   check(container.textContent.includes('Accounts connected'), 'connect flow reaches the connected confirmation');
-  check(container.textContent.includes('16 synthetic transactions'), 'the number of inserted transactions is shown to the user');
+  check(container.textContent.includes('16 transactions were added to FinSphere'), 'the number of inserted transactions is shown without calling them "synthetic"');
 
   await click('Done');
-  check(!container.textContent.includes('Connect Financial Accounts'), 'closing the AA panel hides it');
+  check(!container.querySelector('[aria-label="Connect bank accounts"]'), 'closing the AA panel hides it');
   await flush();
-  check(cardText().includes('2 connected'), 'the Bank Accounts card plainly shows the connected count, with no AA terminology');
+  check(cardText().includes('2 accounts connected'), 'the Bank Accounts card plainly shows "N accounts connected", with no AA terminology');
 
   // ── UPI flow ───────────────────────────────────────────────────────────────
   await click('Manage UPI');
-  check(container.textContent.includes('UPI Connections'), 'UPI panel opens');
   await flush();
-  check(container.textContent.includes('Google Pay') && container.textContent.includes('PhonePe') && container.textContent.includes('Paytm') && container.textContent.includes('BHIM'), 'all 4 demo UPI apps are listed');
+  check(container.textContent.includes('Google Pay') && container.textContent.includes('PhonePe') && container.textContent.includes('Paytm') && container.textContent.includes('BHIM'), 'all 4 UPI apps are listed');
+  check(container.textContent.includes('These are not live connections to Google Pay, PhonePe, Paytm or BHIM.'), 'a plain (non-"demo") disclosure clarifies these are not live UPI connections');
 
-  const gpayConnectButtons = () => [...container.querySelectorAll('button')].filter((b) => b.textContent.includes('Connect') && !b.textContent.includes('Disconnect'));
+  // Scoped to the UPI panel itself: the landing page's own "Connect accounts" button (Bank
+  // Accounts card) also matches a bare "Connect" substring and is always present in the DOM.
+  const upiPanel = () => container.querySelector('[aria-label="UPI connections"]');
+  const gpayConnectButtons = () => [...upiPanel().querySelectorAll('button')].filter((b) => b.textContent.includes('Connect') && !b.textContent.includes('Disconnect'));
   await act(async () => gpayConnectButtons()[0].click());
   await flush();
   check(container.textContent.includes('UPI Activity'), 'connecting an app reveals the UPI activity summary');
   check(container.textContent.includes('Connected Apps'), 'summary tiles are shown');
 
-  await click('Synchronize');
+  await click('Sync transactions');
   await flush();
-  check(container.textContent.includes('Synchronized 6 UPI transaction'), 'sync reports how many transactions were added');
+  check(container.textContent.includes('Added 6 transaction'), 'sync reports how many transactions were added, without calling them "synthetic"');
   check(cardText().includes('1 app connected'), 'the UPI card plainly shows the connected app count, with no UPI lifecycle terminology');
+
+  // ── No implementation/demo wording anywhere, in any state reached above ────
+  for (const term of BANNED_TERMS) check(!container.textContent.includes(term), `the fully-open UI never shows the implementation/demo term "${term}"`);
 
   console.log(`Financial Connections UI: ${checks} checks passed`);
 } finally {

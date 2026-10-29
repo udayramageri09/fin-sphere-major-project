@@ -142,7 +142,7 @@ try {
   ok(document.querySelector('.ai-provider-label')?.textContent === 'AI processing', 'selector: compact "AI processing" label is shown');
   ok(!!fastBtn && !!localBtn, 'selector: both Fast and Local buttons render');
   ok(fastBtn.getAttribute('aria-pressed') === 'true' && localBtn.getAttribute('aria-pressed') === 'false', 'selector: Fast is selected by default');
-  ok(document.querySelector('.ai-provider-subtext').textContent === 'Groq · faster responses', 'selector: Fast subtext is shown');
+  ok(document.querySelector('.ai-provider-subtext').textContent === 'Faster responses', 'selector: Fast subtext is shown, with no vendor name');
 
   // ── Fast mode still calls /plan-chat ───────────────────────────────────────
   const chip = () => [...document.querySelectorAll('.quick-prompt-chip')].find((c) => c.textContent === 'What should I do first?');
@@ -179,14 +179,17 @@ try {
     };
   };
   await click(buttonWithText('Local'));
-  await waitFor(() => document.querySelector('.ai-provider-status')?.textContent.includes('Loading local model'));
+  await waitFor(() => document.querySelector('.ai-provider-status')?.textContent.includes('Setting up Local AI'));
   ok(document.querySelector('.ai-provider-status').textContent.includes('50%'), 'Local: a loading percentage from initProgressCallback is shown', document.querySelector('.ai-provider-status').textContent);
-  ok(typeof receivedModelId === 'string' && receivedModelId.length > 0, 'Local: a real, non-empty model id was requested');
+  ok(typeof receivedModelId === 'string' && receivedModelId.length > 0, 'Local: a real, non-empty model id was requested (but never rendered - see the implementation-leak sweep below)');
 
   await act(async () => { resolveEngine(); await tick(30); });
   await waitFor(() => document.querySelector('.ai-provider-status')?.textContent.includes('Local AI ready'));
   ok(document.querySelector('.ai-provider-status').textContent.startsWith('Local AI ready'), 'Local: "Local AI ready" is shown once loaded');
   ok(!/All your financial data is processed locally/.test(document.body.textContent), 'Local: the overstated "all data processed locally" claim is never made');
+  for (const term of ['WebLLM', 'web-llm', 'SmolLM', 'mlc-ai', 'q4f16', receivedModelId]) {
+    ok(!document.body.textContent.includes(term), `Local: implementation detail "${term}" is never rendered in the UI`);
+  }
 
   const chatInput = document.querySelector('[aria-label="Ask the advisor about this analysis"]');
   await act(async () => {
