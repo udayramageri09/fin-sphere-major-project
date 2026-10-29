@@ -247,7 +247,9 @@ class ForecastCaveats(unittest.TestCase):
         self.assertIn('2 month(s)', short[0])
         weak = forecast_caveats(fc(months_analyzed=6, r2=0.1))
         self.assertEqual(len(weak), 1)
-        self.assertIn('R² 0.10', weak[0])
+        # Plain-language only: the caveat names the weak series but never a statistical metric.
+        self.assertIn('Low fit', weak[0])
+        self.assertNotIn('R²', weak[0])
         self.assertEqual(forecast_caveats({}), [])
 
     def test_a_constant_mean_model_is_not_called_low_fit(self):
