@@ -70,7 +70,7 @@ const an01 = step({
   },
 });
 const cl01 = step({
-  step_id: 'CL-01', title: 'High Concentration in Large Transactions', description: 'Spending clustering (Agglomerative, Ward) shows 80.0% of your spending is in high-value transactions.',
+  step_id: 'CL-01', title: 'High Concentration in Large Transactions', description: 'Spending clustering shows 80.0% of your spending is in high-value transactions.',
   priority: 'high', priority_rank: 2, kind: 'risk', method: 'ml_signal', source_model: 'Agglomerative clustering (Ward)', category_order: 6, action: null,
   evidence: { metric: 'high_value_exposure_pct', label: 'Spending in the largest-amount cluster', value: 80, unit: '%', threshold: { comparator: '>', value: 70, meaning: 'high concentration' }, formula: 'Share of total spending value in the largest-amount cluster', inputs: [], contributors: [], caveats: [] },
 });
