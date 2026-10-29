@@ -37,7 +37,7 @@ const children = [];
 
 function start(port, extraEnv = {}) {
   const env = { ...process.env, DATABASE_URL: urlFor(DB), PORT: String(port), JWT_SECRET: SECRET, GROQ_API_KEY: '', PASSWORD_RESET_DELIVERY: '', RESEND_API_KEY: '', PASSWORD_RESET_FROM: '', PASSWORD_RESET_URL: '', ...extraEnv };
-  for (const k of ['NODE_ENV', 'CORS_ORIGINS', 'TRUST_PROXY', 'DATABASE_SSL', 'FINSPHERE_TEST_UPLOAD_LIMIT']) if (!(k in extraEnv)) delete env[k];
+  for (const k of ['NODE_ENV', 'CORS_ORIGINS', 'TRUST_PROXY', 'DATABASE_SSL', 'FINSPHERE_TEST_UPLOAD_LIMIT', 'AA_ALLOW_LOCAL_SIMULATOR_IN_PRODUCTION']) if (!(k in extraEnv)) delete env[k];
   const child = spawn(process.execPath, ['server.js'], { cwd: SERVER_DIR, env, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   child.stdout.on('data', (d) => { out += d; }); child.stderr.on('data', (d) => { out += d; });
@@ -199,8 +199,10 @@ async function run() {
   raised.child.kill();
 
   // ── Production-mode server: secure cookie, no CORS when unset, override ignored ─
+  // AA_ALLOW_LOCAL_SIMULATOR_IN_PRODUCTION opts into the synthetic AA simulator here on purpose:
+  // this block tests other production behaviour, not the AA provider guard (covered separately).
   const P2 = 5072;
-  const prod = start(P2, { NODE_ENV: 'production', DATABASE_SSL: 'false', FINSPHERE_TEST_UPLOAD_LIMIT: '100000' });
+  const prod = start(P2, { NODE_ENV: 'production', DATABASE_SSL: 'false', FINSPHERE_TEST_UPLOAD_LIMIT: '100000', AA_ALLOW_LOCAL_SIMULATOR_IN_PRODUCTION: 'true' });
   ok(await ready(P2), 'prod-mode server starts', prod.out());
   ok(/CORS_ORIGINS is not set/.test(prod.out()), 'prod warns when CORS_ORIGINS unset');
   ok(/FINSPHERE_TEST_UPLOAD_LIMIT is ignored in production/.test(prod.out()), 'prod ignores and reports the test override');

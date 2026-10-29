@@ -69,14 +69,16 @@ try {
   check(groups.filter((g) => g.getAttribute('tabindex') === '0').length === 1, 'one Tab stop for the whole chart (roving tabindex)');
   check(groups.every((g) => g.tagName === 'BUTTON' && g.type === 'button'), 'months are real buttons, so Enter and Space work');
 
-  // forecast detail: provenance and missing value
+  // forecast detail: labelled as a forecast, with no model/algorithm/fit-metric provenance shown
+  // (production cleanup pass: "How this forecast works" / "ML · LinearRegression" / "R²" removed)
   await click(groups[4]);
-  check(text(detail()).includes('Forecast') && text(detail()).includes('ML · LinearRegression') && text(detail()).includes('R² income 0.2, spending 0.35'), 'forecast details keep the model and fit provenance');
+  check(text(detail()).includes('Forecast'), 'forecast details are labelled as a forecast');
+  check(!text(detail()).includes('ML · LinearRegression') && !text(detail()).includes('R²'), 'forecast details no longer expose the model name or fit metric');
   await click(groups[6]);
   check(text(detail()).includes('Spending') && text(detail()).includes('Unavailable') && !text(detail()).includes('Left after spending₹'), 'a missing forecast value reads Unavailable and no amount left is invented');
   check(qa('.bar-pair')[6].querySelectorAll('.bar').length === 1, 'no bar is drawn for a missing value');
   await click(groups[0]);
-  check(!text(detail()).includes('ML · LinearRegression'), 'recorded months do not claim a model');
+  check(!text(detail()).includes('ML · LinearRegression'), 'recorded months do not claim a model either');
 
   // exact values table
   const details = q('details.forecast-table-details');
