@@ -2383,7 +2383,7 @@ Guidelines:
   // Fallback: summarise plan without LLM
   const fallbackReply = typeof plan.plan_summary === 'string' && plan.plan_summary
     ? `${plan.plan_summary} The analysis identified ${Number(plan.step_count) || 0} action items for you.`
-    : 'Analysis complete. Please configure Groq API key for AI narration.';
+    : "Analysis complete. A written summary isn't available right now - try asking about a specific result below.";
   res.json({ reply: fallbackReply });
   } catch (err) {
     console.error('Plan chat request failed:', err?.name ?? 'unknown');
@@ -2394,7 +2394,13 @@ Guidelines:
 // FinSphere Local Account Aggregator Development Simulator integration (PAN linking, synthetic
 // account discovery/consent/FI-request flow, and the separate UPI connection simulator). Not a
 // certified Account Aggregator or a real bank/UPI integration - see aa_simulator/README.md.
-const aaProvider = createAaProvider();
+let aaProvider;
+try {
+  aaProvider = createAaProvider();
+} catch (err) {
+  console.error('FATAL:', err.message);
+  process.exit(1);
+}
 const upiSimulator = createUpiSimulator();
 const financialConnectionsLimiter = perUserLimiter(120, 'financial connections');
 app.use('/api/aa', aaRouter(authenticate, { createTransactionFor, aaProvider, upiSimulator, limiter: financialConnectionsLimiter }));

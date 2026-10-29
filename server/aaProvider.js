@@ -67,10 +67,24 @@ export function createLocalAaProvider({ baseUrl } = {}) {
 
 // Selects a provider by AA_PROVIDER (default/only supported value today: "local"). This is the
 // single place a future real provider would be wired in.
+//
+// Production safety boundary: the local simulator fabricates synthetic bank/UPI data under real
+// institution names (HDFC, SBI, ICICI, ...). Running it in a real production deployment without
+// an explicit, conscious opt-in would let FinSphere present synthetic financial connections as if
+// they were real ones. So a production start-up refuses to use it unless
+// AA_ALLOW_LOCAL_SIMULATOR_IN_PRODUCTION=true is set - the moment a real, certified provider is
+// implemented here (a different providerName), this check no longer applies to it at all.
 export function createAaProvider(env = process.env) {
   const kind = env.AA_PROVIDER || 'local';
   if (kind !== 'local') {
     throw new Error(`Unknown AA_PROVIDER "${kind}". Only "local" (the synthetic simulator) is implemented.`);
   }
-  return createLocalAaProvider({ baseUrl: env.AA_SIMULATOR_URL });
+  const provider = createLocalAaProvider({ baseUrl: env.AA_SIMULATOR_URL });
+  if (env.NODE_ENV === 'production' && provider.providerName === 'local-simulator' && env.AA_ALLOW_LOCAL_SIMULATOR_IN_PRODUCTION !== 'true') {
+    throw new Error(
+      'Refusing to start in production with the synthetic local Account Aggregator simulator (it would present fabricated bank/UPI data as if real). ' +
+      'Configure a real AA_PROVIDER, or set AA_ALLOW_LOCAL_SIMULATOR_IN_PRODUCTION=true only if this production deployment is intentionally running on synthetic data.'
+    );
+  }
+  return provider;
 }
