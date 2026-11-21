@@ -110,10 +110,19 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: server/package-lock.json
+          cache-dependency-path: |
+            server/package-lock.json
+            aa_simulator/package-lock.json
 
       - name: Install (server lockfile)
         working-directory: server
+        run: npm ci
+
+      - name: Install (aa_simulator lockfile)
+        # test:financial-connections (server/tests/financialConnectionsServer.test.mjs) spawns the
+        # real aa_simulator/server.js as a child process, so it needs its own dependencies (express)
+        # installed - this is a separate package.json/package-lock.json, not covered by the step above.
+        working-directory: aa_simulator
         run: npm ci
 
       - name: Wait for PostgreSQL
