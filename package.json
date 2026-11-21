@@ -25,6 +25,9 @@
     "test:settings": "node tests/settingsProfileUi.test.mjs",
     "test:portfolio": "node tests/profilePortfolioUi.test.mjs",
     "test:assistant-reply": "node tests/assistantReplyUi.test.mjs",
+    "test:financial-connections-ui": "node tests/financialConnectionsUi.test.mjs",
+    "test:intelligence-providers": "node --test tests/intelligenceProviders.test.mjs",
+    "test:provider-selector": "node tests/intelligenceProviderSelectorUi.test.mjs",
     "dev": "vite",
     "server": "node server/server.js",
     "build": "vite build",
@@ -44,6 +47,7 @@
     "test": "npm run test:all"
   },
   "dependencies": {
+    "@mlc-ai/web-llm": "0.2.85",
     "framer-motion": "^13.1.0",
     "lucide-react": "^1.14.0",
     "pdfjs-dist": "^6.5.438",

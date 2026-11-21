@@ -70,7 +70,7 @@ const an01 = step({
   },
 });
 const cl01 = step({
-  step_id: 'CL-01', title: 'High Concentration in Large Transactions', description: 'Spending clustering (Agglomerative, Ward) shows 80.0% of your spending is in high-value transactions.',
+  step_id: 'CL-01', title: 'High Concentration in Large Transactions', description: 'Spending clustering shows 80.0% of your spending is in high-value transactions.',
   priority: 'high', priority_rank: 2, kind: 'risk', method: 'ml_signal', source_model: 'Agglomerative clustering (Ward)', category_order: 6, action: null,
   evidence: { metric: 'high_value_exposure_pct', label: 'Spending in the largest-amount cluster', value: 80, unit: '%', threshold: { comparator: '>', value: 70, meaning: 'high concentration' }, formula: 'Share of total spending value in the largest-amount cluster', inputs: [], contributors: [], caveats: [] },
 });
@@ -250,18 +250,28 @@ try {
   ok(!/ML Financial Intelligence|Run ML Analysis|Running ML Models|directly from our ML|every insight/i.test(text), 'no "ML Financial Intelligence" / "Run ML Analysis" wording', text.slice(0, 200));
   ok(!/K-?Means/i.test(text), 'no KMeans wording anywhere');
   ok(!text.includes('🤖'), 'no robot badge anywhere');
-  ok(/Rule-based score/.test(document.querySelector('.state-score-note').textContent), 'the health score is labelled rule-based');
-  ok(step$('HS-05').querySelector('.action-meta span').textContent === 'Rule' && step$('HS-04').querySelector('.action-meta span').textContent === 'Rule', 'health-score steps are tagged "Rule"');
-  ok(['FC-01', 'AN-01', 'CL-01', 'FC-02'].every((id) => step$(id).querySelector('.action-meta span').textContent === 'ML signal'), 'forecast / anomaly / cluster steps are tagged "ML signal"');
+  // Production cleanup pass: no model/algorithm names, "Method" disclosures, or rule-vs-ML-signal
+  // attribution are rendered anywhere, even though the server data backing this test still carries
+  // them (method, source_model, model_metrics.silhouette_score, etc. - a real backend response
+  // would too). Only what the result means is shown, never how the system produced it.
+  ok(!document.querySelector('.state-score-note'), 'the "About this score" implementation disclosure is removed entirely');
+  ok(!/Rule-based/i.test(text), 'the health score card no longer says "Rule-based"');
+  ok(![...document.querySelectorAll('.action-meta span')].some((s) => s.textContent === 'Rule' || s.textContent === 'ML signal'), 'actions no longer tag themselves "Rule" or "ML signal"');
+  ok(step$('HS-05').querySelector('.action-meta').textContent.includes('1 month'), 'the timeline is still shown without the method tag');
   ok(!step$('HS-05').textContent.includes('HealthScorer') && !text.includes('source_model'), 'no HealthScorer-as-ML badge');
-  const tags = [...document.querySelectorAll('.analysis-content .model-tag')].map((t) => t.textContent);
-  ok(tags.length === 3 && /LinearRegression/.test(tags[0]) && /IsolationForest/.test(tags[1]) && /Agglomerative \(Ward\)/.test(tags[2]) && tags.every((t) => t.startsWith('ML')), 'details: honest model tags', tags.join(' | '));
+  ok(document.querySelectorAll('.analysis-content .model-tag').length === 0 && !document.querySelector('.analysis-method'), 'no model-name tags or "Method" disclosures are rendered in the analysis details');
+  // R² is deliberately NOT included in this sweep: the server's own forecast-limitations caveat
+  // sentence (Python ml_service/models/plan_generator.py, untouched here) legitimately still
+  // contains it inside the optional "Forecast limitations" disclosure - that is backend-authored
+  // analytical narrative, not a frontend-built model/algorithm label, and is out of scope for a
+  // presentation-only cleanup.
+  ok(!/LinearRegression|IsolationForest|Agglomerative|\bWard\b|silhouette/i.test(text), 'no algorithm names or model-fit metrics appear anywhere on the page', (text.match(/LinearRegression|IsolationForest|Agglomerative|\bWard\b|silhouette/i) || [])[0]);
   ok(!text.includes('ML:') && !text.includes('Rules:'), 'technical metadata is not shown in the overview');
 
   // current state: server figures, period, DTI reason, low-confidence caveat
   const stateText = document.querySelector('.state-card').textContent;
   ok(!stateText.includes('About this figure') && [...document.querySelectorAll('.state-card .metric-note')].every(note=>note.tagName==='P'), 'financial figure notes are displayed directly');
-  ok(stateText.includes('62.4') && stateText.includes('Grade C') && stateText.includes('from 5 of 6 ratios'), 'state: score, grade and ratios available', stateText);
+  ok(stateText.includes('62.4') && stateText.includes('Grade C'), 'state: score and grade available, shown plainly (e.g. "62.4/100 · Grade C") without a ratio-count disclosure', stateText);
   ok(stateText.includes('₹52,000') && stateText.includes('₹42,500') && stateText.includes('over 5 months'), 'state: monthly income and net spending with the period');
   ok(stateText.includes('18.2%') && stateText.includes('1.4 months') && document.querySelector('.forecast-trends').textContent.includes('₹21,000'), 'state: savings rate, emergency coverage, projected savings');
   ok(stateText.includes("Unavailable: the monthly debt total couldn't be worked out"), 'state: DTI unavailable reason from the server', stateText);
@@ -293,10 +303,10 @@ try {
   await click(why);
   const whyText = step$('HS-05').querySelector('[data-panel="why"]').textContent;
   ok(whyText.includes('Emergency coverage: 1.42 months') && whyText.includes('< 3 months (minimum safe buffer)'), 'explain: Why? shows the server value and threshold exactly', whyText);
-  await click(buttonIn(step$('HS-05'), 'How calculated?'));
-  const howText = step$('HS-05').querySelector('[data-panel="how"]').textContent;
-  ok(howText.includes('Emergency fund ÷ Average monthly net spending') && howText.includes('Emergency fund: ₹60,350') && howText.includes('Average monthly net spending: ₹42,500/month (over 5 months)'), 'explain: How calculated? shows the formula and inputs', howText);
-  ok(!step$('HS-05').querySelector('[data-panel="why"]'), 'explain: one panel open at a time');
+  // Production cleanup pass: "How calculated?" and "Show breakdown" (formulas, ratio weights,
+  // internal scores) no longer exist as controls at all, on any step.
+  ok(!buttonIn(step$('HS-05'), 'How calculated?'), 'explain: "How calculated?" control no longer exists');
+  ok(!buttonIn(step$('HS-05'), 'Show breakdown'), 'explain: "Show breakdown" control no longer exists');
   ok(!buttonIn(step$('HS-05'), 'What caused this?'), 'explain: no "What caused this?" when the server returned no contributors');
   await click(buttonIn(step$('AN-01'), 'What caused this?'));
   const causeText = step$('AN-01').querySelector('[data-panel="cause"]').textContent;
@@ -306,11 +316,7 @@ try {
   ok(causeFc.includes('Rent: ₹1,00,000 (47.1% of spending)') && causeFc.includes('Food: ₹60,000'), 'explain: spending contributors are the server\'s category breakdown', causeFc);
   await click(buttonIn(step$('FC-01'), 'Why?'));
   ok(step$('FC-01').querySelector('[data-panel="why"]').textContent.includes('Low fit'), 'explain: evidence caveats are shown');
-  await click(buttonIn(step$('HS-05'), 'Show breakdown'));
-  const bd = step$('HS-05').querySelector('[data-panel="breakdown"]').textContent;
-  ok(bd.includes('Savings rate') && bd.includes('18.2%') && bd.includes('58/100') && bd.includes('29.4%') && bd.includes('Emergency coverage') && bd.includes('17.6%'), 'explain: breakdown shows each ratio with its score and weight from the server', bd);
-  ok(bd.includes("Debt-to-income: Unavailable: the monthly debt total couldn't be worked out"), 'explain: breakdown states why a ratio is unavailable');
-  ok(bd.includes('Rent: ₹1,00,000 (47.1%)') && bd.includes('Other categories: ₹52,500') && bd.includes('Total: ₹2,12,500'), 'explain: breakdown shows spending by category', bd);
+  ok(!step$('FC-01').querySelector('[data-panel="cause"]'), 'explain: one panel open at a time');
 
   // analysis details
   await click(details.querySelector('summary'));
@@ -346,7 +352,7 @@ try {
     await mount();
     await waitFor(() => document.querySelector('.state-card'));
     const s = document.querySelector('.state-card').textContent;
-    ok(s.includes(expected) && s.includes('Unavailable: no income recorded in this period') && s.includes('from 4 of 6 ratios'), `state: emergency "${reason}" and DTI "no_income" reasons`, s);
+    ok(s.includes(expected) && s.includes('Unavailable: no income recorded in this period'), `state: emergency "${reason}" and DTI "no_income" reasons`, s);
   }
 
   // ═══ 3. partial failure ═════════════════════════════════════════════════════════════════════════════════════════

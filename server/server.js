@@ -38,6 +38,9 @@ import { categoryRuleKey, detectMerchantCategory } from './merchantCategories.js
 import { buildMessages, cleanItems, parseSuggestions } from './aiClassify.js';
 import { cleanScreenContext, screenContextPrompt } from './screenContext.js';
 import { sandboxEnabled, demoOverview, grantDemoConsent, hasDemoConsent } from './accountAggregatorSandbox.js';
+import { createAaProvider } from './aaProvider.js';
+import { createUpiSimulator } from './upiSimulator.js';
+import { aaRouter, upiRouter } from './financialConnections.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -2470,13 +2473,28 @@ Guidelines:
   // Fallback: summarise plan without LLM
   const fallbackReply = typeof plan.plan_summary === 'string' && plan.plan_summary
     ? `${plan.plan_summary} The analysis identified ${Number(plan.step_count) || 0} action items for you.`
-    : 'Analysis complete. Please configure Groq API key for AI narration.';
+    : "Analysis complete. A written summary isn't available right now - try asking about a specific result below.";
   res.json({ reply: fallbackReply });
   } catch (err) {
     console.error('Plan chat request failed:', err?.name ?? 'unknown');
     if (!res.headersSent) res.status(500).json({ error: 'Could not answer right now' });
   }
 });
+
+// FinSphere Local Account Aggregator Development Simulator integration (PAN linking, synthetic
+// account discovery/consent/FI-request flow, and the separate UPI connection simulator). Not a
+// certified Account Aggregator or a real bank/UPI integration - see aa_simulator/README.md.
+let aaProvider;
+try {
+  aaProvider = createAaProvider();
+} catch (err) {
+  console.error('FATAL:', err.message);
+  process.exit(1);
+}
+const upiSimulator = createUpiSimulator();
+const financialConnectionsLimiter = perUserLimiter(120, 'financial connections');
+app.use('/api/aa', aaRouter(authenticate, { createTransactionFor, aaProvider, upiSimulator, limiter: financialConnectionsLimiter }));
+app.use('/api/upi', upiRouter(authenticate, { createTransactionFor, upiSimulator, limiter: financialConnectionsLimiter }));
 
 // Last-resort error handler: always JSON, never a stack trace, and nothing from the request body is logged.
 // (Without it Express answers body-parser and multer failures with an HTML page that includes the stack

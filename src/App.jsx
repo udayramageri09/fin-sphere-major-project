@@ -13,6 +13,7 @@ const Goals = lazy(() => import('./pages/Goals'))
 const Subscriptions = lazy(() => import('./pages/Subscriptions'))
 const Plans = lazy(() => import('./pages/Plans'))
 const Settings = lazy(() => import('./pages/Settings'))
+const FinancialConnections = lazy(() => import('./pages/FinancialConnections'))
 import AIAvatar from './components/AIAvatar'
 import AuthPage from './pages/AuthPage'
 import Onboarding from './components/Onboarding'
@@ -70,6 +71,7 @@ function AuthenticatedApp({ hidden }) {
                 {currentView === 'goals' && <Goals onDiscussGoals={() => { setDiscussGoals(true); setCurrentView('plans'); }} />}
                 {currentView === 'subscriptions' && <Subscriptions />}
                 {currentView === 'plans' && <Plans discussGoals={discussGoals} />}
+                {currentView === 'connections' && <FinancialConnections />}
                 {currentView === 'settings' && <Settings guideTone={guideTone} onGuideToneChange={changeGuideTone} />}
               </PageBoundary>
             </div>

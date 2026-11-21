@@ -8,9 +8,6 @@ function Score({ score }) {
     <div className="state-score" data-testid="health-score">
       <div className="state-score-number">{score.value}<span>/100</span></div>
       <div className="state-score-grade">Grade {score.grade} · {score.label}</div>
-      <details className="state-score-note"><summary>About this score</summary>
-        Rule-based score{score.ratiosUsed < score.ratiosTotal ? ` · from ${score.ratiosUsed} of ${score.ratiosTotal} ratios` : ''}
-      </details>
     </div>
   );
 }

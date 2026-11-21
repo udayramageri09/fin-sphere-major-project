@@ -223,10 +223,14 @@ class HonestWording(unittest.TestCase):
         s = next(x for x in pipeline(F.no_income(), 5000.0, None)['steps'] if x['step_id'] == 'HS-01')
         self.assertIn('percentage points to close', s['expected_outcome'])
 
-    def test_summary_says_which_parts_are_rule_based(self):
+    def test_summary_is_plain_financial_language(self):
+        # The summary reaches users directly (it is the /plan-chat fallback reply when Groq is
+        # unavailable - see server/server.js), so it must never name an implementation detail.
         plan = pipeline(F.typical(), 15000.0, 40000.0)
-        self.assertIn('rule-based', plan['plan_summary'])
-        self.assertIn('ML signals', plan['plan_summary'])
+        self.assertIn('financial patterns identified in your data', plan['plan_summary'])
+        for bad in ('rule-based', 'ML signals', 'ML', 'machine learning', 'model', 'algorithm',
+                    'LinearRegression', 'IsolationForest', 'Agglomerative', 'Ward', 'R²', 'silhouette'):
+            self.assertNotIn(bad, plan['plan_summary'], bad)
 
     def test_service_labels_in_main(self):
         from main import full_analysis, AnalysisRequest, Transaction, health_check
@@ -247,7 +251,9 @@ class ForecastCaveats(unittest.TestCase):
         self.assertIn('2 month(s)', short[0])
         weak = forecast_caveats(fc(months_analyzed=6, r2=0.1))
         self.assertEqual(len(weak), 1)
-        self.assertIn('R² 0.10', weak[0])
+        # Plain-language only: the caveat names the weak series but never a statistical metric.
+        self.assertIn('Low fit', weak[0])
+        self.assertNotIn('R²', weak[0])
         self.assertEqual(forecast_caveats({}), [])
 
     def test_a_constant_mean_model_is_not_called_low_fit(self):

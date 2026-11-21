@@ -149,7 +149,7 @@ def forecast_caveats(forecast: dict) -> list:
         series = fc.get(key, {})
         r2 = series.get('r2')
         if series.get('model') == 'linear_regression' and isinstance(r2, (int, float)) and r2 < 0.3:
-            weak.append(f'{name} R² {r2:.2f}')
+            weak.append(name)
     if weak:
         caveats.append(f'Low fit ({", ".join(weak)}): the straight-line trend explains little of the month-to-month change, so treat the projection as rough.')
     return caveats
@@ -446,12 +446,12 @@ def generate_plan(
              'avg_amount': c.get('centroid_amount')}
             for c in clusters['clusters']
         ]
-        cluster_caveats = [f'Clusters group transactions by amount only (silhouette {silhouette}); they describe size, not purpose.'] if silhouette is not None else []
+        cluster_caveats = ['Clusters group transactions by amount only; they describe size, not purpose.'] if silhouette is not None else []
 
         if high_value_pct > 70:
             steps.append(_make_step(
                 'CL-01', 'High Concentration in Large Transactions',
-                f'Spending clustering (Agglomerative, Ward) shows {high_value_pct:.1f}% of your spending value is in your largest transactions. '
+                f'Spending clustering shows {high_value_pct:.1f}% of your spending value is in your largest transactions. '
                 f'Clusters group amounts only, so this does not show what the money was for. '
                 f'Check whether these are recurring commitments or one-off purchases, and whether any can be spread out or reduced.',
                 'high', '2–3 months',
@@ -504,11 +504,11 @@ def generate_plan(
         plan_title = "✅ Financial Maintenance Plan — You're on Track"
 
     score = health_score  # None when there is no health result: nothing is invented
-    score_text = f"Overall health score: {score:.0f}/100 (rule-based). " if score is not None else ""
+    score_text = f"Overall health score: {score:.0f}/100. " if score is not None else ""
     plan_summary = (
         f"{score_text}"
-        f"{len(steps)} action items from rule-based health checks and ML signals "
-        f"(forecast, anomalies, spending clusters)."
+        f"This plan is based on the financial patterns identified in your data, "
+        f"with {len(steps)} action item{'s' if len(steps) != 1 else ''} for you to review."
     )
 
     from datetime import datetime, timezone

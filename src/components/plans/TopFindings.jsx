@@ -16,7 +16,7 @@ function TopFindings({ findings }) {
           {planFailed ? (
             <p className="findings-none">Unavailable</p>
           ) : risks.length === 0 ? (
-            <p className="findings-none">No risks found in the ratios we could compute.</p>
+            <p className="findings-none">No risks found in your current financial position.</p>
           ) : (
             <ul className="findings-list" data-testid="risk-list">
               {risks.map((s) => (

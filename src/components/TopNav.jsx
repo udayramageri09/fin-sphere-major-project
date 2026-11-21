@@ -1,4 +1,4 @@
-import { LayoutDashboard, Wallet, CreditCard, PieChart, Target, CalendarRange, Brain, Menu, X, Settings } from 'lucide-react';
+import { LayoutDashboard, Wallet, CreditCard, PieChart, Target, CalendarRange, Brain, Menu, X, Settings, Link2 } from 'lucide-react';
 import { useState } from 'react';
 import BrandMark from './BrandMark';
 
@@ -10,6 +10,7 @@ const navItems = [
   { id: 'goals', label: 'Goals', icon: Target, tip: 'Open Goals to track savings targets and manage your budgets.' },
   { id: 'subscriptions', label: 'SIPs & Subs', icon: CalendarRange, tip: 'Open SIPs and Subscriptions to review recurring payments.' },
   { id: 'plans', label: 'Financial Intelligence', icon: Brain, tip: 'Get an analysis of your spending and ask the Advisor about the results.' },
+  { id: 'connections', label: 'Connections', icon: Link2, tip: 'Open Connections to link accounts and import statements.' },
 ];
 const SETTINGS_TIP = 'Open Settings to manage your profile and accessibility preferences.';
 

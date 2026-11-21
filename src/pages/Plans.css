@@ -541,6 +541,33 @@
 .plan-chat-title span { font-weight: 600; font-size: 0.9rem; display: block; }
 .plan-chat-title small { font-size: 0.65rem; color: var(--text-secondary); }
 
+/* Compact Fast/Local AI processing selector - deliberately small, no settings page. */
+.ai-provider-selector { margin-top: 0.6rem; padding-top: 0.6rem; border-top: 1px solid var(--border-color); }
+.ai-provider-label { font-size: 0.65rem; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.03em; }
+.ai-provider-buttons { display: flex; gap: 0.4rem; margin-top: 0.35rem; }
+.ai-provider-btn {
+  display: inline-flex; align-items: center; gap: 0.3rem;
+  font-size: 0.75rem; font-weight: 500;
+  padding: 0.3rem 0.65rem;
+  border-radius: 20px;
+  border: 1px solid var(--border-color);
+  background: var(--surface-color);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.ai-provider-btn:hover { background: rgba(37,99,235,0.08); }
+.ai-provider-btn[aria-pressed="true"] { background: var(--accent-primary); color: white; border-color: var(--accent-primary); }
+.ai-provider-subtext { font-size: 0.65rem; color: var(--text-secondary); margin-top: 0.35rem; }
+.ai-provider-status { font-size: 0.65rem; color: var(--text-secondary); margin-top: 0.2rem; }
+.ai-provider-error { margin-top: 0.35rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.ai-provider-error p { font-size: 0.7rem; color: var(--danger); margin: 0; }
+.ai-provider-error button {
+  font-size: 0.7rem; font-weight: 600; padding: 0.25rem 0.6rem; border-radius: 16px;
+  border: 1px solid var(--accent-primary); background: transparent; color: var(--accent-primary); cursor: pointer;
+}
+.ai-provider-error button:hover { background: var(--accent-primary); color: white; }
+
 .plan-chat-body {
   flex: 1;
   padding: 1rem;
