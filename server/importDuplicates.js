@@ -63,15 +63,17 @@ export function summarizeDuplicates(results) {
 
 // What a client may see: its own candidate rows and, for each, the one saved row it matched (never anything else).
 const publicMatch = (m) => ({ id: m.id, title: m.title, amount: m.amount, date: m.date, type: m.type });
-export function buildPreview(rows, results, { skipped = 0, digest }) {
+export function buildPreview(rows, results, { skipped = 0, digest, reviewedPdf = false }) {
   return {
     summary: summarizeDuplicates(results),
     skipped,
     maxRows: MAX_IMPORT_ROWS,
     reviewDigest: digest,
+    ...(reviewedPdf ? { reviewedPdf: true } : {}),
     rows: rows.map((row, index) => ({
       index,
       title: row.title, amount: row.amount, date: row.date, type: row.type, category: row.category,
+      ...(reviewedPdf ? { classification: row.classification } : {}),
       duplicate: results[index].tier ? { tier: results[index].tier, match: publicMatch(results[index].match) } : null
     }))
   };
@@ -85,10 +87,10 @@ export function buildPreview(rows, results, { skipped = 0, digest }) {
 /** Bind a preview to its owner and matching snapshot, not just the proposed rows.
  * This is integrity protection, not authorization: confirmation must still authenticate
  * and recompute under the database import lock before committing any writes. */
-export function reviewDigest(secret, userId, rows, results, existing) {
+export function reviewDigest(secret, userId, rows, results, existing, reviewedPdf = false) {
   const canonical = JSON.stringify([
-    'finsphere:import-review:v2', Number(userId),
-    rows.map((r) => [r.date, toPaise(r.amount), r.type, r.title, r.category]),
+    reviewedPdf ? 'finsphere:pdf-review:v1' : 'finsphere:import-review:v2', Number(userId),
+    rows.map((r) => [r.date, toPaise(r.amount), r.type, r.title, r.category, ...(reviewedPdf ? [r.classification] : [])]),
     results.map((r) => [r.tier, r.match ? String(r.match.id) : null]),
     existing.map((r) => String(r.id))
   ]);

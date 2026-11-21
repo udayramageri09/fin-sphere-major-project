@@ -7,6 +7,7 @@ import { summarizeTransactions } from '../utils/finance';
 import { localDateString } from '../utils/localDate';
 import { requestImageText } from '../utils/imageOcr';
 import { requestImportConfirm, normalizePreview } from '../utils/duplicateReview';
+import { readCategoryRules, readPdfRules, rememberPdfRules } from '../utils/categoryRules';
 
 const FinanceContext = createContext(null);
 
@@ -457,26 +458,53 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     return data;
   };
 
+  const accountAggregatorRequest = import.meta.env.DEV ? async (action, body) => {
+    let response;
+    try {
+      response = await apiFetch(`${API_URL}/transactions/account-aggregator-sandbox/${action}`, {
+        method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+      });
+    } catch (error) {
+      if (!(error instanceof TypeError)) throw error;
+      throw new Error('Could not reach the local Account Aggregator sandbox.', { cause: error });
+    }
+    if (response.status === 401) {
+      invalidateSession();
+      throw new Error('Your session expired. Please log in again.');
+    }
+    if (response.status === 404) throw new Error('The Account Aggregator sandbox is not enabled on this API.');
+    const data = await response.json().catch(() => null);
+    if (!response.ok || !data) throw new Error(data?.error || 'The sandbox could not complete this request.');
+    if (action === 'import') await fetchTransactions();
+    return data;
+  } : undefined;
+
   // Handles pasting text or uploading files
   const parseStatement = async (input) => {
     setLoading(true);
     setError(null);
     try {
       let res;
+      const categoryRules = readCategoryRules(user?.id);
       if (input instanceof File) {
         const formData = new FormData();
         formData.append('statementFile', input);
+        formData.append('categoryRules', JSON.stringify(categoryRules));
         res = await apiFetch(`${API_URL}/transactions/parse-statement?duplicates=report`, {
           method: 'POST',
           credentials: 'include',
           body: formData
         });
       } else {
+        const body = JSON.stringify({ text: input, categoryRules });
+        if (new TextEncoder().encode(body).length > 100 * 1024) {
+          throw new Error('The statement and saved category rules are too large to import together. Split the statement into smaller parts.');
+        }
         res = await apiFetch(`${API_URL}/transactions/parse-statement?duplicates=report`, {
           method: 'POST',
           credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: input })
+          body
         });
       }
 
@@ -506,6 +534,53 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
     } finally {
       setLoading(false);
     }
+  };
+
+  // Asks the server for AI category suggestions for narrations the local rules could not place. Suggestions only; it never throws,
+  // so an offline model or a missing key simply leaves the local rules in charge.
+  const classifyNarrations = async (items) => {
+    if (!items.length) return [];
+    try {
+      const res = await apiFetch(`${API_URL}/transactions/classify`, {
+        method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items: items.slice(0, 100) })
+      });
+      if (res.status === 401) { invalidateSession(); return []; }
+      const data = res.ok ? await res.json() : null;
+      return data?.available === true && Array.isArray(data.suggestions) ? data.suggestions : [];
+    } catch {
+      return [];
+    }
+  };
+
+  const importReviewedPdf = async (rows) => {
+    const res = await apiFetch(`${API_URL}/transactions/import-reviewed-pdf`, {
+      method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rows })
+    });
+    if (res.status === 401) {
+      invalidateSession();
+      throw new Error('Session expired');
+    }
+    if (res.status === 404 || res.status === 405) {
+      throw new Error('The PDF import endpoint is unavailable. Restart the FinSphere API with its existing settings and check that the app points to that API.');
+    }
+    let data;
+    try {
+      data = await res.json();
+    } catch (cause) {
+      throw new Error(`The PDF import API returned an unexpected response (HTTP ${res.status}). Check your transaction history before retrying.`, { cause });
+    }
+    if (res.status === 409 && data?.code === 'DUPLICATES_FOUND') {
+      const preview = normalizePreview(data);
+      if (preview?.reviewedPdf) return { review: true, preview };
+    }
+    if (!res.ok) throw new Error(data?.error || 'Could not import the reviewed PDF rows.');
+    if (data?.success !== true || !Array.isArray(data.transactions)) {
+      throw new Error('The PDF import API did not confirm the save. Check your transaction history before retrying.');
+    }
+    await fetchTransactions();
+    return data;
   };
 
   // Duplicate review, step 2: send the user's decision about a held-back import. `request` is built from the preview the server
@@ -545,14 +620,14 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
   // "yesterday") and resolves to { reply, action }. `action` is the server's proposal / clarification / cancellation
   // for a confirmed financial action (Issue #73), or null. Failures reject with a message that can be shown to the user
   // as-is; the caller keeps such messages out of later history.
-  const sendAssistantMessage = async (messages, { localDate = localDateString() } = {}) => {
+  const sendAssistantMessage = async (messages, { localDate = localDateString(), screenContext = null } = {}) => {
     let res;
     try {
       res = await fetch(`${API_URL}/chat`, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json', ...accountHeaders(user) },
-        body: JSON.stringify({ messages, localDate })
+        body: JSON.stringify({ messages, localDate, ...(screenContext ? { screenContext } : {}) })
       });
     } catch {
       throw new Error("I couldn't reach the FinSphere server. Please check your connection and try again.");
@@ -662,8 +737,13 @@ export const FinanceProvider = ({ children, currentView, setCurrentView }) => {
       updateTransactionCategory,
       updateTransaction,
       parseStatement,
+      importReviewedPdf,
+      classifyNarrations,
+      getPdfRules: () => readPdfRules(user?.id),
+      rememberReviewedPdf: (rows) => rememberPdfRules(user?.id, rows),
       confirmImport,
       extractTextFromImage,
+      accountAggregatorRequest,
       sendMessageToBot,
       sendAssistantMessage,
       confirmAssistantAction,

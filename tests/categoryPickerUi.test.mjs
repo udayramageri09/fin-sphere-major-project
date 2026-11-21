@@ -36,5 +36,28 @@ try{
  await act(async()=>root.unmount());root=createRoot(container);await act(async()=>root.render(React.createElement(Transactions)));
  check([...container.querySelectorAll('.category-picker option')].some(o=>o.value==='Alternative investment'),'saved account label is available after remount');
  check(!container.textContent.includes('Unclassified'),'standalone unclassified wording removed');
+
+ await act(async()=>root.unmount());root=createRoot(container);
+ const {default:PdfImportReview}=await vite.ssrLoadModule('/src/components/PdfImportReview.jsx');
+ const {buildPdfDraft}=await import('../src/utils/pdfImportReview.js');
+ const initialRows=buildPdfDraft('05.03.2026 ACH DIVIDEND +120.00\n06.03.2026 UNKNOWN PAYER +90.00\n07.03.2026 CREDIT CARD PAYMENT -80.00');
+ function PdfHarness(){
+   const [rows,setRows]=React.useState(initialRows);
+   return React.createElement(PdfImportReview,{
+     draft:{rows,fileName:'sample.pdf',warnings:[],text:''}, categories:['Dividends','General'],
+     onChange:(id,patch)=>setRows(old=>old.map(row=>row.id===id?{...row,...patch}:row))
+   });
+ }
+ await act(async()=>root.render(React.createElement(PdfHarness)));
+ check(container.querySelectorAll('fieldset').length===1&&!container.textContent.includes('ACH DIVIDEND'),'only uncertain rows are shown by default');
+ check([...container.querySelectorAll('option')].some(option=>option.textContent==='Choose a category'),'uncertain row has a dropdown placeholder');
+ check([...container.querySelectorAll('button')].find(button=>button.textContent==='Import 3 rows').disabled,'conflicting row blocks saving');
+ await click('Exclude row');
+ check(![...container.querySelectorAll('button')].find(button=>button.textContent==='Import 2 rows').disabled,'prefilled rows can be imported without individual or bulk confirmation');
+ await click('All rows (3)');
+ check(container.textContent.includes('Auto-confirmed')&&container.textContent.includes('UNKNOWN PAYER'),'all rows identifies auto-confirmed suggestions');
+ check([...container.querySelectorAll('option')].some(option=>option.textContent.startsWith('Refund —')),'incoming rows explain refund classification');
+ await click('Restore row');
+ check([...container.querySelectorAll('button')].find(button=>button.textContent==='Import 3 rows').disabled,'restoring a conflicting row requires review again');
  console.log(`Custom categories UI: ${checks} checks passed`);
 }finally{await act(async()=>root.unmount());await vite.close();dom.window.close();delete globalThis.__categoryFinance;}

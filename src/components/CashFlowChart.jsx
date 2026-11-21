@@ -1,6 +1,7 @@
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 import { useFinance } from '../context/FinanceContext';
 import { aggregateMonthlyTransactions, getRecentMonthKeys } from '../utils/finance';
+import { formatMoney } from '../utils/spendingAnalytics';
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -14,9 +15,14 @@ function CashFlowChart() {
   const monthly = aggregateMonthlyTransactions(transactions);
   const chartData = getRecentMonthKeys(6).map((key) => ({
     name: formatMonthLabel(key),
+    recorded: Boolean(monthly[key]),
     income: monthly[key]?.income ?? 0,
     expenses: monthly[key]?.expenses ?? 0
   }));
+  const latest = chartData.findLast(month => month.recorded);
+  const guideTip = latest
+    ? `${latest.name} is the latest month with data on this chart: ${formatMoney(latest.income)} income and ${formatMoney(latest.expenses)} net spending.`
+    : 'No recorded income or spending in the last six months. Add transactions to see your cash flow here.';
 
   const customTooltipStyle = {
     backgroundColor: '#ffffff',
@@ -29,7 +35,7 @@ function CashFlowChart() {
   };
 
   return (
-    <div className="glass-panel p-6 w-full">
+    <div className="glass-panel p-6 w-full" data-guide-tip={guideTip}>
       <h3 className="text-lg font-bold text-zinc-900 tracking-tight mb-5">6-Month Cash Flow</h3>
       <div className="w-full h-[300px] md:h-[280px]">
         <ResponsiveContainer width="100%" height="100%">

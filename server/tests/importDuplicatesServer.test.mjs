@@ -426,6 +426,25 @@ async function run() {
 
   // ═══ no model call on confirm, no schema change, rate limit ═════════════════════════════════════════════════════
   const hitsNow = stubHits;
+  const pdfRow = { title: 'Sample refund', amount: 25.10, date: '2019-03-05', type: 'income', category: 'Shopping', classification: 'refund' };
+  const pdfPath = '/transactions/import-reviewed-pdf';
+  const pdfUser = E;
+  const pdfBefore = await count(pdfUser);
+  ok((await send(null, 'POST', pdfPath, { rows: [pdfRow] })).status === 401, 'reviewed PDF requires login');
+  const invalidPdf = await send(pdfUser.cookie, 'POST', pdfPath, { rows: [pdfRow, { ...pdfRow, classification: 'expense' }] });
+  ok(invalidPdf.status === 400 && (await count(pdfUser)) === pdfBefore, 'invalid PDF classification rejects the whole batch', invalidPdf.text);
+  const pdfSaved = await send(pdfUser.cookie, 'POST', pdfPath, { rows: [pdfRow] });
+  ok(pdfSaved.status === 200 && pdfSaved.json?.transactions[0]?.classification === 'refund', 'reviewed classification is imported', pdfSaved.text);
+  const pdfDuplicate = await send(pdfUser.cookie, 'POST', pdfPath, { rows: [pdfRow] });
+  ok(pdfDuplicate.status === 409 && pdfDuplicate.json?.rows[0]?.classification === 'refund' && (await count(pdfUser)) === pdfBefore + 1,
+    'PDF duplicates are held and preserve the reviewed classification', pdfDuplicate.text);
+  const pdfDigest = pdfDuplicate.json?.reviewDigest;
+  const confirmPdf = (row) => confirm(pdfUser, { rows: [row], policy: 'import_all', reviewDigest: pdfDigest, reviewedPdf: true });
+  ok((await confirmPdf({ ...pdfRow, classification: 'income' })).status === 409 && (await count(pdfUser)) === pdfBefore + 1, 'confirm refuses altered classification');
+  ok((await confirmPdf(pdfRow)).status === 200 && (await count(pdfUser)) === pdfBefore + 2, 'exact reviewed rows can be confirmed');
+  const pdfList = await send(pdfUser.cookie, 'GET', '/transactions');
+  const pdfStored = pdfList.json?.filter((row) => row.title === pdfRow.title);
+  ok(pdfList.status === 200 && pdfStored?.length === 2 && pdfStored.every((row) => row.classification === 'refund'), 'reviewed PDF classifications persist');
   await confirm(B, validBase);
   await confirm(D, { rows: good, policy: 'import_all', reviewDigest: 'a'.repeat(64) });
   ok(stubHits === hitsNow, 'confirm never calls Groq (the stub saw no request)');
@@ -438,6 +457,17 @@ async function run() {
   let limited = 0;
   for (let i = 0; i < 24; i++) { const x = await confirm(G, []); if (x.status === 429) limited++; }
   ok(limited >= 1, 'confirm is rate limited per user (20 per minute)', String(limited));
+  const ruleBody = {
+    text: '05/03/2019 UPI RAVI KUMAR 123456 -721.51',
+    categoryRules: [{ key: 'ravi kumar', category: 'Food' }]
+  };
+  const beforeRule = await count(G);
+  let ruleResult = await send(G.cookie, 'POST', '/transactions/parse-statement', ruleBody);
+  ok(ruleResult.status === 200 && ruleResult.json.transactions[0].category === 'Food', 'saved browser rule sets the imported category', ruleResult.text);
+  ruleResult = await send(G.cookie, 'POST', '/transactions/parse-statement', { ...ruleBody, categoryRules: [{ key: 'ravi kumar', category: 'x'.repeat(61) }] });
+  ok(ruleResult.status === 400 && (await count(G)) === beforeRule + 1, 'invalid category rules are rejected before saving');
+  ruleResult = await send(B.cookie, 'POST', '/transactions/parse-statement', { ...ruleBody, categoryRules: [] });
+  ok(ruleResult.status === 200 && ruleResult.json.transactions[0].category !== 'Food', 'a browser rule is not shared with another account', ruleResult.text);
   ok(exitCode === null && !/Error|Unhandled|ECONN/.test(serverOut.replace(/Groq API Error during parsing: status 500\r?\n/g, '')), 'server healthy, no errors logged', serverOut.slice(-300));
   ok(!/ZOMATO|SALARY ACME|AMAZON PAY|PARALLEL|COFFEE/.test(serverOut), 'statement text is not in the server log');
 }

@@ -49,6 +49,22 @@ export function getRecentMonthKeys(count, now = new Date()) {
   return keys;
 }
 
+// Clamp dates like March 31 to the last day of the previous month.
+export function previousMonthBalance(transactions, now = new Date()) {
+  const start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const lastDay = new Date(now.getFullYear(), now.getMonth(), 0).getDate();
+  const date = new Date(start.getFullYear(), start.getMonth(), Math.min(now.getDate(), lastDay));
+  let paise = 0;
+  let hasPreviousMonthActivity = false;
+  for (const transaction of transactions) {
+    const recorded = parseLocalDate(transaction?.date);
+    if (!recorded || recorded > date || !Number.isFinite(transaction.amount)) continue;
+    paise += toPaise(transaction.amount);
+    if (recorded >= start) hasPreviousMonthActivity = true;
+  }
+  return hasPreviousMonthActivity ? { date, balance: paise / 100 } : null;
+}
+
 // { kind, value } with value as a positive magnitude, or null for amounts that
 // cannot be classified (zero, non-numeric, non-finite). Direction only: 'income' for > 0,
 // 'expense' for < 0. Kept for callers that need the raw direction.

@@ -7,7 +7,7 @@
 // Nothing is merged or dropped silently: two identical-looking transactions are two records. A merchant that appears often is not a new
 // category: a category is the user's own label, or a keyword match from merchantCategories.js, otherwise the transaction is "Others".
 import { analyticalRole, getMonthKey, getRecentMonthKeys, parseLocalDate, percentChange } from './finance.js';
-import { CATEGORY_KEYWORDS, NOISE_WORDS, TAXONOMY } from './merchantCategories.js';
+import { NOISE_WORDS, TAXONOMY, detectMerchantCategory } from './merchantCategories.js';
 
 export const PERIOD_OPTIONS = [1, 3, 6, 12];
 export const OTHERS = 'Others';
@@ -35,16 +35,8 @@ export function normalizeMerchant(title) {
   return { key, label: key ? titleCase(key) : 'Unlabelled', text: tokens.join(' ') };
 }
 
-const KEYWORD_LIST = Object.entries(CATEGORY_KEYWORDS).flatMap(([category, words]) => words.map((word) => ({ category, word })))
-  .sort((a, b) => b.word.length - a.word.length);
-export function detectCategory(cleanText) {
-  const padded = ` ${cleanText} `;
-  const hit = KEYWORD_LIST.find(({ word }) => padded.includes(` ${word} `));
-  return hit ? hit.category : null;
-}
-
 const taxonomyByLower = new Map(TAXONOMY.map((name) => [name.toLowerCase(), name]));
-// The category a transaction is shown under: the user's own (stored) category first, then a keyword match, otherwise Others.
+// The category a transaction is shown under: the user's own (stored) category first, then the same detection used at import, otherwise Others.
 // "General" is the stored default, so it means "not categorised yet".
 export function categoryFor(transaction) {
   const stored = String(transaction?.category ?? '').trim();
@@ -53,7 +45,7 @@ export function categoryFor(transaction) {
     if (lower === 'others' || lower === 'other') return { name: OTHERS, source: 'yours' };
     return { name: taxonomyByLower.get(lower) ?? stored, source: 'yours' };
   }
-  const detected = detectCategory(normalizeMerchant(transaction?.title).text);
+  const detected = detectMerchantCategory(transaction?.title);
   return detected ? { name: detected, source: 'detected' } : { name: OTHERS, source: 'none' };
 }
 

@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
-import { Camera, LogOut, Trash2, KeyRound, Mail, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { Camera, LogOut, Trash2, KeyRound, Mail, AlertCircle, CheckCircle2, Cpu } from 'lucide-react';
 import { useAuth, passwordRecovery } from '../context/AuthContext';
 import { usePrefersReducedMotion } from '../hooks/useMotionPreference';
 import './Settings.css';
 import Avatar from '../components/Avatar';
 import { AVATAR_ACCEPT, avatarFileProblem, prepareAvatarImage } from '../utils/avatarImage';
+import { GUIDE_TONES } from '../utils/guideTone';
 
 const NAME_MAX = 80;
 const FIELD = 'w-full rounded-xl border border-zinc-300 bg-white px-3 py-2.5 text-zinc-900 placeholder-zinc-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 focus-visible:border-blue-600 disabled:opacity-60';
@@ -34,7 +35,8 @@ function Message({ kind, children }) {
 
 // ── Profile: photo and display name, with an explicit Save / Cancel ─────────────────────────────────────────────────────
 // Remounted per user (key), so one account's draft can never carry over to another.
-function ProfileSection({ prepareImage }) {
+function ProfileSection({ prepareImage, guideTone, onGuideToneChange }) {
+  const [guideToneError, setGuideToneError] = useState('');
   const { user, avatarUrl, updateProfile, uploadAvatar, removeAvatar } = useAuth();
   const saved = user?.displayName ?? '';
   const [name, setName] = useState(saved);
@@ -161,6 +163,24 @@ function ProfileSection({ prepareImage }) {
           <Message kind="status">{status}</Message>
         </div>
       </form>
+      {onGuideToneChange && (
+        <div className="mt-6 border-t border-zinc-200 pt-5">
+          <label htmlFor="guide-tone" className="block text-sm font-semibold text-zinc-900">Guide tone</label>
+          <p id="guide-tone-hint" className="mt-1 mb-3 text-sm text-zinc-600">Changes how Guide tips are phrased and how quickly replies are spoken. Saved in this browser.</p>
+          <select id="guide-tone" className={FIELD} value={guideTone} aria-describedby="guide-tone-hint" onChange={event => {
+            try { onGuideToneChange(event.target.value); setGuideToneError(''); }
+            catch { setGuideToneError('Your browser did not allow this preference to be saved.'); }
+          }}>
+            {Object.entries(GUIDE_TONES).map(([id, tone]) => <option key={id} value={id}>{tone.label}</option>)}
+          </select>
+          <Message kind="error">{guideToneError}</Message>
+        </div>
+      )}
+      <div className="mt-6 border-t border-zinc-200 pt-5">
+        <h3 className="text-sm font-semibold text-zinc-900">Browser capabilities</h3>
+        <p className="mt-1 mb-3 text-sm text-zinc-600">Try WebGPU in the external WebLLM Chat demo. FinSphere does not send your account data with this link.</p>
+        <a href="https://chat.webllm.ai/" rel="noreferrer" className={SECONDARY}><Cpu size={16} aria-hidden="true" /> Try WebGPU capability</a>
+      </div>
     </Section>
   );
 }
@@ -247,7 +267,7 @@ function DisplaySection() {
   );
 }
 
-function Settings({ prepareImage }) {
+function Settings({ prepareImage, guideTone, onGuideToneChange }) {
   const { user, logout } = useAuth();
   const [section, setSection] = useState('profile');
   return (
@@ -264,7 +284,7 @@ function Settings({ prepareImage }) {
           <button type="button" onClick={logout} data-testid="settings-logout" className="flex items-center gap-2"><LogOut size={16} aria-hidden="true" />Log out</button>
         </nav>
         <div className="settings-content">
-          <div hidden={section !== 'profile'}><ProfileSection key={user?.id} prepareImage={prepareImage} /></div>
+          <div hidden={section !== 'profile'}><ProfileSection key={user?.id} prepareImage={prepareImage} guideTone={guideTone} onGuideToneChange={onGuideToneChange} /></div>
           <div hidden={section !== 'account'}><AccountSection key={`account-${user?.id}`} /></div>
           <div hidden={section !== 'display'}><DisplaySection key={`display-${user?.id}`} /></div>
         </div>

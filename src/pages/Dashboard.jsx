@@ -56,7 +56,7 @@ function Dashboard() {
       <motion.section variants={itemVariants} className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="flex flex-col gap-6">
           
-          <div className="glass-panel p-6" data-avatar-target="recent-transactions">
+          <div className="glass-panel p-6" data-avatar-target="recent-transactions" data-guide-tip="These are your latest recorded transactions. Open Transactions to review the full history or correct a category.">
             <h3 className="text-xl font-bold text-zinc-900 mb-6 tracking-tight">Recent Transactions</h3>
             <div className="flex flex-col gap-4">
               {recentTransactions.length === 0 ? (
@@ -90,11 +90,11 @@ function Dashboard() {
         </div>
         
         <div className="flex flex-col gap-6">
-          <div data-avatar-target="goal-tracker">
+          <div data-avatar-target="goal-tracker" data-guide-tip="Track progress toward your savings goals here. Open Goals to discuss your progress.">
             <GoalTracker />
           </div>
           
-          <div className="glass-panel p-6">
+          <div className="glass-panel p-6" data-guide-tip="Portfolio shows the investments and valuations you record, not live market prices.">
             <h3 className="text-xl font-bold text-zinc-900 tracking-tight mb-3">Your investments</h3>
             <p className="text-sm text-zinc-600">Open Portfolio to record your holdings and view allocation based on your own valuations.</p>
           </div>

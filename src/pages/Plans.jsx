@@ -21,8 +21,38 @@ const ANALYSIS_ERROR = "We couldn't run the analysis just now. Check that the an
 
 const GREETING = 'Ask me about your results or what to focus on next.';
 
-export default function Plans() {
-  const { transactions } = useFinance();
+function GoalDiscussion({ sendMessage }) {
+  const heading = useRef(null);
+  const [busy, setBusy] = useState(false);
+  const [reply, setReply] = useState('');
+  const [error, setError] = useState('');
+  useEffect(() => { heading.current?.focus(); }, []);
+
+  const review = async () => {
+    setBusy(true);
+    setError('');
+    setReply('');
+    try {
+      setReply(await sendMessage([{ role: 'user', content: 'How are my savings goals progressing? Summarize my saved goals and what is left to save.' }]));
+    } catch (err) {
+      setError(err.message || 'Could not review your goals.');
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <section className="glass-panel my-4 p-5" aria-labelledby="goal-discussion-heading">
+      <h2 id="goal-discussion-heading" ref={heading} tabIndex={-1} className="text-xl font-semibold">Discuss my goals</h2>
+      <p className="my-2 text-sm text-zinc-600">Ask the assistant for a summary of your saved goals. You do not need to run a transaction analysis first.</p>
+      <button type="button" className="rounded-xl bg-zinc-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50" onClick={review} disabled={busy}>{busy ? 'Reviewing goals…' : 'Review my goal progress'}</button>
+      {reply && <div role="status" className="mt-3"><AssistantReply text={reply} /></div>}
+      {error && <p role="alert" className="mt-3 text-red-800">{error}</p>}
+    </section>
+  );
+}
+
+export default function Plans({ discussGoals = false }) {
+  const { transactions, sendMessageToBot } = useFinance();
   const { performNavigation } = useAvatarActions();
   const guardedFetch = useGuardedFetch();   // names the account this tab shows; a refusal re-checks the session
 
@@ -70,7 +100,10 @@ export default function Plans() {
         body: JSON.stringify({ messages: history })
       });
       const body = await res.json().catch(() => ({}));
-      const reply = res.ok && typeof body.reply === 'string' ? body.reply : "I couldn't answer that just now.";
+      const reply = res.ok && typeof body.reply === 'string' ? body.reply
+        : res.status === 401 ? 'Your session expired. Sign in again to use the Advisor.'
+        : res.status === 429 ? 'Too many requests. Wait a minute before trying again.'
+        : "I couldn't answer that just now.";
       setMessages((prev) => [...prev, { id: Date.now() + 1, sender: 'bot', text: reply }]);
       window.dispatchEvent(new CustomEvent('bot-speak', { detail: { message: reply.slice(0, 80) + (reply.length > 80 ? '…' : '') } }));
     } catch (err) {
@@ -157,11 +190,13 @@ export default function Plans() {
             <p className="plans-subtitle">Your outlook. Your next move.</p>
           </div>
         </div>
-        <button className={`run-ml-btn ${isLoading ? 'loading' : ''}`} onClick={() => runAnalysis()} disabled={isLoading || isThinking || noTransactions}>
+        <button className={`run-ml-btn ${isLoading ? 'loading' : ''}`} data-guide-tip="Refresh the forecast and insights using your latest transactions." onClick={() => runAnalysis()} disabled={isLoading || isThinking || noTransactions}>
           <RefreshCw size={16} className={isLoading ? 'spinning' : ''} />
           {isLoading ? 'Analysing…' : 'Refresh analysis'}
         </button>
       </div>
+
+      {discussGoals && <GoalDiscussion sendMessage={sendMessageToBot} />}
 
       <div className="forecast-period-control">
         <label htmlFor="forecast-period">Forecast period</label>

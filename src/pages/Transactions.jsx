@@ -5,13 +5,18 @@ import SpendingAnalytics from '../components/analytics/SpendingAnalytics';
 import TransactionDisclosure from '../components/TransactionDisclosure';
 import CategoryPicker from '../components/CategoryPicker';
 import TransactionEditor from '../components/TransactionEditor';
+import AccountAggregatorSandbox from '../components/AccountAggregatorSandbox';
 import { categoryChoices } from '../utils/spendingAnalytics';
 import { isOcrImageFile } from '../utils/imageOcr';
+import { extractPdfStatement, isPdfStatement } from '../utils/pdfStatement';
 import { buildConfirmRequest, confirmSuccessMessage, reviewHeadline } from '../utils/duplicateReview';
 import { explainImportError, importSuccessMessage, importButtonStyle } from '../utils/statementImportUi';
+import PdfImportReview from '../components/PdfImportReview';
+import { aiCandidates, applyAiSuggestions, buildPdfDraft, emptyPdfRow, needsPdfReview, PDF_CATEGORIES, pdfHistoryRules, pdfImportValue } from '../utils/pdfImportReview';
+import './PdfImportReview.css';
 import { 
   ShoppingBag, Coffee, ArrowDownCircle, ArrowUpCircle, 
-  Trash2, Plus, FileText, Upload, Sparkles, AlertCircle, ScanText, BarChart3
+  Trash2, Plus, FileText, Upload, Sparkles, AlertCircle, ScanText, BarChart3, Landmark
 } from 'lucide-react';
 
 // Which analytical classifications each direction can carry (mirrors the server and the database).
@@ -23,7 +28,8 @@ const CLASSIFICATION_LABEL = { income: 'Income', expense: 'Expense', refund: 'Re
 
 function Transactions() {
   const { 
-    transactions, loading, addTransaction, deleteTransaction, parseStatement, confirmImport, extractTextFromImage, updateTransaction
+    transactions, loading, addTransaction, deleteTransaction, parseStatement, confirmImport, extractTextFromImage, updateTransaction, accountAggregatorRequest,
+    importReviewedPdf, getPdfRules, rememberReviewedPdf, classifyNarrations
   } = useFinance();
 
   const [view, setView] = useState('activity');
@@ -48,6 +54,7 @@ function Transactions() {
   // Image upload: OCR only fills the paste editor; the user reviews it and imports it themselves.
   const [isExtracting, setIsExtracting] = useState(false);
   const [ocrNotice, setOcrNotice] = useState(null); // { fileName, confidence, warnings } for the text currently in the editor
+  const [pdfDraft, setPdfDraft] = useState(null);
   const ocrInFlight = useRef(false); // synchronous guard: a second click in the same tick cannot start a second request
   // After a successful extraction the paste editor gets keyboard focus (once). The tick re-runs the effect when the editor was
   // already showing; the flag makes sure later tab switches never steal focus.
@@ -128,7 +135,7 @@ function Transactions() {
 
   const cancelReview = () => {
     if (isConfirming) return;
-    focusAfterReview.current = review?.source === 'file' ? 'file' : 'paste';
+    if (review?.source !== 'pdf') focusAfterReview.current = review?.source === 'file' ? 'file' : 'paste';
     setReview(null);
     setReviewError('');
   };
@@ -147,9 +154,10 @@ function Transactions() {
         return;
       }
       setParseSuccess(confirmSuccessMessage(outcome.result, review.source === 'file' ? review.fileName : undefined));
-      if (review.source === 'file') setUploadFile(null); else setPasteText('');
+      if (review.source === 'pdf') finishPdf(outcome.result);
+      else if (review.source === 'file') setUploadFile(null); else setPasteText('');
       setOcrNotice(null);
-      focusAfterReview.current = review.source === 'file' ? 'picker' : 'editor';
+      focusAfterReview.current = review.source === 'paste' ? 'editor' : 'picker';
       setReview(null);
       setTimeout(() => setParseSuccess(''), 5000);
     } catch (err) {
@@ -191,6 +199,17 @@ function Transactions() {
     setParseError('');
     setOcrNotice(null);
     try {
+      if (isPdfStatement(file)) {
+        const { text, warnings, usedOcr, pages } = await extractPdfStatement(file, extractTextFromImage);
+        let rules = [];
+        try { rules = getPdfRules(); } catch (error) { warnings.push(error.message); }
+        let rows = buildPdfDraft(text, { rules, usedOcr, pages, history: pdfHistoryRules(transactions) });
+        rows = applyAiSuggestions(rows, await classifyNarrations(aiCandidates(rows)));
+        if (!rows.length) warnings.push('No transaction rows could be identified. Check the extracted text and add missing rows manually.');
+        setPdfDraft({ fileName: file.name, text, warnings, rows });
+        setUploadFile(null);
+        return;
+      }
       const { text, confidence, warnings } = await extractTextFromImage(file);
       // Text already in the editor is kept (the new text goes below it) so nothing the user typed is lost.
       setPasteText((current) => (current.trim() ? `${current.replace(/\s+$/, '')}\n\n${text}` : text));
@@ -200,16 +219,49 @@ function Transactions() {
       setEditorFocusTick((n) => n + 1);
       setActiveTab('paste');
     } catch (err) {
-      setParseError(err.message || 'Could not read text from this image.');
+      setParseError(err.message || 'Could not read the selected statement.');
     } finally {
       ocrInFlight.current = false;
       setIsExtracting(false);
     }
   };
 
+  const finishPdf = (result) => {
+    const key = ({ title, date, type, amount, category, classification }) => JSON.stringify([title, date, type, Number(amount), category, classification]);
+    const imported = new Set((result.transactions ?? []).map(key));
+    try {
+      rememberReviewedPdf(pdfDraft.rows.filter((row) => row.remember && !row.excluded)
+        .map(pdfImportValue).filter((row) => imported.has(key(row))));
+    } catch (error) {
+      setParseError(error.message);
+    }
+    setPdfDraft(null);
+  };
+
+  const savePdf = async () => {
+    if (!pdfDraft || importInFlight.current) return;
+    const included = pdfDraft.rows.filter((row) => !row.excluded);
+    if (!included.length || included.length > 500 || included.some(needsPdfReview)) return;
+    importInFlight.current = true;
+    setIsParsing(true);
+    setParseError('');
+    setParseSuccess('');
+    try {
+      const result = await importReviewedPdf(included.map(pdfImportValue));
+      if (result.review) { openReview(result.preview, 'pdf', pdfDraft.fileName); return; }
+      finishPdf(result);
+      setParseSuccess(importSuccessMessage(result, pdfDraft.fileName));
+    } catch (error) {
+      setParseError(error.message || 'Could not import the PDF. Check your transaction history before retrying.');
+    } finally {
+      setIsParsing(false);
+      importInFlight.current = false;
+    }
+  };
+
   const handleFileParse = async () => {
     if (!uploadFile) return;
-    if (isOcrImageFile(uploadFile)) return handleImageExtract();
+    if (isOcrImageFile(uploadFile) || isPdfStatement(uploadFile)) return handleImageExtract();
     if (importInFlight.current || review) return;
     importInFlight.current = true;
     setIsParsing(true);
@@ -263,7 +315,7 @@ function Transactions() {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start min-w-0">
           
           {/* Manual Entry Form */}
-          <TransactionDisclosure title="Add a transaction" icon={Plus}>
+          <TransactionDisclosure title="Add a transaction" icon={Plus} guideTip="Add a transaction manually when it isn't in your statement.">
             
             <form onSubmit={handleManualSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -366,7 +418,7 @@ function Transactions() {
           </TransactionDisclosure>
 
           {/* AI Parser Section */}
-          <TransactionDisclosure title="Import a statement" icon={Upload}>
+          <TransactionDisclosure title="Import a statement" icon={Upload} guideTip="Upload a statement and review the extracted transactions before saving.">
             
             {/* Tabs */}
             <div style={{ display: 'flex', borderBottom: '1px solid var(--border-color)', marginBottom: '1.25rem' }}>
@@ -412,6 +464,13 @@ function Transactions() {
                 onImportAll={() => runConfirm('all', new Set())}
                 onCancel={cancelReview}
               />
+            ) : pdfDraft ? (
+              <PdfImportReview draft={pdfDraft} categories={[...categoryChoices(transactions), ...PDF_CATEGORIES]} busy={isParsing} onImport={savePdf}
+                onCancel={() => { setPdfDraft(null); setParseError(''); }}
+                onAdd={() => setPdfDraft((draft) => ({ ...draft, rows: [...draft.rows, emptyPdfRow(draft.rows.length)] }))}
+                onChange={(id, patch) => setPdfDraft((draft) => ({
+                  ...draft, rows: draft.rows.map((row) => row.id === id ? { ...row, ...patch } : row)
+                }))} />
             ) : activeTab === 'paste' ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                 {ocrNotice && (
@@ -429,7 +488,7 @@ function Transactions() {
                       </ul>
                     )}
                     <div>Every line needs a date and an amount with a +/&minus; sign or a DR/CR marker, otherwise it is skipped.</div>
-                    <div>The image was read by OCR on this server and is not stored. When you press &ldquo;Parse Logs&rdquo;, the text may be sent to Groq (an external AI service) if it is configured; otherwise a built-in parser is used.</div>
+                    <div>{/\.pdf$/i.test(ocrNotice.fileName) ? 'PDF text was read in your browser; scanned pages were sent to the server for OCR.' : 'The image was read by OCR on this server and is not stored.'} When you press &ldquo;Parse Logs&rdquo;, the text may be sent to Groq (an external AI service) if it is configured; otherwise a built-in parser is used.</div>
                   </div>
                 )}
                 <textarea 
@@ -489,14 +548,14 @@ function Transactions() {
                     {uploadFile ? uploadFile.name : 'Select statement file'}
                   </span>
                   <span id="statement-upload-hint" style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                    Supports TXT, CSV, XLS, XLSX, JPG, JPEG and PNG
+                    Supports TXT, CSV, XLS, XLSX, PDF, JPG, JPEG and PNG
                   </span>
                   <input 
                     type="file" 
                     ref={fileInputRef}
-                    aria-label="Choose a statement file: TXT, CSV, XLS, XLSX, JPG, JPEG or PNG"
+                    aria-label="Choose a statement file: TXT, CSV, XLS, XLSX, PDF, JPG, JPEG or PNG"
                     aria-describedby="statement-upload-hint ocr-privacy-note"
-                    accept=".csv,.txt,.xls,.xlsx,.jpg,.jpeg,.png"
+                    accept=".csv,.txt,.xls,.xlsx,.pdf,.jpg,.jpeg,.png"
                     onChange={handleFileChange}
                     disabled={isExtracting}
                     style={{ 
@@ -507,7 +566,7 @@ function Transactions() {
                   />
                 </div>
                 <p id="ocr-privacy-note" data-testid="ocr-privacy-note" style={{ margin: 0, fontSize: '0.75rem', color: 'var(--text-secondary)', textAlign: 'center' }}>
-                  Images (JPG, PNG) are read into text by OCR on this server and are not stored. You can review and edit the text before importing it. Importing may send the text to Groq (an external AI service) if it is configured.
+                  Images are read with OCR on this server and are not stored. PDF text is read in your browser and scanned pages also use this server's OCR. You can review and edit PDF rows before saving; unfamiliar descriptions may be categorised with AI (Groq).
                 </p>
                 <button 
                   ref={parseFileRef}
@@ -525,8 +584,8 @@ function Transactions() {
                     ...importButtonStyle({ disabled: isParsing || isExtracting || !uploadFile, busy: isParsing || isExtracting })
                   }}
                 >
-                  {uploadFile && isOcrImageFile(uploadFile)
-                    ? <><ScanText size={18} /> {isExtracting ? 'Reading image... (up to 30 s)' : 'Extract Text from Image'}</>
+                  {uploadFile && (isOcrImageFile(uploadFile) || isPdfStatement(uploadFile))
+                    ? <><ScanText size={18} /> {isExtracting ? (isPdfStatement(uploadFile) ? 'Reading PDF...' : 'Reading image... (up to 30 s)') : isPdfStatement(uploadFile) ? 'Read PDF and review transactions' : 'Extract Text from Image'}</>
                     : <><FileText size={18} /> {isParsing ? 'Parsing statement...' : 'Parse File'}</>}
                 </button>
               </div>
@@ -552,10 +611,15 @@ function Transactions() {
             {parseError && <div role="alert" style={{ color: 'var(--danger)', fontSize: '0.9rem', textAlign: 'center', fontWeight: 'bold', marginTop: '1rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.3rem', overflowWrap: 'anywhere' }}><AlertCircle size={16} />{parseError}</div>}
           </TransactionDisclosure>
 
+          {import.meta.env.DEV && accountAggregatorRequest && (
+            <TransactionDisclosure title="Account Aggregator Sandbox" hint="Preview demo financial records and optionally import sample transactions" icon={Landmark}>
+              <AccountAggregatorSandbox request={accountAggregatorRequest} />
+            </TransactionDisclosure>
+          )}
         </div>
 
         {/* Right Column: Transaction History */}
-        <TransactionDisclosure title={`Transaction history (${transactions.length})`} icon={FileText}>
+        <TransactionDisclosure title={`Transaction history (${transactions.length})`} icon={FileText} guideTip="Open your history to review transactions or correct their categories.">
           {loading && transactions.length === 0 ? (
             <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '300px', color: 'var(--text-secondary)' }}>
               Loading transactions...
@@ -609,11 +673,9 @@ function Transactions() {
                           <span style={{ fontSize: '0.75rem', background: 'var(--border-color)', padding: '0.1rem 0.4rem', borderRadius: '4px' }}>
                             {t.category || 'General'}
                           </span>
-                          {t.classification && t.classification !== 'unknown' && t.classification !== t.type && (
-                            <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                              {CLASSIFICATION_LABEL[t.classification] ?? t.classification}
-                            </span>
-                          )}
+                          <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                            {CLASSIFICATION_LABEL[t.classification ?? 'unknown']}
+                          </span>
                           <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
                             {new Date(t.date).toLocaleDateString('en-IN', { year: 'numeric', month: 'short', day: 'numeric' })}
                           </span>

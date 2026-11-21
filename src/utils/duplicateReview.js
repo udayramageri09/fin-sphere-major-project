@@ -24,7 +24,9 @@ export function normalizePreview(body) {
       const m = r.duplicate.match;
       duplicate = { tier: r.duplicate.tier, match: { id: String(m.id), title: m.title, amount: m.amount, date: m.date, type: m.type } };
     }
-    rows.push({ index: i, title: r.title, amount: r.amount, date: r.date, type: r.type, category: typeof r.category === 'string' ? r.category : 'General', duplicate });
+    if (body.reviewedPdf === true && !['income', 'expense', 'refund', 'transfer'].includes(r.classification)) return null;
+    rows.push({ index: i, title: r.title, amount: r.amount, date: r.date, type: r.type, category: typeof r.category === 'string' ? r.category : 'General',
+      ...(body.reviewedPdf === true ? { classification: r.classification } : {}), duplicate });
   }
   const likely = rows.filter((r) => r.duplicate?.tier === 'likely').length;
   const possible = rows.filter((r) => r.duplicate?.tier === 'possible').length;
@@ -34,7 +36,8 @@ export function normalizePreview(body) {
     summary: { total: rows.length, new: rows.length - likely - possible, likely, possible },
     skipped: Number.isInteger(body.skipped) && body.skipped > 0 ? body.skipped : 0,
     maxRows: Number.isInteger(body.maxRows) ? body.maxRows : MAX_IMPORT_ROWS,
-    reviewDigest: body.reviewDigest
+    reviewDigest: body.reviewDigest,
+    ...(body.reviewedPdf === true ? { reviewedPdf: true } : {})
   };
 }
 
@@ -59,13 +62,16 @@ export function selectionCounts(preview, selected) {
 //        no likely duplicate ticked -> policy skip_duplicates (the server's own default) + skipIndexes for every unticked new/possible row
 //        a likely duplicate ticked  -> policy import_all + skipIndexes for every unticked row
 export function buildConfirmRequest(preview, selected, mode) {
-  const rows = preview.rows.map(({ title, amount, date, type, category }) => ({ title, amount, date, type, category }));
-  if (mode === 'all') return { rows, policy: 'import_all', reviewDigest: preview.reviewDigest, skipIndexes: [] };
+  const rows = preview.rows.map(({ title, amount, date, type, category, classification }) => ({
+    title, amount, date, type, category, ...(preview.reviewedPdf ? { classification } : {})
+  }));
+  const base = { rows, reviewDigest: preview.reviewDigest, ...(preview.reviewedPdf ? { reviewedPdf: true } : {}) };
+  if (mode === 'all') return { ...base, policy: 'import_all', skipIndexes: [] };
   const unticked = preview.rows.filter((r) => !selected.has(r.index));
   const likelyTicked = preview.rows.some((r) => selected.has(r.index) && r.duplicate?.tier === 'likely');
-  if (likelyTicked) return { rows, policy: 'import_all', reviewDigest: preview.reviewDigest, skipIndexes: unticked.map((r) => r.index) };
+  if (likelyTicked) return { ...base, policy: 'import_all', skipIndexes: unticked.map((r) => r.index) };
   return {
-    rows, policy: 'skip_duplicates', reviewDigest: preview.reviewDigest,
+    ...base, policy: 'skip_duplicates',
     skipIndexes: unticked.filter((r) => r.duplicate?.tier !== 'likely').map((r) => r.index)
   };
 }

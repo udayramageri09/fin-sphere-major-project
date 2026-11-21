@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { X, Send, Image as ImageIcon, Mic, MicOff, Keyboard } from 'lucide-react';
+import { X, Send, Image as ImageIcon, Mic, MicOff, Keyboard, Compass } from 'lucide-react';
 import FinancialCompanion from './FinancialCompanion';
+import CompanionGuide from './CompanionGuide';
 import ActionConfirmationCard from './ActionConfirmationCard';
 import './AIAvatar.css';
 import AssistantReply from './AssistantReply';
@@ -8,23 +9,30 @@ import { useFinance } from '../context/FinanceContext';
 import { useAuth } from '../context/AuthContext';
 import { useAvatarActions } from '../hooks/useAvatarActions';
 import { useVoiceSession } from '../hooks/useVoiceSession';
+import { useReduceMotion } from '../hooks/useMotionPreference';
 import { parseAssistantInput } from '../utils/assistantIntent';
 import { buildChatHistory, CHAT_CONTENT_MAX } from '../utils/chatHistory';
 import { parseConfirmation } from '../utils/actionConfirmation';
+import { localCommand } from '../utils/localCommands';
+import { boxFromPoints, collectScreenContext } from '../utils/screenCapture';
 import { createPulse, deriveCompanionState, companionLabel, PULSE_MS, NAVIGATION_PULSE_MS } from '../utils/companionState';
 
 const WELCOME = "Hi! I'm your FinSphere assistant. Ask about your own money, like \"How much did I spend this month?\" or \"How is my budget?\". To go somewhere, say \"Open transactions\" or \"Go to budgets\".";
 const HINTS = ['How am I doing this month?', 'How much did I spend?', 'How is my budget?', 'Open transactions'];
+const LOCAL_DEMO_DELAY_MS = 700;
 
 // The short assistant line recorded for a navigation, so the transcript (and later follow-ups) show what happened.
 const navigationNote = (navigation) => (navigation.type === 'scroll' ? `Scrolling ${navigation.target}.` : `Opening ${navigation.label}.`);
 
-function AIAvatar() {
-  const { sendAssistantMessage, confirmAssistantAction, cancelAssistantAction } = useFinance();
+function AIAvatar({ guideTone = 'friendly' }) {
+  const { currentView, sendAssistantMessage, confirmAssistantAction, cancelAssistantAction } = useFinance();
   const { performNavigation } = useAvatarActions();
+  const reducedMotion = useReduceMotion();
+  const [guideEnabled, setGuideEnabled] = useState(false);
 
   const [isOpen, setIsOpen] = useState(false);
   const [isThinking, setIsThinking] = useState(false);
+  const [modelMode, setModelMode] = useState('cloud');
   // `local` messages (welcome, connection errors, the circle-to-ask prompt) are shown but never sent as history.
   const [messages, setMessages] = useState([{ id: 1, text: WELCOME, sender: 'bot', local: true }]);
   const [input, setInput] = useState('');
@@ -42,6 +50,8 @@ function AIAvatar() {
   const [isDrawing, setIsDrawing] = useState(false);
   const canvasRef = useRef(null);
   const contextRef = useRef(null);
+  const pointsRef = useRef([]);
+  const circledRef = useRef(null);   // what the user last circled; sent with the next question to the server, once
 
   // Speech Bubble State
   const [speech, setSpeech] = useState(null);
@@ -153,7 +163,9 @@ function AIAvatar() {
       setIsOpen(false);
     };
     window.addEventListener('dblclick', handleDblClick);
-    return () => window.removeEventListener('dblclick', handleDblClick);
+    const handleEscape = (e) => { if (e.key === 'Escape') setIsSnipping(false); };
+    window.addEventListener('keydown', handleEscape);
+    return () => { window.removeEventListener('dblclick', handleDblClick); window.removeEventListener('keydown', handleEscape); };
   }, []);
 
   // ──────────────────────────────────────────────
@@ -179,10 +191,11 @@ function AIAvatar() {
     }
   }, [isSnipping]);
 
-  const startDrawing = ({ nativeEvent }) => {
-    const { offsetX, offsetY } = nativeEvent;
+  const startDrawing = (event) => {
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    pointsRef.current = [{ x: event.clientX, y: event.clientY }];
     contextRef.current.beginPath();
-    contextRef.current.moveTo(offsetX, offsetY);
+    contextRef.current.moveTo(event.clientX, event.clientY);
     setIsDrawing(true);
   };
 
@@ -191,17 +204,27 @@ function AIAvatar() {
     contextRef.current.closePath();
     setIsDrawing(false);
     setIsSnipping(false);
+    const box = boxFromPoints(pointsRef.current);
+    pointsRef.current = [];
+    if (!box) return;                                   // a tap or a tiny scribble is not a circle
+    const { text, hint } = collectScreenContext(box);
     setIsOpen(true);
+    if (!text) {
+      circledRef.current = null;
+      setMessages(prev => [...prev, { id: nextId(), local: true, text: "I couldn't read any text inside that circle. Try circling a number, a label or a whole card.", sender: 'bot' }]);
+      return;
+    }
+    circledRef.current = { text, hint, view: currentView ?? '' };
     setMessages(prev => [...prev,
-      { id: nextId(), isSnippet: true, local: true, text: "Area circled on screen", sender: 'user' },
-      { id: nextId(), local: true, text: "I see you circled an area. What would you like to know about it?", sender: 'bot' }
+      { id: nextId(), isSnippet: true, local: true, text: `Circled: “${text.length > 140 ? `${text.slice(0, 140)}…` : text}”`, sender: 'user' },
+      { id: nextId(), local: true, text: "Got it. What would you like to know about this?", sender: 'bot' }
     ]);
   };
 
-  const draw = ({ nativeEvent }) => {
+  const draw = (event) => {
     if (!isDrawing) return;
-    const { offsetX, offsetY } = nativeEvent;
-    contextRef.current.lineTo(offsetX, offsetY);
+    pointsRef.current.push({ x: event.clientX, y: event.clientY });
+    contextRef.current.lineTo(event.clientX, event.clientY);
     contextRef.current.stroke();
   };
 
@@ -309,6 +332,13 @@ function AIAvatar() {
       return { status: 'navigated', note };
     }
 
+    const instant = !active && !navigation ? localCommand(question) : null;
+    if (instant) {
+      setMessages((prev) => [...prev, userMsg, { id: nextId(), text: instant, sender: 'bot', local: true }]);
+      if (!voice) setIsOpen(true);
+      return { status: 'answered', reply: instant, navigate: null };
+    }
+
     busyRef.current = true;
     setMessages((prev) => [...prev, userMsg]);
     if (!voice) setIsOpen(true);
@@ -321,7 +351,12 @@ function AIAvatar() {
     let spokenReply = null;
     let error = null;
     try {
-      const answer = await sendAssistantMessage(history);
+      const circled = circledRef.current;
+      circledRef.current = null;                          // the circle belongs to this question only
+      const answer = await sendAssistantMessage(history, { screenContext: circled });
+      if (modelMode === 'local-demo') {
+        await new Promise((resolve) => setTimeout(resolve, LOCAL_DEMO_DELAY_MS));
+      }
       reply = answer.reply;
       const next = actionFromServer(answer.action);
       setActive(next);                       // no action in the response means nothing is open on the server any more
@@ -349,7 +384,7 @@ function AIAvatar() {
   };
 
   const handleSendText = (rawText) => runTurn(rawText, { source: 'text' });
-  const voiceSession = useVoiceSession({ runTurn });
+  const voiceSession = useVoiceSession({ runTurn, guideTone });
 
   // Companion state from REAL activity only: panel dictation (isListening), a request in flight (isThinking), and the
   // voice session's phase (listening / thinking / speaking a reply / stopped on an error).
@@ -370,21 +405,38 @@ function AIAvatar() {
     voiceSession.start();
   };
   const openChat = () => {
+    setGuideEnabled(false);
     voiceSession.end();
     setIsOpen(true);
   };
-  // Escape ends the voice session.
   const { active: voiceActive, end: endVoice } = voiceSession;
+  const stopVoice = useCallback(() => {
+    setGuideEnabled(false);
+    endVoice();
+  }, [endVoice]);
+  const startGuide = () => {
+    setGuideEnabled(true);
+    voiceSession.start({ guide: true });
+  };
+  const closeGuideMic = () => {
+    endVoice();
+    window.requestAnimationFrame(() => document.getElementById('guide-reopen-mic')?.focus());
+  };
   useEffect(() => {
-    if (!voiceActive) return undefined;
-    const onKey = (e) => { if (e.key === 'Escape') endVoice(); };
+    if (!voiceActive && !guideEnabled) return undefined;
+    const onKey = (e) => { if (e.key === 'Escape') stopVoice(); };
+    const onVisibility = () => { if (guideEnabled && document.hidden) stopVoice(); };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [voiceActive, endVoice]);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [voiceActive, guideEnabled, stopVoice]);
   const voiceStageLabel = companionState === 'navigating' ? 'Opening…'
     : voicePhase === 'idle' ? 'Tap the orb to speak'
       : voicePhase === 'error' ? 'Something went wrong' : `${stateLabel}…`;
-  const voiceOrbAction = voicePhase === 'listening' ? 'Stop listening'
+  const voiceOrbAction = voicePhase === 'listening' || voicePhase === 'starting' ? 'Stop listening'
     : voicePhase === 'speaking' ? 'Skip the spoken answer and listen'
       : voicePhase === 'thinking' ? 'FinSphere is thinking' : 'Start listening';
 
@@ -423,10 +475,10 @@ function AIAvatar() {
   const { identityMasked } = useAuth();
   useEffect(() => {
     if (!identityMasked) return;
-    endVoice();
+    stopVoice();
     stopListening();
     setIsOpen(false);
-  }, [identityMasked, endVoice, stopListening]);
+  }, [identityMasked, stopVoice, stopListening]);
 
   const handleSend = async (e) => {
     e.preventDefault();
@@ -440,9 +492,10 @@ function AIAvatar() {
         <div className="snippet-overlay-container">
           <div className="snippet-instruction">Draw a circle around the item you want to ask about</div>
           <canvas
-            onMouseDown={startDrawing}
-            onMouseUp={finishDrawing}
-            onMouseMove={draw}
+            onPointerDown={startDrawing}
+            onPointerUp={finishDrawing}
+            onPointerCancel={finishDrawing}
+            onPointerMove={draw}
             ref={canvasRef}
             className="snippet-canvas"
           />
@@ -451,6 +504,9 @@ function AIAvatar() {
 
       {/* Assistant state for screen readers: announced only when the state changes. */}
       <span className="ai-sr-only" role="status" aria-live="polite" data-testid="companion-status">{stateLabel}</span>
+      {guideEnabled && !identityMasked && !isOpen && !isSnipping && (
+        <CompanionGuide key={currentView} reducedMotion={reducedMotion} tone={guideTone} state={companionState} />
+      )}
 
       {/* Launcher: the Financial Companion, anchored bottom-right. The orb starts a VOICE conversation; text chat is
           the separate, explicit "Chat" control under it. Both use the same assistant pipeline (runTurn). */}
@@ -475,7 +531,11 @@ function AIAvatar() {
         </button>
 
         <div className="companion-caption">
-          <span className="companion-name" aria-hidden="true">Ask FinSphere</span>
+          <button type="button" className="companion-chat-btn companion-guide-btn" aria-pressed={guideEnabled} onClick={guideEnabled ? stopVoice : startGuide} aria-describedby="companion-guide-description">
+            <Compass size={14} aria-hidden="true" /> Guide
+          </button>
+          {guideEnabled && !voiceActive && <button id="guide-reopen-mic" type="button" className="companion-chat-btn" onClick={startGuide}><Mic size={14} aria-hidden="true" /> Guide mic</button>}
+          <span id="companion-guide-description" className="ai-sr-only">Start hands-free Guide with microphone recognition and silent hover tips.</span>
           <button
             type="button"
             className="companion-chat-btn"
@@ -492,11 +552,15 @@ function AIAvatar() {
 
       {/* Voice conversation stage: the companion expands; captions only, not a chat transcript. */}
       {voiceSession.active && (
-        <section id="ai-voice-stage" className="voice-stage" role="dialog" aria-modal="false" aria-label="FinSphere voice assistant">
+        <section id="ai-voice-stage" className={`voice-stage${guideEnabled ? ' voice-stage--guide' : ''}`} role="dialog" aria-modal="false" aria-label={guideEnabled ? 'FinSphere hands-free Guide' : 'FinSphere voice assistant'}>
+          {guideEnabled && <button type="button" className="voice-stage-btn guide-close" onClick={closeGuideMic} aria-label="Close mic panel and keep hover tips" title="Close mic panel; keep hover tips"><X size={16} aria-hidden="true" /></button>}
           <button type="button" className="voice-stage-orb" onClick={voiceSession.tapOrb} aria-label={voiceOrbAction}>
             <FinancialCompanion state={companionState} size="stage" />
           </button>
-          <p className="voice-stage-state" aria-hidden="true">{voiceStageLabel}</p>
+          <p className="voice-stage-state" aria-hidden={!guideEnabled}>{guideEnabled
+            ? voicePhase === 'listening' ? 'Guide mic on' : voicePhase === 'starting' ? 'Starting Guide mic…' : voicePhase === 'error' ? 'Guide mic off' : 'Guide mic paused'
+            : voiceStageLabel}</p>
+          {guideEnabled && voicePhase === 'listening' && <p className="guide-mic-hint">Say “open transactions” or “Hey FinSphere, how much did I spend?”</p>}
           {voiceSession.userCaption && (
             <p className="voice-caption voice-caption--user">
               <span className="ai-sr-only">You said: </span>“{voiceSession.userCaption}”
@@ -513,13 +577,22 @@ function AIAvatar() {
             onCancel={() => voiceSession.submit('cancel')}
           />
           <div className="voice-stage-actions">
+            {voiceSession.canSend && (
+              <button type="button" className="voice-stage-btn voice-stage-btn--send" onClick={voiceSession.sendNow} aria-label="Send what I said now">
+                <Send size={16} aria-hidden="true" />
+                <span>Send</span>
+              </button>
+            )}
+            {guideEnabled && voicePhase === 'error' && (
+              <button type="button" className="voice-stage-btn" onClick={voiceSession.tapOrb}>Retry mic</button>
+            )}
             <button type="button" className="voice-stage-btn" onClick={openChat} aria-label="Switch to text chat">
               <Keyboard size={16} aria-hidden="true" />
               <span>Chat</span>
             </button>
-            <button type="button" className="voice-stage-btn voice-stage-btn--end" onClick={voiceSession.end} aria-label="End voice session">
+            <button type="button" className="voice-stage-btn voice-stage-btn--end" onClick={stopVoice} aria-label={guideEnabled ? 'End Guide and turn off microphone' : 'End voice session'}>
               <X size={16} aria-hidden="true" />
-              <span>End</span>
+              <span>{guideEnabled ? 'End Guide' : 'End'}</span>
             </button>
           </div>
         </section>
@@ -539,6 +612,15 @@ function AIAvatar() {
           <button type="button" className="close-btn" aria-label="Close assistant" onClick={() => setIsOpen(false)}>
             <X size={20} />
           </button>
+        </div>
+
+        <div className="ai-model-settings">
+          <label htmlFor="ai-model-mode">Model</label>
+          <select id="ai-model-mode" value={modelMode} onChange={(event) => setModelMode(event.target.value)} disabled={isThinking} aria-describedby="ai-model-note">
+            <option value="cloud">Cloud model</option>
+            <option value="local-demo">Local model (demo)</option>
+          </select>
+          <p id="ai-model-note">Both modes use the server. Without a working cloud connection, it can answer basic financial questions from your records. Local demo adds a short delay; it does not run on this device.</p>
         </div>
 
         {/* Command hints */}

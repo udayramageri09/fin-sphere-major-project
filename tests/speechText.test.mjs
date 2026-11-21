@@ -71,3 +71,33 @@ test('empty or non-string input gives an empty string', () => {
   assert.equal(indianNumberWords(-1), null);
   assert.equal(indianNumberWords(1.5), null);
 });
+
+test('instant local replies cover only greetings, thanks and help; everything else goes to the server', async () => {
+  const { localCommand } = await import('../src/utils/localCommands.js');
+  assert.match(localCommand('Hello!'), /^Hi!/);
+  assert.match(localCommand('hey FinSphere'), /^Hi!/);
+  assert.equal(localCommand('thank you'), "You're welcome!");
+  assert.match(localCommand('what can you do?'), /open any page/);
+  for (const text of ['how much did I spend this month', 'hi there, add 450 for lunch', 'help me budget', '', null]) assert.equal(localCommand(text), null);
+});
+
+test('circle to ask reads only the text under the circle, in reading order, and ignores the assistant UI', async () => {
+  const { JSDOM } = await import('jsdom');
+  const { boxFromPoints, collectScreenContext } = await import('../src/utils/screenCapture.js');
+  assert.equal(boxFromPoints([{ x: 5, y: 5 }, { x: 10, y: 9 }]), null, 'a tap is not a circle');
+  const box = boxFromPoints([{ x: 100, y: 100 }, { x: 300, y: 100 }, { x: 300, y: 200 }, { x: 100, y: 200 }]);
+  assert.deepEqual(box, { left: 88, top: 88, right: 312, bottom: 212 });
+  const { window } = new JSDOM(`<body>
+    <section data-guide-tip="Your balance card."><span id="a">Balance</span><span id="b">Rs 1,000</span></section>
+    <p id="far">Elsewhere</p><div class="ai-chat-panel"><span id="chat">Chat text</span></div><span id="hidden">Hidden</span></body>`);
+  const rects = { a: [110, 120, 80, 20], b: [210, 120, 60, 20], far: [600, 600, 80, 20], chat: [120, 150, 80, 20], hidden: [150, 150, 40, 20] };
+  const rectOf = (node) => {
+    const [left, top, width, height] = rects[node.parentElement.id] ?? [0, 0, 0, 0];
+    return { left, top, width, height, right: left + width, bottom: top + height };
+  };
+  const doc = window.document;
+  const section = doc.querySelector('section');
+  section.getBoundingClientRect = () => ({ left: 90, top: 90, right: 300, bottom: 200, width: 210, height: 110 });
+  doc.getElementById('hidden').checkVisibility = () => false;
+  assert.deepEqual(collectScreenContext(box, { doc, rectOf }), { text: 'Balance ' + String.fromCharCode(183) + ' Rs 1,000', hint: 'Your balance card.' });
+});

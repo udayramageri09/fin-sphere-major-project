@@ -4,10 +4,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  PERIOD_OPTIONS, OTHERS, UNCLASSIFIED, normalizeMerchant, detectCategory, categoryFor, buildSpendingAnalytics, transactionsBehind, categoryChoices,
+  PERIOD_OPTIONS, OTHERS, UNCLASSIFIED, normalizeMerchant, categoryFor, buildSpendingAnalytics, transactionsBehind, categoryChoices,
   compareMonths, detectRecurring, formatMoney, formatPercent
 } from '../src/utils/spendingAnalytics.js';
-import { aggregateMonthlyTransactions, summarizeTransactions } from '../src/utils/finance.js';
+import { detectMerchantCategory as detectCategory } from '../src/utils/merchantCategories.js';
+import { aggregateMonthlyTransactions, previousMonthBalance, summarizeTransactions } from '../src/utils/finance.js';
+
+test('Guide balance comparisons clamp to the previous month and use recorded signed amounts only', () => {
+  const rows = [
+    { date: '2026-01-01', amount: 1200, classification: 'income' },
+    { date: '2026-02-28', amount: -200.25, classification: 'transfer' },
+    { date: '2026-02-30', amount: 50 },
+    { date: '2026-03-01', amount: 60 },
+  ];
+  assert.deepEqual(previousMonthBalance(rows, new Date(2026, 2, 31)), { date: new Date(2026, 1, 28), balance: 999.75 });
+  assert.equal(previousMonthBalance(rows, new Date(2026, 2, 27)), null, 'no comparable activity as of the cutoff');
+});
 
 const NOW = new Date(2026, 9, 15);                       // 15 Oct 2026 (local)
 let seq = 0;
@@ -40,6 +52,10 @@ test('keyword detection uses whole words and the longest match', () => {
   assert.equal(detectCategory('busy bee'), null, '"bus" is not found inside "busy"');
   assert.equal(detectCategory('mutual fund sip'), 'Investment');
   assert.equal(detectCategory(''), null);
+  assert.equal(detectCategory('fcc9d23910c Farid ali UPI/Farid ali/XX7088@ybl/NO REMARK/YES BANK'), 'P2P');
+  assert.equal(detectCategory('M V S Kart UPI/M V S Kart/XX9666@slc/UPI/SLICE'), 'P2P');
+  assert.equal(detectCategory('7d2476e68a BSK DUM BI UPI/BSK DUM BI/XX9478@ybl/NO REMARK/YES BANK'), 'P2P');
+  assert.equal(detectCategory('UPI/ZOMATO/XX1234@ybl/ORDER'), 'Food', 'a known merchant beats the person-shaped guess');
 });
 
 test('a category is the user\'s own label first, then a keyword match, otherwise Others; "General" means not categorised yet', () => {
@@ -321,7 +337,7 @@ test('payments that look recurring are described; frequent, irregular or too-new
 // ── choices, formatting, isolation, performance ────────────────────────────────────────────────────────────────────────────
 test('category choices: the app\'s categories, the user\'s own, and Others', () => {
   const choices = categoryChoices([{ category: 'Pets' }, { category: 'pets' }, { category: 'General' }, { category: 'food' }, { category: 'Others' }, { category: '' }, {}]);
-  assert.deepEqual(choices, ['Food', 'Shopping', 'Bills', 'Entertainment', 'Travel', 'Investment', 'Salary', 'Pets', OTHERS]);
+  assert.deepEqual(choices, ['Food', 'Shopping', 'Bills', 'Entertainment', 'Travel', 'Petrol', 'P2P', 'Investment', 'Salary', 'Pets', OTHERS]);
 });
 
 test('money and percentage formats', () => {
