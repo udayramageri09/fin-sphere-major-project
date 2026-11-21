@@ -28,7 +28,12 @@ test('sandbox requires consent and imports only authenticated, owner-scoped fixt
         NODE_ENV: mode, FINSPHERE_AA_SANDBOX: enabled, TRUST_PROXY: 'false',
         CORS_ORIGINS: 'http://localhost:5174', IMPORT_LEGACY_JSON: 'false',
         DATABASE_URL: url.toString(), DATABASE_SSL: process.env.DATABASE_SSL ?? 'false',
-        JWT_SECRET: 'test-secret-for-isolated-sandbox-testing-only', GROQ_API_KEY: '', PASSWORD_RESET_DELIVERY: ''
+        JWT_SECRET: 'test-secret-for-isolated-sandbox-testing-only', GROQ_API_KEY: '', PASSWORD_RESET_DELIVERY: '',
+        // This test starts the real server, including the (unrelated) AA simulator provider wired
+        // up in server.js. It is not exercising that provider, so it opts in to the same
+        // synthetic-data acknowledgement a real production deployment would make explicitly -
+        // see aaProvider.js's createAaProvider().
+        AA_ALLOW_LOCAL_SIMULATOR_IN_PRODUCTION: 'true'
       },
       stdio: ['ignore', 'pipe', 'pipe']
     });
