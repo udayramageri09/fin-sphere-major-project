@@ -16,6 +16,7 @@ const Settings = lazy(() => import('./pages/Settings'))
 import AIAvatar from './components/AIAvatar'
 import AuthPage from './pages/AuthPage'
 import Onboarding from './components/Onboarding'
+import { readGuideTone, saveGuideTone } from './utils/guideTone'
 
 // Shown instead of the app while another tab may have changed the account and the server has not yet said whose session this is.
 function SessionCheck({ error, onRetry }) {
@@ -41,12 +42,22 @@ function SessionCheck({ error, onRetry }) {
 // it has no component left to land in.
 function AuthenticatedApp({ hidden }) {
   const [currentView, setCurrentView] = useState('dashboard');
+  const [discussGoals, setDiscussGoals] = useState(false);
   const { user } = useAuth();
+  const [guideTone, setGuideTone] = useState(() => readGuideTone(user?.id));
+  const changeGuideTone = (tone) => {
+    saveGuideTone(user.id, tone);
+    setGuideTone(tone);
+  };
+  const navigate = (view) => {
+    setDiscussGoals(false);
+    setCurrentView(view);
+  };
   return (
     <div hidden={hidden} style={hidden ? { display: 'none' } : undefined}>
-      <FinanceProvider currentView={currentView} setCurrentView={setCurrentView}>
+      <FinanceProvider currentView={currentView} setCurrentView={navigate}>
         <div className="flex flex-col min-h-screen w-full bg-zinc-50 relative">
-          <TopNav currentView={currentView} setCurrentView={setCurrentView} />
+          <TopNav currentView={currentView} setCurrentView={navigate} />
 
           {/* Main Content Area */}
           <main tabIndex={-1} className="flex-1 w-full pt-24 pb-40 px-4 md:px-8">
@@ -56,17 +67,17 @@ function AuthenticatedApp({ hidden }) {
                 {currentView === 'transactions' && <Transactions />}
                 {currentView === 'liabilities' && <Liabilities />}
                 {currentView === 'portfolio' && <Portfolio />}
-                {currentView === 'goals' && <Goals />}
+                {currentView === 'goals' && <Goals onDiscussGoals={() => { setDiscussGoals(true); setCurrentView('plans'); }} />}
                 {currentView === 'subscriptions' && <Subscriptions />}
-                {currentView === 'plans' && <Plans />}
-                {currentView === 'settings' && <Settings />}
+                {currentView === 'plans' && <Plans discussGoals={discussGoals} />}
+                {currentView === 'settings' && <Settings guideTone={guideTone} onGuideToneChange={changeGuideTone} />}
               </PageBoundary>
             </div>
           </main>
 
-          {user?.onboardingState !== 'pending' && <AIAvatar />}
+          {user?.onboardingState !== 'pending' && <AIAvatar guideTone={guideTone} />}
         </div>
-        {user?.onboardingState === 'pending' && <Onboarding onNavigate={setCurrentView} />}
+        {user?.onboardingState === 'pending' && <Onboarding onNavigate={navigate} />}
       </FinanceProvider>
     </div>
   )

@@ -3,14 +3,15 @@ import { useState } from 'react';
 import BrandMark from './BrandMark';
 
 const navItems = [
-  { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { id: 'transactions', label: 'Transactions', icon: Wallet },
-  { id: 'liabilities', label: 'Liabilities', icon: CreditCard },
-  { id: 'portfolio', label: 'Portfolio', icon: PieChart },
-  { id: 'goals', label: 'Goals', icon: Target },
-  { id: 'subscriptions', label: 'SIPs & Subs', icon: CalendarRange },
-  { id: 'plans', label: 'Financial Intelligence', icon: Brain },
+  { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, tip: 'Start here for a snapshot of your cash flow and recent activity.' },
+  { id: 'transactions', label: 'Transactions', icon: Wallet, tip: 'Open Transactions to review spending, edit categories, or import a statement.' },
+  { id: 'liabilities', label: 'Liabilities', icon: CreditCard, tip: 'Track your loans and record repayments in Liabilities.' },
+  { id: 'portfolio', label: 'Portfolio', icon: PieChart, tip: 'Open Portfolio to record holdings and review your allocation.' },
+  { id: 'goals', label: 'Goals', icon: Target, tip: 'Open Goals to track savings targets and manage your budgets.' },
+  { id: 'subscriptions', label: 'SIPs & Subs', icon: CalendarRange, tip: 'Open SIPs and Subscriptions to review recurring payments.' },
+  { id: 'plans', label: 'Financial Intelligence', icon: Brain, tip: 'Get an analysis of your spending and ask the Advisor about the results.' },
 ];
+const SETTINGS_TIP = 'Open Settings to manage your profile and accessibility preferences.';
 
 function TopNav({ currentView, setCurrentView }) {
   const [isOpen, setIsOpen] = useState(false);
@@ -38,6 +39,7 @@ function TopNav({ currentView, setCurrentView }) {
             return (
               <button
                 key={item.id}
+                data-guide-tip={item.tip}
                 onClick={() => handleNav(item.id)}
                 style={isActive ? { backgroundColor: '#09090b', color: '#ffffff' } : {}}
                 className={`flex items-center gap-1.5 2xl:gap-2 px-2.5 2xl:px-3 py-2 rounded-xl text-sm font-medium transition-all duration-200
@@ -56,6 +58,7 @@ function TopNav({ currentView, setCurrentView }) {
           <button
             onClick={() => setIsOpen(!isOpen)}
             aria-label={isOpen ? 'Close menu' : 'Open menu'}
+            data-guide-tip={isOpen ? undefined : 'Open the menu to switch between FinSphere pages.'}
             aria-expanded={isOpen}
             className="xl:hidden p-2 -mr-2 text-zinc-900 hover:bg-zinc-100 rounded-full transition-colors"
           >
@@ -64,6 +67,7 @@ function TopNav({ currentView, setCurrentView }) {
           <button
             onClick={() => handleNav('settings')}
             aria-label="Profile and settings"
+            data-guide-tip={SETTINGS_TIP}
             aria-current={onSettings ? 'page' : undefined}
             title="Profile and settings"
             data-testid="nav-settings"
@@ -91,6 +95,7 @@ function TopNav({ currentView, setCurrentView }) {
                 return (
                   <button
                     key={item.id}
+                    data-guide-tip={item.tip}
                     onClick={() => handleNav(item.id)}
                     style={isActive ? { backgroundColor: '#09090b', color: '#ffffff' } : {}}
                     className={`flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium w-full text-left transition-all duration-200
@@ -107,6 +112,7 @@ function TopNav({ currentView, setCurrentView }) {
                 onClick={() => handleNav('settings')}
                 aria-current={onSettings ? 'page' : undefined}
                 data-testid="drawer-settings"
+                data-guide-tip={SETTINGS_TIP}
                 style={onSettings ? { backgroundColor: '#09090b', color: '#ffffff' } : {}}
                 className={`flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium w-full text-left transition-all duration-200 ${onSettings ? 'shadow-md' : 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900'}`}
               >

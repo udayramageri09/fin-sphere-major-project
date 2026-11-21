@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Home, Car, CreditCard, GraduationCap, Wallet, Landmark, Plus, X, Trash2, AlertCircle } from 'lucide-react';
 import { useFinance } from '../context/FinanceContext';
+import AccountAggregatorSandbox from '../components/AccountAggregatorSandbox';
 
 // Same set the server accepts; the server is the validation authority.
 const LIABILITY_TYPES = [
@@ -34,8 +35,9 @@ const labelClass = 'text-xs font-medium text-zinc-500';
 const EMPTY_FORM = { name: '', type: '', outstandingAmount: '', interestRate: '', monthlyPayment: '' };
 
 function Liabilities() {
-  const { liabilities, liabilitiesLoading, liabilitiesError, fetchLiabilities, addLiability, deleteLiability, addLiabilityRepayment } = useFinance();
+  const { liabilities, liabilitiesLoading, liabilitiesError, fetchLiabilities, addLiability, deleteLiability, addLiabilityRepayment, accountAggregatorRequest } = useFinance();
   const [showForm, setShowForm] = useState(false);
+  const [showSandbox, setShowSandbox] = useState(false);
   const [form, setForm] = useState(EMPTY_FORM);
   const [formError, setFormError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -120,6 +122,9 @@ function Liabilities() {
     <div className="animate-fade-in">
       <div className="flex flex-wrap items-center justify-between gap-3 mb-8">
         <h2 style={{ fontSize: '2rem' }}>Active Liabilities</h2>
+        {import.meta.env.DEV && accountAggregatorRequest && !showForm && (
+          <button type="button" className="rounded-xl border border-zinc-300 px-4 py-2 text-sm font-medium" aria-expanded={showSandbox} onClick={() => setShowSandbox(open => !open)}>Add loan from sandbox</button>
+        )}
         <button
           type="button"
           onClick={toggleForm}
@@ -131,8 +136,19 @@ function Liabilities() {
         </button>
       </div>
 
+      {import.meta.env.DEV && accountAggregatorRequest && showSandbox && !showForm && (
+        <div className="glass-panel mb-8 max-w-2xl p-6">
+          <AccountAggregatorSandbox request={accountAggregatorRequest} selection="loans" onSelect={record => {
+            setForm({ name: `[Sandbox] ${record.name}`, type: 'education_loan', outstandingAmount: String(record.amount), interestRate: '8.5', monthlyPayment: '3500' });
+            setFormError('');
+            setShowSandbox(false);
+            setShowForm(true);
+          }} />
+        </div>
+      )}
       {showForm && (
         <form onSubmit={handleSubmit} className="glass-panel p-6 mb-8 max-w-2xl flex flex-col gap-4">
+          {form.name.startsWith('[Sandbox] ') && <p className="text-sm text-zinc-600">Fictional loan. The rate and payment are demo values. Review them before saving.</p>}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="flex flex-col gap-1">
               <label htmlFor="liability-name" className={labelClass}>Name</label>

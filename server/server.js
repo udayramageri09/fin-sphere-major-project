@@ -34,13 +34,17 @@ import { sanitizeProfileImage, ProfileImageError, AVATAR_LIMITS } from './profil
 import { MAX_IMPORT_ROWS, findDuplicates, buildPreview, reviewDigest, digestsEqual, parseConfirmRequest, planImport } from './importDuplicates.js';
 import { createSnapshotStore, sanitizeAnalysis } from './planSnapshot.js';
 import { createResetDelivery, createDevMailHandlers, createPasswordResetHandlers } from './passwordReset.js';
+import { categoryRuleKey, detectMerchantCategory } from './merchantCategories.js';
+import { buildMessages, cleanItems, parseSuggestions } from './aiClassify.js';
+import { cleanScreenContext, screenContextPrompt } from './screenContext.js';
+import { sandboxEnabled, demoOverview, grantDemoConsent, hasDemoConsent } from './accountAggregatorSandbox.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 dotenv.config({ path: path.join(__dirname, '.env') });
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT === '0' ? 0 : process.env.PORT || 5000;
 const ML_SERVICE_URL = process.env.ML_SERVICE_URL || 'http://localhost:8000';
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
@@ -127,7 +131,10 @@ app.use('/api', (req, res, next) => {
 // Largest JSON body accepted (pasted statement text, chat and plan-chat). Stated explicitly rather than relying on
 // the library default; larger requests are answered 413.
 const globalJson = express.json({ limit: '100kb' });
-app.use((req, res, next) => (req.path === '/api/transactions/import-confirm' ? next() : globalJson(req, res, next)));   // that one route has its own, authenticated, 256 KB parser
+app.use((req, res, next) => (
+  ['/api/transactions/import-confirm', '/api/transactions/import-reviewed-pdf'].includes(req.path.replace(/\/$/, '').toLowerCase())
+    ? next() : globalJson(req, res, next)
+));
 app.use(cookieParser());
 app.get('/api/health', rateLimit({ windowMs: 60_000, limit: 60, standardHeaders: true, legacyHeaders: false }), async (req, res) => {
   try { await databaseHealthy(); res.json({ status: 'ok' }); }
@@ -289,13 +296,14 @@ function normalizeTransactionInput(raw, nowMs = Date.now()) {
 // Runs importer candidates (which carry the userId stamped by the parsers) through
 // the same boundary. Invalid rows are skipped, never fatal to valid ones. Row IDs
 // are generated here, never taken from a parser.
-function normalizeImportedRows(candidates) {
+function normalizeImportedRows(candidates, rules = new Map()) {
   const rows = [];
   let skipped = 0;
   for (const candidate of candidates) {
     // Importers only know direction (debit / credit), never meaning: every imported row is 'unknown', whatever the
     // candidate carries, so nothing a parser or an AI model emits can set a classification.
-    const result = normalizeTransactionInput({ ...candidate, classification: 'unknown' });
+    const category = rules.get(categoryRuleKey(candidate.title)) ?? candidate.category;
+    const result = normalizeTransactionInput({ ...candidate, category, classification: 'unknown' });
     if (!result.ok) {
       skipped++;
       continue;
@@ -1274,9 +1282,41 @@ function respondImportError(res, err, message) {
   }
   return respondDbError(res, err, message);
 }
-async function respondWithImport(req, res, rows, { skipped, notice } = {}) {
+
+if (sandboxEnabled(process.env)) {
+  const consentLimit = perUserLimiter(10, 'sandbox consent');
+  const importLimit = perUserLimiter(10, 'sandbox import');
+  const base = '/api/transactions/account-aggregator-sandbox';
+  app.post(`${base}/consent`, authenticate, consentLimit, (req, res) => {
+    const consent = grantDemoConsent(req.body, req.user.id);
+    if (!consent) return res.status(400).json({ error: 'Select the demo identity and approve mock consent. Do not enter a real PAN.' });
+    return res.json({ consent, overview: demoOverview });
+  });
+
+  app.post(`${base}/import`, authenticate, importLimit, async (req, res) => {
+    if (!req.body || Object.keys(req.body).length !== 1 || !hasDemoConsent(req.body.consent, req.user.id)) {
+      return res.status(403).json({ error: 'Mock consent is missing, invalid or expired. Start a new preview to import.' });
+    }
+    // Amounts, dates and ownership never come from the browser.
+    const rows = demoOverview.transactions.map(({ accountId: _accountId, ...row }) => ({
+      ...row, id: randomUUID(), userId: req.user.id
+    }));
+    try {
+      const outcome = await importTransactionsLocked(req.user.id, rows, (existing) => {
+        const matches = findDuplicates(rows, existing);
+        const insert = rows.filter((_, index) => !matches[index].tier);
+        return { insert, result: { count: insert.length, skipped: rows.length - insert.length } };
+      });
+      return res.json(outcome);
+    } catch (error) {
+      return respondImportError(res, error, 'Could not import demo transactions');
+    }
+  });
+}
+
+async function respondWithImport(req, res, rows, { skipped, notice, reviewedPdf = false } = {}) {
   const extra = notice ? { notice } : {};
-  if (req.query.duplicates === 'allow') {   // explicit legacy behaviour: no duplicate check
+  if (!reviewedPdf && req.query.duplicates === 'allow') {   // explicit legacy behaviour: no duplicate check
     try {
       await createTransactionsBatch(rows); // one statement: all accepted rows or none
     } catch (dbErr) {
@@ -1292,8 +1332,8 @@ async function respondWithImport(req, res, rows, { skipped, notice } = {}) {
     outcome = await importTransactionsLocked(req.user.id, rows, (existing) => {
       const results = findDuplicates(rows, existing);
       if (results.every((r) => !r.tier)) return { insert: rows, result: { conflict: false } };
-      const digest = reviewDigest(JWT_SECRET, req.user.id, rows, results, existing);
-      return { insert: [], result: { conflict: true, preview: buildPreview(rows, results, { skipped, digest }) } };
+      const digest = reviewDigest(JWT_SECRET, req.user.id, rows, results, existing, reviewedPdf);
+      return { insert: [], result: { conflict: true, preview: buildPreview(rows, results, { skipped, digest, reviewedPdf }) } };
     });
   } catch (dbErr) {
     return respondImportError(res, dbErr, 'Could not save transactions');
@@ -1329,6 +1369,17 @@ app.post('/api/transactions/parse-statement', authenticate, parseLimiter, (req, 
   if (req.query.duplicates !== undefined && !['allow', 'report'].includes(req.query.duplicates)) {
     return res.status(400).json({ error: 'duplicates must be "report" (default) or "allow"' });
   }
+  let ruleList = req.body?.categoryRules ?? [];
+  if (typeof ruleList === 'string') {
+    try { ruleList = JSON.parse(ruleList); }
+    catch { return res.status(400).json({ error: 'Invalid category rules.' }); }
+  }
+  if (!Array.isArray(ruleList) || ruleList.length > 100 || ruleList.some((rule) =>
+    !rule || typeof rule.key !== 'string' || !rule.key || rule.key.length > 120 || categoryRuleKey(rule.key) !== rule.key ||
+    typeof rule.category !== 'string' || !rule.category.trim() || rule.category.length > 60 || /[\p{Cc}\p{Cf}]/u.test(rule.category))) {
+    return res.status(400).json({ error: 'Invalid category rules.' });
+  }
+  const categoryRules = new Map(ruleList.map((rule) => [rule.key, rule.category.trim()]));
   let statementText = '';
   let isExcel = false;
 
@@ -1387,24 +1438,7 @@ app.post('/api/transactions/parse-statement', authenticate, parseLimiter, (req, 
           const amount = hasCredit ? credit.value : -debit.value;
           const type = hasCredit ? 'income' : 'expense';
 
-          // Categories
-          let category = 'General';
-          const lowerRemarks = rawRemarks.toLowerCase();
-          if (lowerRemarks.includes('magicpin') || lowerRemarks.includes('amazon') || lowerRemarks.includes('flipkart') || lowerRemarks.includes('shop') || lowerRemarks.includes('reliance')) {
-            category = 'Shopping';
-          } else if (lowerRemarks.includes('south kitc') || lowerRemarks.includes('zomato') || lowerRemarks.includes('swiggy') || lowerRemarks.includes('restaurant') || lowerRemarks.includes('food') || lowerRemarks.includes('coffee') || lowerRemarks.includes('starbucks')) {
-            category = 'Food';
-          } else if (lowerRemarks.includes('pvr') || lowerRemarks.includes('inox') || lowerRemarks.includes('cinema') || lowerRemarks.includes('movie') || lowerRemarks.includes('netflix') || lowerRemarks.includes('spotify')) {
-            category = 'Entertainment';
-          } else if (lowerRemarks.includes('salary') || lowerRemarks.includes('paycheck') || lowerRemarks.includes('employer')) {
-            category = 'Salary';
-          } else if (lowerRemarks.includes('dividend') || lowerRemarks.includes('mutual') || lowerRemarks.includes('groww') || lowerRemarks.includes('zerodha') || lowerRemarks.includes('stock')) {
-            category = 'Investment';
-          } else if (lowerRemarks.includes('bill') || lowerRemarks.includes('electricity') || lowerRemarks.includes('utility') || lowerRemarks.includes('recharge') || lowerRemarks.includes('telecom') || lowerRemarks.includes('airtel') || lowerRemarks.includes('jio')) {
-            category = 'Bills';
-          } else if (lowerRemarks.includes('uber') || lowerRemarks.includes('ola') || lowerRemarks.includes('travel') || lowerRemarks.includes('flight') || lowerRemarks.includes('metro')) {
-            category = 'Travel';
-          }
+          const category = detectMerchantCategory(rawRemarks) ?? 'General';
 
           parsedTxns.push({
             userId: req.user.id, // ownership stamp for Excel-parsed transactions
@@ -1417,7 +1451,7 @@ app.post('/api/transactions/parse-statement', authenticate, parseLimiter, (req, 
         }
 
         if (parsedTxns.length > 0 || parserSkipped > 0) {
-          const { rows: savedRows, skipped: invalidRows } = normalizeImportedRows(parsedTxns);
+          const { rows: savedRows, skipped: invalidRows } = normalizeImportedRows(parsedTxns, categoryRules);
           const skipped = parserSkipped + invalidRows;
           if (savedRows.length > 0) {
             return respondWithImport(req, res, savedRows, { skipped });
@@ -1519,7 +1553,7 @@ Return only the valid JSON array, like: [{"title": "Salary", "amount": 50000, "d
               category: txn.category || 'General'
             };
           });
-          const { rows, skipped } = normalizeImportedRows(candidates);
+          const { rows, skipped } = normalizeImportedRows(candidates, categoryRules);
 
           if (rows.length > 0) {
             return respondWithImport(req, res, rows, { skipped });
@@ -1555,14 +1589,7 @@ Return only the valid JSON array, like: [{"title": "Salary", "amount": 50000, "d
 
       const title = finalizeStatementTitle(parsed.titleText);
 
-      let category = 'General';
-      const lowerTitle = title.toLowerCase();
-      if (lowerTitle.includes('amazon') || lowerTitle.includes('flipkart') || lowerTitle.includes('shop')) category = 'Shopping';
-      else if (lowerTitle.includes('coffee') || lowerTitle.includes('restaurant') || lowerTitle.includes('zomato') || lowerTitle.includes('swiggy') || lowerTitle.includes('food')) category = 'Food';
-      else if (lowerTitle.includes('salary') || lowerTitle.includes('deposit') || lowerTitle.includes('paycheck')) category = 'Salary';
-      else if (lowerTitle.includes('netflix') || lowerTitle.includes('spotify') || lowerTitle.includes('hotstar')) category = 'Entertainment';
-      else if (lowerTitle.includes('dividend') || lowerTitle.includes('stock') || lowerTitle.includes('mutual')) category = 'Investment';
-      else if (lowerTitle.includes('bill') || lowerTitle.includes('electricity') || lowerTitle.includes('recharge')) category = 'Bills';
+      const category = detectMerchantCategory(title) ?? 'General';
 
       parsedTxns.push({
         userId: req.user.id, // ownership stamp for rule-based-parsed transactions
@@ -1575,7 +1602,7 @@ Return only the valid JSON array, like: [{"title": "Salary", "amount": 50000, "d
     }
 
     if (parsedTxns.length > 0 || parserSkipped > 0) {
-      const { rows: savedRows, skipped: invalidRows } = normalizeImportedRows(parsedTxns);
+      const { rows: savedRows, skipped: invalidRows } = normalizeImportedRows(parsedTxns, categoryRules);
       const skipped = parserSkipped + invalidRows;
       if (savedRows.length > 0) {
         return respondWithImport(req, res, savedRows, { skipped, notice: 'Parsed using local backup engine' });
@@ -1600,14 +1627,70 @@ Return only the valid JSON array, like: [{"title": "Salary", "amount": 50000, "d
 // No statement is parsed again and no language model is called.
 const importConfirmLimiter = perUserLimiter(20, 'import confirmation');
 const importConfirmJson = express.json({ limit: '256kb' });
+
+function normalizeReviewedPdfRow(raw) {
+  if (typeof raw?.category !== 'string' || !raw.category.trim() || raw.category.length > 60 || /[\p{Cc}\p{Cf}]/u.test(raw.category)) {
+    return { ok: false, error: 'Choose a category of 1–60 characters' };
+  }
+  if (!['income', 'expense', 'refund', 'transfer'].includes(raw.classification)) {
+    return { ok: false, error: 'Choose a classification' };
+  }
+  if (typeof raw.amount !== 'number' || (raw.type === 'expense' ? raw.amount >= 0 : raw.amount <= 0)) {
+    return { ok: false, error: 'The amount must agree with the money direction' };
+  }
+  return normalizeTransactionInput(raw);
+}
+
+// 4a. POST /api/transactions/classify: AI suggestions for narrations the local rules could not place. Suggestions only; nothing is saved.
+// With no Groq key (or a failed call) it answers { available: false } and the app keeps its local rules.
+const classifyLimiter = perUserLimiter(20, 'classification');
+app.post('/api/transactions/classify', authenticate, classifyLimiter, async (req, res) => {
+  const cleaned = cleanItems(req.body?.items);
+  if (!cleaned.ok) return res.status(400).json({ error: cleaned.error });
+  if (!isGroqConfigured()) return res.json({ available: false, suggestions: [] });
+  try {
+    const model = getParseModel(process.env);
+    const response = await fetch(groqChatUrl(process.env), {
+      method: 'POST',
+      signal: AbortSignal.timeout(30_000),
+      headers: { 'Authorization': `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, messages: buildMessages(cleaned.items), temperature: 0, ...modelRequestFields(model) })
+    });
+    if (!response.ok) {
+      console.error('Groq classification error: status', response.status);
+      return res.json({ available: false, suggestions: [] });
+    }
+    const data = await response.json();
+    return res.json({ available: true, suggestions: parseSuggestions(data?.choices?.[0]?.message?.content, cleaned.items) });
+  } catch (err) {
+    console.error('Groq classification failed:', err?.name ?? 'error');
+    return res.json({ available: false, suggestions: [] });
+  }
+});
+
+app.post('/api/transactions/import-reviewed-pdf', authenticate, importConfirmLimiter, importConfirmJson, async (req, res) => {
+  if (!Array.isArray(req.body?.rows) || !req.body.rows.length || req.body.rows.length > MAX_IMPORT_ROWS) {
+    return res.status(400).json({ error: `Submit between 1 and ${MAX_IMPORT_ROWS} reviewed rows.` });
+  }
+  const rows = [];
+  for (const [index, raw] of req.body.rows.entries()) {
+    const normalized = normalizeReviewedPdfRow(raw);
+    if (!normalized.ok) return res.status(400).json({ error: `Row ${index + 1}: ${normalized.error}` });
+    rows.push({ id: randomUUID(), userId: req.user.id, ...normalized.value });
+  }
+  return respondWithImport(req, res, rows, { skipped: 0, reviewedPdf: true });
+});
+
 app.post(IMPORT_CONFIRM_PATH, authenticate, importConfirmLimiter, importConfirmJson, async (req, res) => {
   const parsed = parseConfirmRequest(req.body);
   if (!parsed.ok) return res.status(400).json({ error: parsed.error });
   const rows = [];
+  const reviewedPdf = req.body.reviewedPdf === true;
   for (let i = 0; i < parsed.value.rows.length; i++) {
     const raw = parsed.value.rows[i];
     // Only these five fields are read. An id, userId, classification or duplicate flag in the request is ignored.
-    const normalized = normalizeTransactionInput({ title: raw?.title, amount: raw?.amount, date: raw?.date, type: raw?.type, category: raw?.category });
+    const normalized = reviewedPdf ? normalizeReviewedPdfRow(raw)
+      : normalizeTransactionInput({ title: raw?.title, amount: raw?.amount, date: raw?.date, type: raw?.type, category: raw?.category });
     if (!normalized.ok) return res.status(400).json({ error: `Row ${i + 1}: ${normalized.error}` });
     rows.push({ id: randomUUID(), userId: req.user.id, ...normalized.value });
   }
@@ -1615,8 +1698,10 @@ app.post(IMPORT_CONFIRM_PATH, authenticate, importConfirmLimiter, importConfirmJ
   try {
     outcome = await importTransactionsLocked(req.user.id, rows, (existing) => {
       const results = findDuplicates(rows, existing);
-      const digest = reviewDigest(JWT_SECRET, req.user.id, rows, results, existing);
+      const digest = reviewDigest(JWT_SECRET, req.user.id, rows, results, existing, reviewedPdf);
       if (!digestsEqual(digest, parsed.value.reviewDigest)) {
+        // Never upgrade a legacy preview into a classified PDF review on a mismatched digest.
+        if (reviewedPdf) return { insert: [], result: { stale: true, restartPdf: true } };
         return { insert: [], result: { stale: true, preview: buildPreview(rows, results, { skipped: 0, digest }) } };
       }
       const plan = planImport(rows, results, parsed.value);
@@ -1626,6 +1711,7 @@ app.post(IMPORT_CONFIRM_PATH, authenticate, importConfirmLimiter, importConfirmJ
     return respondImportError(res, dbErr, 'Could not save transactions');
   }
   if (outcome.stale) {
+    if (outcome.restartPdf) return res.status(409).json({ error: 'The PDF import review changed. Nothing was saved. Return to the PDF review and submit again.' });
     return res.status(409).json({ success: false, code: 'STALE_PREVIEW', error: 'Your transactions changed since this import was reviewed. Nothing was imported; review it again.', ...outcome.preview });
   }
   const { insert, skippedLikely, skippedByUser, likelyImportedAnyway, possibleImported } = outcome.plan;
@@ -2019,6 +2105,9 @@ app.post('/api/chat', authenticate, chatLimiter, async (req, res) => {
   const invalid = validateChatMessages(req.body?.messages);
   if (invalid) return res.status(400).json({ error: invalid });
   const history = recentTurns(req.body.messages);
+  const screen = cleanScreenContext(req.body?.screenContext);
+  if (!screen.ok) return res.status(400).json({ error: screen.error });
+  const screenContext = screen.value;
   const localDate = parseClientLocalDate(req.body?.localDate);
   if (localDate === null) return res.status(400).json({ error: 'localDate must be today\'s date as YYYY-MM-DD' });
 
@@ -2113,7 +2202,7 @@ Rules:
 4. Refunds are not income; they reduce spending. Transfers are neither income nor spending.
 5. If asked how a figure was calculated, explain it with the definitions above.
 6. You cannot open pages or perform actions. Never say you will navigate or that a page is opening; the app handles navigation itself when the user asks for it.
-7. Be brief, clear and friendly; keep replies to 3-4 sentences unless a breakdown is requested. Use ₹ for amounts.`
+7. Be brief, clear and friendly; keep replies to 3-4 sentences unless a breakdown is requested. Use ₹ for amounts.${screenContext ? screenContextPrompt(screenContext) : ''}`
     };
 
     if (isGroqConfigured()) {
@@ -2150,7 +2239,8 @@ Rules:
 
     // Deterministic fallback (no language model configured, or the call failed)
     console.log('Using fallback chatbot response');
-    return answer(fallbackReply(history, ctx));
+    const fallback = fallbackReply(history, ctx);
+    return answer(screenContext ? `You circled: “${screenContext.text.slice(0, 160)}”. The cloud model isn't available right now, so I can only answer from your recorded data. ${fallback}` : fallback);
   } catch (err) {
     // Never let one request take the process down; nothing from the request is logged.
     console.error('Chat request failed:', err?.name ?? 'unknown');
@@ -2410,8 +2500,8 @@ try {
   console.error('Set DATABASE_URL to a reachable PostgreSQL database (see server/.env.example).');
   process.exit(1);
 }
-const httpServer = app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+const httpServer = app.listen(PORT, process.env.HOST || undefined, () => {
+  console.log(`Server running on http://localhost:${httpServer.address().port}`);
   if (isGroqConfigured()) {
     console.log('Groq API Key is loaded successfully.');
   } else {

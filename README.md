@@ -1,4 +1,4 @@
-# FinSphere
+﻿# FinSphere
 
 FinSphere is a student personal-finance web application. You record or import transactions, inspect spending, track savings goals and debts, record investment valuations, and request financial analysis. PostgreSQL stores the records. The optional language model explains results; it is not the source of financial totals.
 
@@ -170,6 +170,10 @@ If it already exists, investigate ownership and contents; do not drop it. No des
 
    No environment activation is required with this explicit interpreter path. The release pins passed 42 tests and synthetic evaluation in a clean environment. Keep the prepared faculty interpreter separate and rerun tests on the target host.
 
+## One-click demo launcher (Windows)
+
+Double-click **`start-demo.bat`**. It starts Docker Desktop if needed, the isolated development database and analytics containers, the API (port 5000) and the web app (port 5174), loads the labelled sample account, checks the cloud AI and opens Chrome. Sign in with `faculty.demo@finsphere.test` / `FacultyDemo@2026!` (synthetic data only). Run it again at any time: it replaces its own earlier servers and never deletes data. **`stop-demo.bat`** stops the API and web app (`stop-demo.bat -All` also stops the containers). Logs are in `%LOCALAPPDATA%\FinSphereDemo\`. Put your Groq key in `server\.env` first; if the check reports that the cloud AI is not answering, the key is missing, invalid or rate-limited and the app falls back to built-in answers. For voice use Chrome and allow the microphone. If a browser tab shows a "Failed to fetch dynamically imported module" error, press Ctrl+Shift+R.
+
 ## Start the application: three terminals
 
 Start from the root directory above in each terminal. PostgreSQL is a background Windows service, not one of these three terminals.
@@ -184,10 +188,21 @@ $env:ML_SERVICE_PORT='8000'
 # If using the already verified global environment instead: python main.py
 ```
 
+Alternatively, run analytics in Docker from the repository root instead of starting Python on the host:
+
+```powershell
+docker build -t finsphere-local-analytics -f ml_service\Dockerfile .
+docker run -d --name finsphere-local-analytics -p 127.0.0.1:8000:8000 finsphere-local-analytics
+Invoke-RestMethod http://127.0.0.1:8000/health
+```
+
+For later runs, use `docker start finsphere-local-analytics`. The API's `ML_SERVICE_URL` should point to `http://127.0.0.1:8000`.
+
 **Terminal 2: Express API** (check the database name before starting)
 
 ```powershell
 $env:IMPORT_LEGACY_JSON='false'
+$env:HOST='127.0.0.1'
 npm.cmd --prefix server start
 ```
 
@@ -224,11 +239,39 @@ Open [FinSphere locally](http://localhost:5173). Use the same hostname consisten
 
 For a new synthetic development account, register, skip or follow onboarding, then add an income and expense dated in the current month. Verify Dashboard and Transactions agree. Open Insights and select the matching month range; inspect a category to see its underlying transactions. Dates outside the selected period should produce an explicit empty-period message.
 
-For imports, paste text or upload CSV/TXT/XLS/XLSX. Images use the separate JPG/JPEG/PNG OCR step: inspect the extracted text, correct amounts/dates, then continue. **OCR does not save a transaction by itself.** Duplicate review matches counts of existing records from the same account. Review likely/possible matches and select an import policy. A stale review receives 409 and must be reviewed again; do not blindly replay import-all. The reviewed path caps candidates at 500 rows; the legacy `duplicates=allow` API path remains a documented risk.
+For PDFs, choose **Transactions → Import a statement → Upload File → Read PDF and review transactions**. Text is read in the browser; scanned pages go to the FinSphere API for OCR. Unfamiliar descriptions that the local rules can only guess at are sent (with long reference numbers masked) to the AI classifier when `GROQ_API_KEY` is configured, which suggests a category and classification from a fixed list; without a key, or if the call fails, the local rules are used. Use **All rows** to check suggested amounts, dates and categories or to edit an automatic classification. FinSphere can reuse a remembered correction or matching, consistently classified account history, and recognizes common bank descriptions such as interest, loan payments, fees and explicit transfers between your accounts. The score is a rule-based estimate, not a guarantee. You can choose an existing category, create a custom category, add missing rows, and opt to remember corrections for matching descriptions and directions on the same account and browser. PDFs are capped at 5 MB and 10 pages, and password-protected files must be unlocked first.
+
+Readable PDF rows with valid prefilled suggestions, such as **General / Income** for an unfamiliar credit, are auto-confirmed, even when the classification is low-confidence. Check those guesses under **All rows**, especially for refunds and transfers. Rows with unclear statement details, conflicting classifications, or manual edits still need confirmation or exclusion. Nothing is saved until you choose **Import** and complete any duplicate review.
+
+Separate CSV/TXT/XLS/XLSX and pasted-text imports still work as before. Images use the JPG/JPEG/PNG OCR step. If Groq is configured, the non-PDF text parsing workflow may send source text to Groq. Duplicate review matches counts of existing records from the same account. Review likely/possible matches and select an import policy; stale reviews must be checked again. The reviewed path caps candidates at 500 rows.
+
+Imported descriptions use keyword-based categories, including Food and Petrol. A person-shaped UPI payee may be guessed as P2P; this can be wrong and does not change the transaction's analytical classification. Edit a transaction to correct its category and optionally remember the full normalized merchant description for future imports. Remembered rules are scoped to the signed-in account in this browser, not synced across devices; they are sent to the API with future imports and override automatic categories for exact normalized matches. They do not update older transactions.
+
+**Account Aggregator sandbox (local development only):** Start the loopback API against a disposable development database with `NODE_ENV=development` and `FINSPHERE_AA_SANDBOX=true`. In the Vite dev app, sign in and open **Transactions → Activity → Account Aggregator Sandbox**. Approve mock consent for the built-in `DEMO-PAN-001` identity to preview fictional accounts, transactions, investments, loans and insurance. Only the separate import button writes sample bank transactions, prefixed `[Sandbox]`, to your signed-in ledger. The sample dates are fixed (March 2026); likely and possible duplicates are skipped. Do not submit a real PAN. No provider is contacted, and production does not expose the sandbox.
+
+The [standalone demo](http://localhost:5174/sandbox-demo) (adjust the port to match Vite) uses the same sample records. It needs only the Vite dev server, not a sign-in or API, and cannot import data. The account filter changes the preview only; the signed-in sandbox always imports all eligible sample rows.
 
 For the assistant, type a question such as “How much did I spend this month?” or a navigation request such as “Open transactions”. An action such as “Add a lunch expense of 450 today” must show a preview. Confirm only after checking the amount, date, account and destination. Voice uses the same proposal path. Editing the amount creates a new preview; speech recognition alone must not save anything. Text chat is the reliable fallback when microphone permissions or browser speech support fail.
 
 For Portfolio, enter a holding with invested/current values and valuation date. Zero is an explicit value. Gains are differences between entered amounts, not annualized returns or live market performance. For Financial Intelligence, use several months of synthetic history for a meaningful forecast. A one-month sample cannot establish a credible trend.
+
+In Transactions, use **Edit category / classification** on a row to correct both its spending category and how it is counted (for example, as a transfer or refund). In development with the Account Aggregator sandbox enabled, **Liabilities → Add loan from sandbox** and **Portfolio → Add holding from sandbox** preview fictional records and prefill editable forms. Only saving the form adds a record to your account. **Goals → Discuss my goals** opens Financial Intelligence, where you can review saved goal progress without running transaction analysis. **Settings → Profile → Try WebGPU capability** opens the external [WebLLM Chat demo](https://chat.webllm.ai/).
+
+The FinSphere Assistant drawer defaults to **Cloud model**. **Local model (demo)** uses the same server chat endpoint and adds a 700 ms pause after a successful response; it does not run inference on-device. Both the Assistant and Advisor already support Groq. For live cloud replies in an isolated demo, set `GROQ_API_KEY` privately in the API environment and restart the API with the same local-only configuration. An empty shell environment value overrides the value in `server/.env`. Without a working key, the app uses rule-based replies. Cloud requests can include financial context and chat messages; use synthetic records for the demo.
+
+On Windows, run `powershell.exe -NoProfile -NoExit -ExecutionPolicy Bypass -File '.\scripts\set-groq-key.ps1'` from the repository root, then paste the key at the hidden prompt. Keep the quotes around the script path so Git Bash does not strip the backslashes. The helper sets `GROQ_API_KEY` only in the new PowerShell session; it does not write files. Restart the API from that same session with your existing isolated local database settings, without overriding `GROQ_API_KEY`. Closing the session clears the key from that terminal.
+
+If you prefer editing a file, search for `GROQ_API_KEY` in your private `server/.env`. Replace the existing value, or add this line if the setting is missing:
+
+```dotenv
+GROQ_API_KEY=REPLACE_WITH_YOUR_GROQ_KEY
+```
+
+Replace the placeholder only in `server/.env`, not in this README or CI. Restart the local API without a shell override for `GROQ_API_KEY` so it uses the file.
+
+Select **Guide** beside **Chat** to let the companion follow your mouse or pen and show silent hover comments. Choose **Friendly**, **Funny**, or **Professional** under **Settings → Profile → Guide tone**. Hey“Hey FinSphere, open transactions.” Guide ignores speech that is not addressed to FinSphere, pauses the mic while processing or speaking, then listens again. Choose **End Guide** or press Escape to stop; switching tabs also ends Guide. Spoken replies prefer a female English voice if one is installed. Hover comments still work without speech support, and reduced motion turns off pointer following.
+
+If Guide cannot hear you, open the app in an up-to-date desktop Chrome tab instead of the VS Code preview, allow the microphone, and choose **Retry mic**. **Close mic panel** turns off the microphone and keeps silent hover comments on; **Guide mic** reopens the panel. **End Guide** turns off both. Comments follow the avatar and use local dashboard figures: the Balance tip compares recorded ledger balances when there is enough history, and the Cash Flow tip summarizes the latest month with data on the chart. These hover comments do not use Groq.
 
 ## Tests and build
 
@@ -299,6 +342,7 @@ The normal logs are the three running terminals; the app does not supply a centr
 | Microphone blocked / voice silent | Browser site permission, supported speech API, input device, network, secure origin | Use typed chat. Grant mic only deliberately; local browser support varies. Do not rely on live voice for the entire demo. |
 | OCR failed / too large / busy | Real JPG/PNG signature, 5 MB limit, dimensions 100–8000 px and <=20 MP; worker install; Python is unrelated | Use a clear smaller crop; wait for the queue. Two OCR jobs run, three can wait; a job/queue wait is bounded at 30 s. Reinstall server dependencies from lockfile if language data is missing. Review all extracted numbers. |
 | Import 409 vs real error | Read JSON `code`/message; stale duplicate-review digest vs account change | Stale review: refresh review and decide again. Validation 400/422: correct source; 429: wait; 5xx: inspect API log. Never bypass duplicate checks merely to hide an error. |
+| PDF import endpoint unavailable | A POST to `/api/transactions/import-reviewed-pdf` returns 404/405 instead of reaching the API route | Restart the backend from the current checkout with its existing local settings, and verify that the frontend points to it. An unauthenticated POST to the correct route returns 401 JSON. |
 | Password reset email absent | `PASSWORD_RESET_DELIVERY`, verified Resend sender, API key, reset URL, cooldown/spam folder | Production needs real delivery settings. Development-only `local` captures mail in memory at `/api/dev/password-reset-mail` from loopback; it sends no email and is refused in production. Protect reset links; see password recovery docs. |
 | Wrong API used by frontend | Network full request URL and root `VITE_API_URL` with `/api`; old build | Restart Vite after env edits; rebuild `dist` for production. No secrets belong in `VITE_` variables. |
 | Rate limits affect everyone / proxy startup error | Host's proxy topology and `TRUST_PROXY` | Use false locally, a verified hop count or valid subnet list behind a proxy. `true`, negative counts and invalid strings are refused. Do not guess a permissive setting. |

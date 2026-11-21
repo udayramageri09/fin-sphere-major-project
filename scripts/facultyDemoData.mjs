@@ -1,5 +1,5 @@
 export const DEMO_EMAIL = 'faculty.demo@finsphere.test';
-export const DEMO_NAME = 'Faculty Demo Â· Sample data';
+export const DEMO_NAME = 'Faculty Demo - Sample data';
 export function facultyDemoData(now = new Date()) {
   const transactions = [];
   // Include the current month so the dashboard has demo figures, with no future transactions.

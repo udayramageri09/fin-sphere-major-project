@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useGuardedFetch } from '../hooks/useGuardedFetch';
+import { useFinance } from '../context/FinanceContext';
+import AccountAggregatorSandbox from '../components/AccountAggregatorSandbox';
 import { localDateString } from '../utils/localDate';
 import { colorFor } from '../utils/categoryColors';
 
@@ -24,6 +26,7 @@ function amountPaise(value) {
 
 function Portfolio() {
   const { invalidateSession } = useAuth();
+  const accountAggregatorRequest = useFinance()?.accountAggregatorRequest;
   const guardedFetch = useGuardedFetch();   // names the account this tab shows; a refusal re-checks the session
   const [holdings, setHoldings] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -31,6 +34,7 @@ function Portfolio() {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [editing, setEditing] = useState(null); // null = closed; 'new' = create
+  const [showSandbox, setShowSandbox] = useState(false);
   const [form, setForm] = useState(blank);
   const [busy, setBusy] = useState(false);
   const [removing, setRemoving] = useState(null);
@@ -103,10 +107,24 @@ function Portfolio() {
   return <div className="animate-fade-in space-y-6">
     <header className="flex flex-wrap items-start justify-between gap-4">
       <div><h2 className="text-3xl font-bold tracking-tight">Your Portfolio</h2><p className="text-zinc-600 mt-2">The investments you record, valued by you in INR.</p></div>
-      <button ref={addRef} className={buttonClass} onClick={() => open(null)} disabled={loading || !!loadError || busy}>Add holding</button>
+      <div className="flex flex-wrap gap-2">
+        {import.meta.env.DEV && accountAggregatorRequest && editing === null && (
+          <button type="button" className="rounded-lg border border-zinc-300 px-4 py-3 font-semibold" aria-expanded={showSandbox} disabled={loading || !!loadError || busy} onClick={() => setShowSandbox(open => !open)}>Add holding from sandbox</button>
+        )}
+        <button ref={addRef} className={buttonClass} onClick={() => open(null)} disabled={loading || !!loadError || busy}>Add holding</button>
+      </div>
     </header>
     <p role="status" className="text-sm text-teal-800">{notice}</p>
     {loading ? <p role="status">Loading your holdings…</p> : loadError ? <div role="alert" className={panel}><p>{loadError}</p><button className={buttonClass} onClick={() => window.location.reload()}>Retry</button></div> : <>
+      {import.meta.env.DEV && accountAggregatorRequest && showSandbox && editing === null && (
+        <section className={panel} aria-label="Investment sandbox">
+          <AccountAggregatorSandbox request={accountAggregatorRequest} selection="investments" onSelect={record => {
+            open(null);
+            setForm({ name: `[Sandbox] ${record.name}`, assetClass: 'Mutual funds', invested: '40000', current: String(record.amount), valuedOn: localDateString() });
+            setShowSandbox(false);
+          }} />
+        </section>
+      )}
       {holdings.length === 0 ? <section className={panel}><h3 className="text-xl font-bold">No investment holdings yet</h3><p className="text-zinc-600 mt-2">Add an investment with its invested amount and latest value to see your portfolio. Bank statement imports do not create holdings.</p></section> : <>
         <dl className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           {[['Invested amount', money(invested)], ['Recorded current value', money(current)], ['Unrealised gain / loss', money(current - invested)]].map(([label, value]) => <div key={label} className={panel}><dt className="text-sm text-zinc-600">{label}</dt><dd className="text-2xl font-bold mt-2 break-words">{value}</dd></div>)}
@@ -128,6 +146,7 @@ function Portfolio() {
       {editing !== null && <section className={panel} aria-labelledby="holding-editor">
         <h3 id="holding-editor" className="text-xl font-bold mb-4">{editing === 'new' ? 'Add holding' : 'Edit holding'}</h3>
         <form onSubmit={submit} className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          {form.name.startsWith('[Sandbox] ') && <p className="sm:col-span-2 text-sm text-zinc-600">Fictional holding. The cost and valuation date are demo values. Review them before saving.</p>}
           <label className="sm:col-span-2">Investment name<input ref={nameRef} className={inputClass} name="name" value={form.name} onChange={update} maxLength={100} required disabled={busy} /></label>
           <label>Asset class<select className={inputClass} name="assetClass" value={form.assetClass} onChange={update} disabled={busy}>{CLASSES.map(c => <option key={c}>{c}</option>)}</select></label>
           <label>Valuation date<input className={inputClass} type="date" name="valuedOn" value={form.valuedOn} onChange={update} min="1900-01-01" max={localDateString()} required disabled={busy} /></label>

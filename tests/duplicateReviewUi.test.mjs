@@ -508,7 +508,7 @@ try {
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (url, init = {}) => {
     requests.push({ url: String(url), init });
-    if (respond && (String(url).includes('/parse-statement') || String(url).includes('/import-confirm'))) return respond(String(url), init);
+    if (respond && /\/(?:parse-statement|import-confirm|import-reviewed-pdf)\b/.test(String(url))) return respond(String(url), init);
     return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });   // the provider's own startup reads
   };
   let ctx;
@@ -522,6 +522,21 @@ try {
   const json = (status, body) => new Response(typeof body === 'string' ? body : JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
   const listReads = () => requests.filter((r) => /\/transactions$/.test(r.url) && (!r.init.method || r.init.method === 'GET')).length;
   const nodeFile = () => new globalThis.File([new Uint8Array([1, 2, 3])], 'stmt.csv', { type: 'text/csv' });
+
+  await check('reviewed PDF import reports a stale API or non-JSON response without treating it as saved', async () => {
+    requests.length = 0;
+    const importPdf = () => inAct(() => ctx.importReviewedPdf([{ title: 'Sample refund', type: 'income', amount: 25, classification: 'refund' }]));
+    respond = () => new Response('<!DOCTYPE html><title>Not found</title>', { status: 404 });
+    await assert.rejects(importPdf, /PDF import endpoint is unavailable.*Restart the FinSphere API/);
+    respond = () => new Response('<!DOCTYPE html><title>Unexpected page</title>', { status: 200 });
+    await assert.rejects(importPdf, /unexpected response \(HTTP 200\).*Check your transaction history/);
+    respond = () => json(200, {});
+    await assert.rejects(importPdf, /did not confirm the save/);
+    assert.equal(listReads(), 0, 'unconfirmed imports do not refresh as successes');
+    respond = () => json(200, { success: true, count: 1, transactions: [{ id: 'pdf-row' }] });
+    assert.equal((await importPdf()).count, 1);
+    assert.equal(listReads(), 1, 'a successful PDF import still refreshes the ledger');
+  });
 
   await check('request: every statement import asks for duplicate reporting (text and file), with the session cookie', async () => {
     requests.length = 0;

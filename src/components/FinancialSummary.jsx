@@ -1,7 +1,7 @@
 import { motion } from 'framer-motion';
 import { ArrowUpRight, ArrowDownRight, IndianRupee } from 'lucide-react';
 import { useFinance } from '../context/FinanceContext';
-import { percentChange } from '../utils/finance';
+import { percentChange, previousMonthBalance } from '../utils/finance';
 
 // Whole rupees print without decimals; anything with paise prints both digits.
 const formatCurrency = (value) => {
@@ -21,14 +21,18 @@ const formatChange = (change) => {
 };
 
 function FinancialSummary() {
-  const { balance, currentMonth, previousMonth } = useFinance();
+  const { balance, currentMonth, previousMonth, transactions = [] } = useFinance();
+  const snapshot = previousMonthBalance(transactions);
+  const balanceTip = snapshot
+    ? `On ${snapshot.date.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}, your recorded balance was ${formatCurrency(snapshot.balance)}. Now it's ${formatCurrency(balance)}.`
+    : 'This is your recorded balance, not a live bank balance. There is not enough activity for a same-day comparison with last month.';
 
   // `change` is a percentage vs last month, or null when last month has nothing to
   // compare against; `note` is a static caption for cards without a comparison.
   const stats = [
-    { label: 'Balance', value: balance, note: 'All-time money in minus money out, including transfers and refunds', icon: IndianRupee },
-    { label: 'Income This Month', value: currentMonth.income, change: percentChange(currentMonth.income, previousMonth.income), icon: ArrowUpRight },
-    { label: 'Expenses This Month', value: currentMonth.expenses, change: percentChange(currentMonth.expenses, previousMonth.expenses), icon: ArrowDownRight },
+    { label: 'Balance', value: balance, note: 'All-time money in minus money out, including transfers and refunds', icon: IndianRupee, tip: balanceTip },
+    { label: 'Income This Month', value: currentMonth.income, change: percentChange(currentMonth.income, previousMonth.income), icon: ArrowUpRight, tip: `${formatCurrency(currentMonth.income)} in recorded income this month so far. Refunds and transfers are not income.` },
+    { label: 'Expenses This Month', value: currentMonth.expenses, change: percentChange(currentMonth.expenses, previousMonth.expenses), icon: ArrowDownRight, tip: `${formatCurrency(currentMonth.expenses)} in recorded net spending this month so far, after refunds.` },
   ];
 
   return (
@@ -39,6 +43,7 @@ function FinancialSummary() {
         return (
           <motion.div
             key={stat.label}
+            data-guide-tip={stat.tip}
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ type: 'spring', damping: 20, stiffness: 100, delay: idx * 0.08 }}

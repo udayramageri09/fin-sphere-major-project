@@ -10,9 +10,12 @@ const vite = await createServer({ optimizeDeps: { noDiscovery: true, include: []
 const container = document.getElementById('root'), root = createRoot(container); let passed = 0;
 const check = (value, name) => { assert.ok(value, name); passed++; };
 const click = async b => act(async () => b.click());
-const input = async (label, value) => {
+const fieldByLabel = (label) => {
   const l = [...container.querySelectorAll('label')].find(l => l.firstChild?.textContent === label);
-  const el = l?.querySelector('input, select'); assert.ok(el, label);
+  return l?.querySelector('input, select');
+};
+const input = async (label, value) => {
+  const el = fieldByLabel(label); assert.ok(el, label);
   await act(async () => { Object.getOwnPropertyDescriptor(el.tagName === 'SELECT' ? window.HTMLSelectElement.prototype : window.HTMLInputElement.prototype, 'value').set.call(el, value); el.dispatchEvent(new window.Event(el.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true })); });
 };
 const submit = async () => act(async () => container.querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })));
@@ -29,17 +32,21 @@ try {
   await input('Description','Updated merchant'); await input('Amount (₹)','123.45'); await input('Date','2026-10-06');
   await input('Needs / Wants','Needs');
   await click([...container.querySelectorAll('input[type=checkbox]')][0]);
+  await click([...container.querySelectorAll('input[type=checkbox]')].find(el => el.parentElement.textContent.includes('Remember this category')));
   await submit();
   check(calls[0].id === t.id && calls[0].fields.title === 'Updated merchant' && calls[0].fields.amount === '123.45' && calls[0].fields.date === '2026-10-06', 'save emits editable fields for the correct transaction');
   check(!container.querySelector('form') && /Transaction saved/.test(container.textContent), 'save closes editor with success');
   const prefs = JSON.parse(window.localStorage.getItem('finsphere:spending-priorities:v1:201'));
   check(prefs.transactions[t.id] === 'Needs' && prefs.merchants['updated merchant'] === 'Needs', 'priority and merchant choices persist in account namespace');
+  const rules = JSON.parse(window.localStorage.getItem('finsphere:category-rules:v1:201'));
+  check(rules.length === 1 && rules[0].key === 'updated merchant' && rules[0].category === 'Food', 'category rule is remembered for this browser account');
+  check(window.localStorage.getItem('finsphere:category-rules:v1:202') === null, 'category rules do not cross accounts');
   await click(container.querySelector('button')); await input('Description','Discard this'); await click([...container.querySelectorAll('button')].find(b=>b.textContent==='Cancel'));
   check(calls.length===1 && !container.querySelector('form'), 'cancel never submits');
   await click(container.querySelector('button')); await input('Direction','income');
   check(!container.textContent.includes('Needs / Wants'), 'income direction hides expense priority controls');
-  check(container.querySelector('label select').value === 'income', 'direction changes');
-  check([...container.querySelectorAll('select')][1].value === 'unknown', 'direction change requires an explicit classification');
+  check(fieldByLabel('Direction').value === 'income', 'direction changes');
+  check(fieldByLabel('Classification').value === 'unknown', 'direction change requires an explicit classification');
   await input('Classification','refund'); fail=true; await submit();
   check(container.querySelector('[role=alert]').textContent === 'Server could not save' && container.querySelector('form'), 'failure retains editable form and server message');
   check(calls.at(-1).fields.classification==='refund', 'refund classification passes through');
@@ -60,7 +67,7 @@ try {
   await click(historyToggle);
   check(historyToggle.getAttribute('aria-expanded') === 'true', 'history opens');
   check(container.querySelectorAll('button[aria-label^="Edit transaction"]').length===2, 'each Activity transaction has a visible Edit control');
-  await click(container.querySelector('button[aria-label="Edit transaction Second transaction"]'));
+  await click(container.querySelector('button[aria-label="Edit transaction Second transaction: category and classification"]'));
   check(container.querySelector('form[aria-label="Edit transaction Second transaction"]'), 'Activity opens editor for chosen income transaction');
   await click([...container.querySelectorAll('button')].find(b=>b.textContent==='Cancel'));
   await click(historyToggle);

@@ -8,6 +8,18 @@ import {
   reviewDigest, digestsEqual, parseConfirmRequest, planImport
 } from '../importDuplicates.js';
 
+test('reviewed PDF classification is included in the preview and bound to its digest', () => {
+  const first = { title: 'Sample refund', amount: 25, date: '2026-03-06', type: 'income', category: 'Shopping', classification: 'refund' };
+  const results = findDuplicates([first], []);
+  const secret = 'synthetic secret';
+  const digest = reviewDigest(secret, 1, [first], results, [], true);
+  const preview = buildPreview([first], results, { digest, reviewedPdf: true });
+  assert.equal(preview.reviewedPdf, true);
+  assert.equal(preview.rows[0].classification, 'refund');
+  assert.notEqual(reviewDigest(secret, 1, [{ ...first, classification: 'income' }], results, [], true), digest);
+  assert.notEqual(reviewDigest(secret, 1, [first], results, []), digest);
+});
+
 const row = (title, amount, date = '2026-03-05', type = amount < 0 ? 'expense' : 'income', category = 'General') => ({ title, amount, date, type, category });
 const saved = (id, title, amount, date = '2026-03-05', type = amount < 0 ? 'expense' : 'income') => ({ id: String(id), title, amount, date, type });
 const tiers = (candidates, existing) => findDuplicates(candidates, existing).map((r) => r.tier);

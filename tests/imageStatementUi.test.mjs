@@ -86,8 +86,8 @@ try {
 
   await check('upload tab offers images, keeps the old formats and explains OCR and Groq', async () => {
     await openUpload();
-    assert.equal(fileInput().getAttribute('accept'), '.csv,.txt,.xls,.xlsx,.jpg,.jpeg,.png');
-    assert.match(text(), /TXT, CSV, XLS, XLSX, JPG, JPEG and PNG/);
+    assert.equal(fileInput().getAttribute('accept'), '.csv,.txt,.xls,.xlsx,.pdf,.jpg,.jpeg,.png');
+    assert.match(text(), /TXT, CSV, XLS, XLSX, PDF, JPG, JPEG and PNG/);
     const note = container.querySelector('[data-testid=ocr-privacy-note]').textContent;
     assert.match(note, /OCR on this server/);
     assert.match(note, /not stored/);

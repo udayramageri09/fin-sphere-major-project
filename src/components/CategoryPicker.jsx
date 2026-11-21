@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import './CategoryPicker.css';
 
-export default function CategoryPicker({ label, value, choices, onChange, disabled = false, compact = false, hint = 'Saved with the transaction.', actionLabel = 'Use category' }) {
+export default function CategoryPicker({ label, value, choices, onChange, disabled = false, compact = false, placeholder, hint = 'Saved with the transaction.', actionLabel = 'Use category' }) {
   const id = useId();
   const [creating, setCreating] = useState(false);
   const [draft, setDraft] = useState('');
@@ -22,7 +22,10 @@ export default function CategoryPicker({ label, value, choices, onChange, disabl
   return <div className="category-picker">
     <label htmlFor={`${id}-select`} className={compact ? 'sr-only' : 'category-picker-label'}>{label}</label>
     <div className="category-picker-row">
-      <select id={`${id}-select`} value={value} onChange={e => onChange(e.target.value)} disabled={disabled}>{available.map(name => <option key={name} value={name}>{name}</option>)}</select>
+      <select id={`${id}-select`} value={value} onChange={e => onChange(e.target.value)} disabled={disabled}>
+        {placeholder && <option value="" disabled>{placeholder}</option>}
+        {available.map(name => <option key={name} value={name}>{name}</option>)}
+      </select>
       <button type="button" ref={opener} className="category-create-button" aria-expanded={creating} aria-controls={`${id}-editor`} onClick={() => { setCreating(open => !open); setError(''); }} disabled={disabled}>+ New category</button>
     </div>
     {creating && <div id={`${id}-editor`} className="category-create-editor">

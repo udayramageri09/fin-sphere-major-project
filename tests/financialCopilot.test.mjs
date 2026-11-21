@@ -37,12 +37,16 @@ window.webkitSpeechRecognition = class {
   stop() { this.onend?.(); }
   abort() { this.aborted = true; this.onend?.(); }
 };
-const say = (transcript, confidence) => lastRecognition.onresult({ results: [[{ transcript, confidence }]] });
+const say = (transcript, confidence) => {
+  lastRecognition.onresult({ results: [Object.assign([{ transcript, confidence }], { isFinal: true })] });
+  lastRecognition.onend?.();
+};
 const recognitionError = (error) => lastRecognition.onerror({ error });
 
 // Simulated speech output: records what would be spoken; the test ends an utterance with synth.finish().
 const synth = {
   spoken: [], current: null, cancels: 0,
+  getVoices() { return []; },
   speak(u) { this.spoken.push(u.text); this.current = u; },
   cancel() { this.cancels += 1; this.current = null; },
   finish() { const u = this.current; this.current = null; u?.onend?.(); },
@@ -281,7 +285,7 @@ try {
 
   // ── Financial Companion (Issue #71) ───────────────────────────────────────────────────────────────────────────
   const launcher = () => document.querySelector('.companion-launcher');
-  const chatBtn = () => document.querySelector('.companion-chat-btn');
+  const chatBtn = () => document.querySelector('.companion-chat-btn[aria-label="Open text chat"]');
   const stage = () => document.getElementById('ai-voice-stage');
   const launcherState = () => document.querySelector('.ai-orb-button .fin-companion')?.getAttribute('data-state');
   const headerState = () => document.querySelector('.ai-chat-panel .fin-companion--header')?.getAttribute('data-state');
@@ -911,6 +915,27 @@ try {
   await act(async () => { synth.finish(); await tick(30); });
   await click(document.querySelector('.voice-stage-btn--end'));
   ok(!stage(), 'VOICE: the session ends cleanly');
+
+  const model = document.querySelector('#ai-model-mode');
+  ok(model.value === 'cloud', 'MODEL: cloud is selected by default');
+  await act(async () => {
+    model.value = 'local-demo';
+    model.dispatchEvent(new window.Event('change', { bubbles: true }));
+  });
+  reset();
+  const callsBeforeDemo = chatBodies.length;
+  const demoQuestion = 'What did I spend in the last month?';
+  let releaseDemo;
+  chatGate = { promise: new Promise((resolve) => { releaseDemo = resolve; }) };
+  await type(demoQuestion, 0);
+  ok(chatBodies.length === callsBeforeDemo + 1 && chatBodies.at(-1).messages.at(-1).content === demoQuestion
+    && !Object.hasOwn(chatBodies.at(-1), 'model'), 'MODEL: demo sends the existing chat request');
+  ok(model.disabled, 'MODEL: model selection is disabled while the request is pending');
+  const demoStart = Date.now();
+  releaseDemo();
+  chatGate = null;
+  ok(await waitFor(() => transcript().at(-1) === `B: ANSWER(${demoQuestion})`) && Date.now() - demoStart >= 700
+    && !model.disabled, 'MODEL: demo releases the reply after the simulated pause');
 
   await act(async () => { root.unmount(); });
 } finally {
