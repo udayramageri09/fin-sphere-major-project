@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "test:password-recovery": "node tests/passwordRecoveryUi.test.mjs",
     "test:image-statement": "node tests/imageStatementUi.test.mjs",
@@ -71,6 +74,6 @@
     "jsdom": "^29.1.1",
     "postcss": "^8.5.26",
     "tailwindcss": "^4.3.3",
-    "vite": "6.4.4"
+    "vite": "6.4.6"
   }
 }

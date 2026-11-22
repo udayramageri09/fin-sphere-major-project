@@ -4,10 +4,12 @@ import { once } from 'node:events';
 import { test } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import pg from 'pg';
+import { readFileSync } from 'node:fs';
+import dotenv from 'dotenv';
 
 test('sandbox requires consent and imports only authenticated, owner-scoped fixture transactions', async (t) => {
-  const url = new URL(process.env.DATABASE_URL);
-  const database = `finsphere_aa_test_${process.pid}`;
+  // Same fallback as the other database suites (e.g. holdingsServer.test.mjs): the shell value wins, else server/.env.
+  const url = new URL(process.env.DATABASE_URL ?? dotenv.parse(readFileSync(new URL('../.env', import.meta.url))).DATABASE_URL);  const database = `finsphere_aa_test_${process.pid}`;
   url.pathname = '/postgres';
   const admin = new pg.Client({ connectionString: url.toString() });
   await admin.connect();
