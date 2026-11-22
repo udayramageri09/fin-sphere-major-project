@@ -6,6 +6,7 @@
   "scripts": {
     "test:password-recovery": "node tests/passwordRecoveryUi.test.mjs",
     "test:image-statement": "node tests/imageStatementUi.test.mjs",
+    "test:pdf-statement": "node --test tests/pdfStatement.test.mjs",
     "test:statement-a11y": "node tests/statementImportA11y.test.mjs",
     "test:duplicate-review": "node tests/duplicateReviewUi.test.mjs",
     "test:analytics-ui": "node tests/spendingAnalyticsUi.test.mjs",
@@ -44,7 +45,8 @@
     "dev:5173": "vite --host localhost --port 5173 --strictPort",
     "dev:5174": "vite --host localhost --port 5174 --strictPort",
     "test:all": "node scripts/run-all-tests.mjs",
-    "test": "npm run test:all"
+    "test": "npm run test:all",
+    "verify": "node scripts/run-everything.mjs"
   },
   "dependencies": {
     "@mlc-ai/web-llm": "0.2.85",

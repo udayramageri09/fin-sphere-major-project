@@ -5,9 +5,10 @@
   "main": "server.js",
   "scripts": {
     "test:account-aggregator-sandbox": "node --test tests/accountAggregatorSandbox.test.mjs",
-  "test:ai-classify": "node --test tests/aiClassify.test.mjs",
-  "test:screen-context": "node --test tests/screenContext.test.mjs",
+    "test:ai-classify": "node --test tests/aiClassify.test.mjs",
+    "test:screen-context": "node --test tests/screenContext.test.mjs",
     "test:import-duplicates": "node --test tests/importDuplicates.test.mjs",
+    "test:merchant-categories": "node --test tests/merchantCategories.test.mjs",
     "test:import-duplicates-server": "node tests/importDuplicatesServer.test.mjs",
     "test:account-guard": "node tests/accountGuard.test.mjs",
     "test:onboarding": "node tests/onboardingServer.test.mjs",
