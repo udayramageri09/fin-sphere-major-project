@@ -7,7 +7,7 @@ name: CI
 # faculty and report-kit databases are never referenced; every database-dependent test
 # creates its own disposable, uniquely-named database on the ephemeral Postgres service
 # below and either drops it itself or lets the whole service container disappear with the
-# job. See docs/RELEASE_RUNBOOK.md for the versions this mirrors (Node 22, Python 3.12).
+# job. See docs/RELEASE_RUNBOOK.md for the versions this mirrors (Node 24 from .nvmrc, Python 3.12).
 
 on:
   push:
@@ -30,11 +30,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: package-lock.json
 
@@ -104,11 +104,11 @@ jobs:
       MAIL_USER: ''
       MAIL_PASS: ''
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: |
             server/package-lock.json
@@ -124,6 +124,11 @@ jobs:
         # installed - this is a separate package.json/package-lock.json, not covered by the step above.
         working-directory: aa_simulator
         run: npm ci
+
+      - name: AA simulator tests
+        # The simulator's own suite (aa_simulator/test). It needs no database or secrets.
+        working-directory: aa_simulator
+        run: npm test
 
       - name: Wait for PostgreSQL
         run: |
@@ -191,9 +196,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
           cache: pip
